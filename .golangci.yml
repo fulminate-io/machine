@@ -8,9 +8,6 @@ linters-settings:
     ignore-generated-header: true
     severity: warning
     rules:
-    - name: add-constant
-      severity: error
-      arguments: [{"maxLitCount": "5", "allowStrs": "\"name\",\"type\",\"value\"", "allowInts": "0,1,2", "allowFloats": "0.0,0.,1.0,1.,2.0,2.", "ignoreFuncs": "os\\.*,fmt\\.Println,make"}]
     - name: argument-limit
       severity: error
       arguments: [5]

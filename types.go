@@ -6,11 +6,10 @@ package machine
 
 import (
 	"context"
-	"log/slog"
-	"time"
-
-	"github.com/whitaker-io/machine/common"
 )
+
+// Transformation is a function that is applied to data and used for transformations
+type Transformation[T, U any] func(d T) U
 
 // Monad is a function that is applied to data and used for transformations
 type Monad[T any] func(d T) T
@@ -19,9 +18,16 @@ type Monad[T any] func(d T) T
 type Filter[T any] func(d T) bool
 
 // Edge is an interface that is used for transferring data between vertices
-type Edge[T any] interface {
-	Output() chan T
+type Edge[T, U any] interface {
+	Output() chan U
 	Send(ctx context.Context, data T)
+	Metrics() *MetricCollector
+}
+
+type edge[T, U any] struct {
+	send    func(ctx context.Context, data T)
+	output  func() chan U
+	metrics *MetricCollector
 }
 
 // Option is used to configure the machine
@@ -33,8 +39,69 @@ type option struct {
 	fn func(*config)
 }
 
+type vertex[T any] func(left, right chan T) func(ctx context.Context, data T)
+type recursiveBaseFn[T any] func(recursiveBaseFn[T]) Monad[T]
+type memoizedBaseFn[T any] func(h memoizedBaseFn[T], m map[string]T) Monad[T]
+
+// Edge is a function that is used to create an edge from the transformation
+func (x Transformation[T, U]) Edge(ctx context.Context) Edge[T, U] {
+	config := fromContext(ctx)
+	output := make(chan U)
+	return &edge[T, U]{
+		send:    func(_ context.Context, data T) { output <- x(data) },
+		output:  func() chan U { return output },
+		metrics: newCollector(config.metricsWindowSize),
+	}
+}
+
+// Edge is a function that is used to create an edge from the filter
+func (x Filter[T]) Edge(ctx context.Context) (Edge[T, T], Edge[T, T]) {
+	return x.vertex().edge(ctx)
+}
+
+func (x Filter[T]) vertex() vertex[T] {
+	return func(left, right chan T) func(ctx context.Context, data T) {
+		return func(_ context.Context, data T) {
+			if x(data) {
+				left <- data
+			} else {
+				right <- data
+			}
+		}
+	}
+}
+
+func (e *edge[T, U]) Output() chan U {
+	return e.output()
+}
+
+func (e *edge[T, U]) Send(ctx context.Context, data T) {
+	e.send(ctx, data)
+}
+
+func (e *edge[T, U]) Metrics() *MetricCollector {
+	return e.metrics
+}
+
 func (o *option) apply(c *config) {
 	o.fn(c)
+}
+
+type keyType struct{}
+
+var key keyType
+
+// ContextWithOptions returns a new context with the options applied
+func ContextWithOptions(ctx context.Context, options ...Option) context.Context {
+	config := newconfig(options...)
+	return context.WithValue(ctx, key, config)
+}
+
+func fromContext(ctx context.Context) *config {
+	if v := ctx.Value(key); v != nil {
+		return v.(*config)
+	}
+	return newconfig()
 }
 
 // OptionFIF0 controls the processing order of the datas
@@ -49,153 +116,43 @@ func OptionBufferSize(size int) Option {
 	return &option{func(c *config) { c.bufferSize = size }}
 }
 
-// OptionAttributes apply the slog.Attr's to the machine metrics and spans
-// Do not override the "name", "type", "duration", "error", or "value" attributes
-func OptionAttributes(attributes ...slog.Attr) Option {
-	return &option{func(c *config) { c.attributes = attributes }}
+// OptionMetricWindowSize sets the size of the slice holding duration metrics
+func OptionMetricWindowSize(size uint64) Option {
+	return &option{func(c *config) { c.metricsWindowSize = size }}
 }
 
-// OptionFlush attempts to send all data to the flushFN before exiting after the gracePeriod has expired
-// Im looking for a good way to make this type specific, but want to avoid having to add separate option
-// settings for the Transform function.
-func OptionFlush(gracePeriod time.Duration, flushFN func(vertexName string, payload any)) Option {
-	return &option{func(c *config) { c.flushFN = flushFN; c.gracePeriod = gracePeriod }}
-}
-
+// config is used to configure the Edges
 type config struct {
-	fifo        bool
-	bufferSize  int
-	attributes  []slog.Attr
-	gracePeriod time.Duration
-	flushFN     func(vertexName string, payload any)
+	fifo              bool
+	bufferSize        int
+	metricsWindowSize uint64
 }
 
-type vertex[T any] func(ctx context.Context, data T)
-
-type recursiveBaseFn[T any] func(recursiveBaseFn[T]) Monad[T]
-type memoizedBaseFn[T any] func(h memoizedBaseFn[T], m map[string]T) Monad[T]
-
-type monadList[T any] []Monad[T]
-type filterList[T any] []Filter[T]
-type filterComponent[T any] func(left, right chan T) vertex[T]
-
-func (x Monad[T]) component(output chan T) vertex[T] {
-	return func(_ context.Context, data T) { output <- x(data) }
-}
-func (x monadList[T]) combine() Monad[T] {
-	if len(x) == 1 {
-		return x[0]
+func newconfig(options ...Option) *config {
+	c := &config{
+		fifo:              false,
+		bufferSize:        0,
+		metricsWindowSize: 10000,
 	}
 
-	return func(data T) T {
-		return x[1:].combine()(x[0](data))
+	for _, option := range options {
+		option.apply(c)
 	}
+
+	return c
 }
 
-func (x filterList[T]) or() Filter[T] {
-	if len(x) == 1 {
-		return x[0]
-	}
-
-	return func(d T) bool {
-		return x[0](d) || x[1:].or()(d)
-	}
-}
-
-func (x filterList[T]) and() Filter[T] {
-	if len(x) == 1 {
-		return x[0]
-	}
-
-	return func(d T) bool {
-		return x[0](d) && x[1:].and()(d)
-	}
-}
-
-func (x Filter[T]) component(left, right chan T) vertex[T] {
-	return func(_ context.Context, data T) {
-		if x(data) {
-			left <- data
-		} else {
-			right <- data
+func (x vertex[T]) edge(ctx context.Context) (Edge[T, T], Edge[T, T]) {
+	config := fromContext(ctx)
+	left := make(chan T)
+	right := make(chan T)
+	return &edge[T, T]{
+			send:    x(left, right),
+			output:  func() chan T { return left },
+			metrics: newCollector(config.metricsWindowSize),
+		}, &edge[T, T]{
+			send:    x(left, right),
+			output:  func() chan T { return right },
+			metrics: newCollector(config.metricsWindowSize),
 		}
-	}
-}
-
-func (x vertex[T]) wrap(name string) vertex[T] {
-	return func(ctx context.Context, data T) {
-		start := time.Now()
-
-		spanHolder := map[string]any{}
-		c := common.Store(ctx, &spanHolder)
-		slog.LogAttrs(
-			c,
-			common.LevelTrace,
-			name,
-			slog.String("type", common.TraceStart),
-		)
-
-		slog.LogAttrs(
-			c,
-			common.LevelMetric,
-			"machine.runs",
-			slog.String("name", name),
-			slog.String("type", common.MetricInt64Counter),
-			slog.Int64("value", 1),
-		)
-
-		defer recoverFn(c, name, start)
-
-		x(c, data)
-	}
-}
-
-func (x vertex[T]) run(ctx context.Context, name string, channel chan T, option *config) {
-	h := x.wrap(name)
-
-	if option.fifo {
-		go transfer(ctx, channel, h, name, option)
-	} else {
-		go transfer(ctx, channel, func(ctx context.Context, data T) { go h(ctx, data) }, name, option)
-	}
-}
-
-func recoverFn(ctx context.Context, name string, start time.Time) {
-	var err error
-
-	duration := time.Since(start)
-	if r := recover(); r != nil {
-		err, _ = r.(error)
-		slog.LogAttrs(
-			ctx,
-			common.LevelTrace,
-			name,
-			slog.String("type", common.TraceEvent),
-			slog.Any("error", err),
-		)
-		slog.LogAttrs(
-			ctx,
-			common.LevelMetric,
-			"machine.errors",
-			slog.String("name", name),
-			slog.String("type", common.MetricInt64Counter),
-			slog.Int64("value", 1),
-		)
-	}
-
-	slog.LogAttrs(
-		ctx,
-		common.LevelMetric,
-		"machine.duration",
-		slog.String("name", name),
-		slog.String("type", common.MetricInt64Histogram),
-		slog.Int64("value", duration.Milliseconds()),
-	)
-	slog.LogAttrs(
-		ctx,
-		common.LevelTrace,
-		name,
-		slog.String("type", common.TraceEnd),
-		slog.Int64("duration", duration.Milliseconds()),
-	)
 }

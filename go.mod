@@ -1,5 +1,3 @@
-module github.com/whitaker-io/machine/v3
+module github.com/whitaker-io/machine/v4
 
-go 1.22.1
-
-require github.com/whitaker-io/machine/common v0.1.1
+go 1.24.2
