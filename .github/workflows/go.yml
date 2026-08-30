@@ -2,14 +2,14 @@ name: Go
 
 on:
   push:
-    branches: [master, v2, v3]
+    branches: [master, v2, v3, v4]
     paths:
       - "**.go"
       - "**.mod"
       - "**.sum"
       - "**.yml"
   pull_request:
-    branches: [master, v2, v3]
+    branches: [master, v2, v3, v4]
 
 jobs:
   build:
@@ -28,9 +28,9 @@ jobs:
         id: go
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v5
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.13.2
           github-token: ${{ github.token }}
           only-new-issues: true
 
