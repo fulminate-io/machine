@@ -165,3 +165,52 @@ jobs:
               exit 1
             }
           }'
+
+  # lang/analysis is a separate module for the same reason lang/ast is: a
+  # root-scoped `go list ./...` prints only the root package, so without a job of
+  # its own it would rot invisibly. It carries no cache-dependency-path because a
+  # dependency-free module has no go.sum — lang/ast arrives through a local
+  # replace — and pointing the cache at a file that does not exist fails the job
+  # rather than missing the cache.
+  lang-analysis:
+    name: lang/analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'lang/analysis/go.mod'
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+          working-directory: lang/analysis
+          args: --config ${{ github.workspace }}/.golangci.yml
+          github-token: ${{ github.token }}
+          only-new-issues: true
+      - name: Go Build
+        working-directory: lang/analysis
+        run: go build ./...
+      - name: Go Test
+        working-directory: lang/analysis
+        run: go test -timeout 600s -coverprofile=coverage.out ./...
+
+      # PROVISIONAL FLOOR. The floor is the coverage the suite actually achieves,
+      # so a change that drops below it fails here rather than surfacing later in
+      # a coverage report. This number is a placeholder that stands only until the
+      # analyzers and their tests land; it is replaced with the figure measured
+      # against this suite, never copied from the lang/ast job above.
+      - name: Enforce coverage floor
+        working-directory: lang/analysis
+        env:
+          COVERAGE_FLOOR: "50"
+        run: |
+          total=$(go tool cover -func=coverage.out | awk '$1 == "total:" { print $NF }')
+          test -n "$total" || { echo "coverage.out yielded no total line"; exit 1; }
+          echo "total statement coverage: $total"
+          awk -v got="${total%\%}" -v floor="$COVERAGE_FLOOR" 'BEGIN {
+            if (got + 0 < floor + 0) {
+              printf "coverage %s%% is below the %s%% floor\n", got, floor
+              exit 1
+            }
+          }'

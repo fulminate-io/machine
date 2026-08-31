@@ -1,0 +1,265 @@
+// Package analysis - Copyright © 2020 Jonathan Whitaker <github@whitaker.io>.
+//
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file.
+package analysis
+
+import (
+	"reflect"
+	"strings"
+	"testing"
+)
+
+// nameFact is a throwaway fact carrying one string, used to prove propagation.
+type nameFact struct{ Value string }
+
+// AFact marks nameFact as a Fact.
+func (*nameFact) AFact() {}
+
+// recorder builds an analyzer that appends its own name to a shared slice.
+func recorder(name string, seen *[]string, requires ...*Analyzer) *Analyzer {
+	return &Analyzer{
+		Name:     name,
+		Doc:      "records that it ran",
+		Requires: requires,
+		Run: func(_ *Pass) (any, error) {
+			*seen = append(*seen, name)
+			return nil, nil
+		},
+		ResultType: reflect.TypeOf((*any)(nil)).Elem(),
+	}
+}
+
+// TestDriverRunsRequiresFirst pins topological execution.
+//
+// The analyzers are handed to the driver in the order C, B, A — the exact
+// reverse of their dependency order. A driver that ran the set in the order it
+// was given would observe [C B A] and this assertion separates the two
+// implementations. Handing them over already sorted would pass against both and
+// prove nothing.
+func TestDriverRunsRequiresFirst(t *testing.T) {
+	var seen []string
+	a := recorder("A", &seen)
+	b := recorder("B", &seen, a)
+	c := recorder("C", &seen, b)
+
+	if _, err := Run(nil, []*Analyzer{c, b, a}); err != nil {
+		t.Fatalf("the driver refused an acyclic set: %v", err)
+	}
+
+	if got := strings.Join(seen, " "); got != "A B C" {
+		t.Errorf("analyzers ran in order [%s], want [A B C]", got)
+	}
+}
+
+// TestDriverRunsEachRequirementOnce pins that a diamond does not run its shared
+// prerequisite twice, which a walk without a done-marker would.
+func TestDriverRunsEachRequirementOnce(t *testing.T) {
+	var seen []string
+	base := recorder("base", &seen)
+	left := recorder("left", &seen, base)
+	right := recorder("right", &seen, base)
+	top := recorder("top", &seen, left, right)
+
+	if _, err := Run(nil, []*Analyzer{top}); err != nil {
+		t.Fatalf("the driver refused a diamond: %v", err)
+	}
+
+	var bases int
+	for _, name := range seen {
+		if name == "base" {
+			bases++
+		}
+	}
+	if bases != 1 {
+		t.Errorf("the shared prerequisite ran %d times, want 1: %v", bases, seen)
+	}
+	if seen[0] != "base" {
+		t.Errorf("the shared prerequisite ran %s first, want base: %v", seen[0], seen)
+	}
+}
+
+// TestDriverRefusesARequiresCycle pins that a cycle is a loud error naming its
+// members, not a dropped edge and not a partial run.
+//
+// Asserting only that SOME error came back would pass against a driver that
+// errors for any reason at all, so both names are required to appear in the
+// message and the diagnostics are required to be empty.
+func TestDriverRefusesARequiresCycle(t *testing.T) {
+	var seen []string
+	p := recorder("cyclic-p", &seen)
+	q := recorder("cyclic-q", &seen)
+	p.Requires = []*Analyzer{q}
+	q.Requires = []*Analyzer{p}
+
+	diags, err := Run(nil, []*Analyzer{p})
+	if err == nil {
+		t.Fatal("the driver accepted a Requires cycle")
+	}
+	for _, name := range []string{"cyclic-p", "cyclic-q"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("the cycle error does not name %s: %v", name, err)
+		}
+	}
+	if len(diags) != 0 {
+		t.Errorf("a refused run returned %d diagnostics, want none", len(diags))
+	}
+}
+
+// TestFactCrossesFileBoundary pins the half of the framework nothing else fails
+// without until the signature analyzer meets a cross-file `use`.
+//
+// P exports a fact while visiting file one; Q, which requires P, imports it while
+// visiting file two. A stubbed fact store leaves Q with nothing.
+func TestFactCrossesFileBoundary(t *testing.T) {
+	one := parseSource(t, "one.flow", "flow one\nsource ingest Poll\nsink done audit.Store from ingest\n")
+	two := parseSource(t, "two.flow", "flow two\nsource ingest Poll\nsink done audit.Store from ingest\n")
+
+	exporter := &Analyzer{
+		Name: "fact-exporter",
+		Doc:  "exports a fact about the flow declared in one.flow",
+		Run: func(p *Pass) (any, error) {
+			for _, src := range p.Sources {
+				if src.Path == "one.flow" {
+					p.ExportFact("one", &nameFact{Value: "declared in one.flow"})
+				}
+			}
+			return nil, nil
+		},
+	}
+
+	var observed string
+	importer := &Analyzer{
+		Name:     "fact-importer",
+		Doc:      "imports that fact while visiting two.flow",
+		Requires: []*Analyzer{exporter},
+		Run: func(p *Pass) (any, error) {
+			for _, src := range p.Sources {
+				if src.Path != "two.flow" {
+					continue
+				}
+				var got nameFact
+				if p.ImportFact("one", &got) {
+					observed = got.Value
+				}
+			}
+			return nil, nil
+		},
+	}
+
+	if _, err := Run([]Source{one, two}, []*Analyzer{importer}); err != nil {
+		t.Fatalf("the fact run failed: %v", err)
+	}
+	if observed != "declared in one.flow" {
+		t.Errorf("the importer observed %q, want the fact the exporter recorded", observed)
+	}
+}
+
+// TestImportFactMissesAnUnexportedObject pins the negative direction: a lookup
+// for an object nothing exported reports false and leaves the target untouched.
+//
+// Without it, "the importer observed the fact" above is satisfied by an
+// ImportFact that returns true unconditionally.
+func TestImportFactMissesAnUnexportedObject(t *testing.T) {
+	var found bool
+	var value string
+	probe := &Analyzer{
+		Name: "fact-probe",
+		Doc:  "looks for a fact nobody exported",
+		Run: func(p *Pass) (any, error) {
+			var got nameFact
+			found = p.ImportFact("nobody", &got)
+			value = got.Value
+			return nil, nil
+		},
+	}
+
+	if _, err := Run(nil, []*Analyzer{probe}); err != nil {
+		t.Fatalf("the probe run failed: %v", err)
+	}
+	if found {
+		t.Error("ImportFact reported a fact for an object nothing exported")
+	}
+	if value != "" {
+		t.Errorf("ImportFact wrote %q into the target on a miss", value)
+	}
+}
+
+// TestDriverStampsTheReportingAnalyzersName pins that Code is structural rather
+// than a convention each analyzer has to remember.
+func TestDriverStampsTheReportingAnalyzersName(t *testing.T) {
+	reporter := &Analyzer{
+		Name: "stamper",
+		Doc:  "reports one diagnostic and sets no Code",
+		Run: func(p *Pass) (any, error) {
+			p.Report(Diagnostic{Message: "something", Severity: SeverityWarning})
+			return nil, nil
+		},
+	}
+
+	diags, err := Run(nil, []*Analyzer{reporter})
+	if err != nil {
+		t.Fatalf("the reporting run failed: %v", err)
+	}
+	if len(diags) != 1 {
+		t.Fatalf("got %d diagnostics, want 1: %v", len(diags), messages(diags))
+	}
+	if diags[0].Code != "stamper" {
+		t.Errorf("the diagnostic carries Code %q, want the reporting analyzer's name", diags[0].Code)
+	}
+}
+
+// TestDriverSurfacesAnAnalyzerError pins that a failing analyzer aborts the run
+// under its own name rather than being absorbed.
+func TestDriverSurfacesAnAnalyzerError(t *testing.T) {
+	failing := &Analyzer{
+		Name: "explodes",
+		Doc:  "always fails",
+		Run:  func(_ *Pass) (any, error) { return nil, errFailing },
+	}
+
+	diags, err := Run(nil, []*Analyzer{failing})
+	if err == nil {
+		t.Fatal("the driver absorbed an analyzer failure")
+	}
+	if !strings.Contains(err.Error(), "explodes") {
+		t.Errorf("the failure does not name the analyzer: %v", err)
+	}
+	if len(diags) != 0 {
+		t.Errorf("a failed run returned %d diagnostics, want none", len(diags))
+	}
+}
+
+// TestDiagnosticsSortByPositionThenCode pins the deterministic ordering, using
+// two analyzers reporting out of position order so a run that returned arrival
+// order would be visibly different.
+func TestDiagnosticsSortByPositionThenCode(t *testing.T) {
+	late := reportAt("zebra", 40)
+	early := reportAt("alpha", 10)
+	tie := reportAt("beta", 10)
+
+	diags, err := Run(nil, []*Analyzer{late, tie, early})
+	if err != nil {
+		t.Fatalf("the ordering run failed: %v", err)
+	}
+
+	var got []string
+	for _, d := range diags {
+		got = append(got, d.Code)
+	}
+	if want := "alpha beta zebra"; strings.Join(got, " ") != want {
+		t.Errorf("diagnostics ordered [%s], want [%s]", strings.Join(got, " "), want)
+	}
+}
+
+// reportAt builds an analyzer reporting one diagnostic at a fixed offset.
+func reportAt(name string, offset int) *Analyzer {
+	return &Analyzer{
+		Name: name,
+		Doc:  "reports one diagnostic at a fixed offset",
+		Run: func(p *Pass) (any, error) {
+			p.Report(Diagnostic{Pos: position(offset), Message: name, Severity: SeverityHint})
+			return nil, nil
+		},
+	}
+}
