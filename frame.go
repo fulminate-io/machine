@@ -6,6 +6,7 @@
 package machine
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -181,6 +182,7 @@ type Frame[T any] struct {
 	payload T
 	state   *frameState
 	caps    *capabilities
+	ctx     context.Context
 }
 
 // Value returns the payload. It takes no capability, so a node declaring no state
@@ -201,6 +203,22 @@ func (f Frame[T]) Source() string { return f.state.source }
 // Node returns the name of the last node that PROCESSED the frame. A terminal that
 // only drains does not advance it.
 func (f Frame[T]) Node() string { return f.state.node }
+
+// Context returns the context THIS node execution runs under: the span context the
+// worker's guard opened for this datum at this node, descended from the context passed
+// to Start. An outbound call made with it is CANCELED when the machine's context ends,
+// and its span is parented to this node's span. Composing a per-call timeout on top of
+// it is the node's own business.
+//
+// The context is EXECUTION-SCOPED, never part of the envelope. A context does not
+// serialize, so no packet carries one: a datum arriving over a remote transport, or
+// rebuilt through RebuildPacket, runs under the RESUMING worker's context rather than
+// the one its originating process used.
+//
+// It takes no capability, joining Value, ID, Parent, Source and Node in the ungated
+// identity set, because the capability model gates STATE — Has, Get, Set, Load, Save
+// and Update.
+func (f Frame[T]) Context() context.Context { return f.ctx }
 
 // Has reports whether a declared handle currently holds a value: a stack key in
 // this frame, or a heap cell in the machine's store. It takes the read capability.
@@ -296,10 +314,11 @@ func newFrame[T any](source string, payload T, store Store) Frame[T] {
 	}
 }
 
-// rewrap carries one frame's state and capability view onto a payload of a
-// different type. It is how the runtime re-wraps a node's bare return value.
+// rewrap carries one frame's state, capability view and execution context onto a
+// payload of a different type. It is how the runtime re-wraps a node's bare return
+// value, so the frame leaving a node is the frame the node held on a new payload.
 func rewrap[T, U any](f Frame[T], payload U) Frame[U] {
-	return Frame[U]{payload: payload, state: f.state, caps: f.caps}
+	return Frame[U]{payload: payload, state: f.state, caps: f.caps, ctx: f.ctx}
 }
 
 func newID() string {

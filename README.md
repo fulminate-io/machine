@@ -209,6 +209,7 @@ The type parameter on `WithReads` / `WithWrites` cannot be inferred from a `KeyR
 | --- | --- | --- |
 | `Value()` | none | The payload. |
 | `ID()`, `Parent()`, `Source()`, `Node()` | none | Frame identity and lineage. `Parent` is empty for a frame born at a `Source`. |
+| `Context()` | none | This node execution's span context. An outbound call made with it is CANCELED when the machine stops, and its span is parented to the node's span. It is execution-scoped and never serialized: a datum resumed from a remote transport runs under the resuming worker's context. |
 | `Has(ref)` | read | Whether a declared handle currently holds a value — which is what distinguishes a handle never written from one holding the zero value. |
 | `Get(k)` | read | The stack value, or the zero value of `V` if never written. |
 | `Set(k, v)` | write | Writes a stack value. |

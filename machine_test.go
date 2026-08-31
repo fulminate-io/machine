@@ -672,6 +672,87 @@ func TestNodeDeclaringNothingSeesOnlyValue(t *testing.T) {
 	}
 }
 
+func TestNodeContextIsCancelledWhileTheNodeIsInFlight(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	inFlight := make(chan struct{})
+	observed := make(chan error, 1)
+
+	m := New("nodectx")
+	src, ingest := m.Source[int]("nodectx.source")
+	src.Map("nodectx.node", func(f Frame[int]) int {
+		close(inFlight)
+		<-f.Context().Done()
+		observed <- f.Context().Err()
+		return f.Value()
+	}).Drop("nodectx.drop")
+
+	startMachine(t, ctx, m)
+	feed(t, ctx, ingest, 1, 1)
+
+	// The known positive: the body really ran and really is parked on Done, so what is
+	// observed below is the machine's cancellation rather than a node that never started.
+	awaitSignal(t, "the node body reached its context", inFlight)
+	cancel()
+
+	err := await(t, "the in-flight node observed cancellation", observed)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("the in-flight node observed %v, want %v", err, context.Canceled)
+	}
+}
+
+func TestNodeDeclaringNothingReachesEveryUngatedIdentityAccessor(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type surface struct {
+		id, parent, source, node string
+		nodeCtx                  context.Context
+	}
+	seen := make(chan surface, 1)
+	errs := make(chan NodeError[int], 1)
+
+	m := New("ungated")
+	src, ingest := m.Source[int]("ungated.source")
+	src.Map("ungated.node", func(f Frame[int]) int {
+		seen <- surface{
+			id: f.ID(), parent: f.Parent(), source: f.Source(), node: f.Node(), nodeCtx: f.Context(),
+		}
+		return f.Value()
+	}, WithErrorHandler(func(e NodeError[int]) { errs <- e })).Drop("ungated.drop")
+
+	startMachine(t, ctx, m)
+	feed(t, ctx, ingest, 1, 1)
+
+	got := await(t, "the node read the ungated identity surface", seen)
+	if got.id == "" {
+		t.Fatal("ID returned an empty identifier")
+	}
+	if got.parent != "" {
+		t.Fatalf("Parent returned %q for a frame born at a Source, want empty", got.parent)
+	}
+	if got.source != "ungated.source" {
+		t.Fatalf("Source returned %q, want ungated.source", got.source)
+	}
+	if got.node != "ungated.node" {
+		t.Fatalf("Node returned %q, want ungated.node", got.node)
+	}
+	if got.nodeCtx == nil {
+		t.Fatal("Context returned nil; the runtime did not attach the datum's context at dispatch")
+	}
+	select {
+	case <-got.nodeCtx.Done():
+		t.Fatal("the datum's context was already done while the node held it")
+	default:
+	}
+	select {
+	case e := <-errs:
+		t.Fatalf("a node declaring no capabilities raised %v", e.Err)
+	default:
+	}
+}
+
 func TestHasDistinguishesUnwrittenFromZero(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

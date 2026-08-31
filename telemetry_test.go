@@ -220,6 +220,47 @@ func TestSpanPerNodeExecutionCarriesIdentityAttributes(t *testing.T) {
 	}
 }
 
+func TestOutboundSpanIsParentedToTheNodeSpan(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// The SAME provider is handed to the machine and to the node body's outbound tracer,
+	// so both spans land in one recorder and the parentage below is observed rather than
+	// inferred. newProbe cannot be used here because it does not expose its provider.
+	spans := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans))
+	p := &probe{spans: spans}
+
+	const outbound = "probe.outbound"
+	m := New(probeMachine, WithTracerProvider(provider))
+	src, ingest := m.Source[int](probeSource, WithEdge(Channel[int](16)))
+	src.Map(probeNode, func(f Frame[int]) int {
+		_, span := provider.Tracer("outbound").Start(f.Context(), outbound)
+		span.End()
+		return f.Value()
+	}, WithEdge(Channel[int](16))).Drop(probeOut, WithEdge(Channel[int](16)))
+
+	startMachine(t, ctx, m)
+	feed(t, ctx, ingest, 1, 1)
+
+	child := awaitSpan(t, p, outbound)
+	parent := awaitSpan(t, p, probeNode)
+
+	// Not vacuous: an unparented child reports an all-zero parent SpanID, and an invalid
+	// node SpanID is all-zero too, so without this the two would compare equal.
+	if !parent.SpanContext().SpanID().IsValid() {
+		t.Fatalf("the %s span carries an invalid SpanID, so the comparison below proves nothing", probeNode)
+	}
+	if child.Parent().SpanID() != parent.SpanContext().SpanID() {
+		t.Fatalf("the outbound span's parent is %s, want the node span %s",
+			child.Parent().SpanID(), parent.SpanContext().SpanID())
+	}
+	if child.SpanContext().TraceID() != parent.SpanContext().TraceID() {
+		t.Fatalf("the outbound span rides trace %s, want the node span's trace %s",
+			child.SpanContext().TraceID(), parent.SpanContext().TraceID())
+	}
+}
+
 func TestRunsCounterAndDurationHistogramRecorded(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

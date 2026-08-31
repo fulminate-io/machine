@@ -209,12 +209,15 @@ func (w *worker[I]) bind(p Packet[I]) Frame[I] {
 // value is preserved rather than flattened to a string, so a handler can recover a
 // typed error such as *CapabilityError with errors.As.
 //
-// Being the universal per-datum path, it is also the span boundary. The order in the
-// deferred block is load-bearing: dispatch, then the frame state is released, and
+// Being the universal per-datum path, it is also the span boundary AND the one place
+// the datum's execution context is stamped onto the frame — the frame is guard's own
+// by-value copy, so the stamp reaches the node function and nothing else. The order in
+// the deferred block is load-bearing: dispatch, then the frame state is released, and
 // only then finish, which ends the span — so an ended span orders an outside reader
 // after the reclaim.
 func (w *worker[I]) guard(ctx context.Context, f Frame[I], fn func(ctx context.Context, f Frame[I])) {
 	spanCtx, span := w.record.instruments.start(ctx)
+	f.ctx = spanCtx
 	started := time.Now()
 	defer func() {
 		if r := recover(); r != nil {
