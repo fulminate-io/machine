@@ -223,7 +223,10 @@ func recoverPanic(t *testing.T, what string, fn func()) any {
 // closableEdge is an inbound transport whose channel the test closes. It is how a node
 // meets a CLOSED inbound channel rather than a cancelled context: the two are separate
 // exits from the read loop and only cancellation is reachable through the machine.
-type closableEdge[T any] struct{ ch chan Frame[T] }
+type closableEdge[T any] struct {
+	ch   chan Frame[T]
+	stop sync.Once
+}
 
 func (*closableEdge[T]) Start(context.Context) error { return nil }
 
@@ -237,7 +240,7 @@ func (e *closableEdge[T]) Send(ctx context.Context, frame Frame[T]) error {
 }
 
 func (e *closableEdge[T]) Receive() <-chan Frame[T] { return e.ch }
-func (e *closableEdge[T]) Close() error             { close(e.ch); return nil }
+func (e *closableEdge[T]) Close() error             { e.stop.Do(func() { close(e.ch) }); return nil }
 
 // readLoopGoroutines counts the goroutines currently inside a worker's read loop, read
 // out of a full stack dump. A read loop that RETURNS leaves nothing else observable
@@ -256,7 +259,7 @@ func readLoopGoroutines() int {
 }
 
 func TestSendUnblocksOnCancel(t *testing.T) {
-	edge, err := Channel[int](0)("cancel")
+	edge, err := Channel[int](0)("cancel", func(context.Context, error) {})
 	if err != nil {
 		t.Fatalf("channel factory: %v", err)
 	}
@@ -278,7 +281,7 @@ func TestSendUnblocksOnCancel(t *testing.T) {
 }
 
 func TestChannelEdgeBufferAcceptsWithoutReader(t *testing.T) {
-	edge, err := Channel[int](2)("buffered")
+	edge, err := Channel[int](2)("buffered", func(context.Context, error) {})
 	if err != nil {
 		t.Fatalf("channel factory: %v", err)
 	}
@@ -1195,7 +1198,7 @@ func TestEmitFailureRoutesToTheNodesHandler(t *testing.T) {
 	// is raised on the If node's own emit path rather than inside its filter.
 	taken, skipped := src.If("emit-failure.branch", func(Frame[int]) bool { return true },
 		WithErrorHandler(func(e NodeError[int]) { errs <- e }))
-	taken.Drop("emit-failure.dead", WithEdge[int](func(string) (Edge[int], error) {
+	taken.Drop("emit-failure.dead", WithEdge[int](func(string, Report) (Edge[int], error) {
 		return &failingEdge[int]{ch: make(chan Frame[int]), err: refused}, nil
 	}))
 	skipped.Drop("emit-failure.skipped")
@@ -1232,7 +1235,7 @@ func TestReadLoopReturnsWhenItsInboundChannelCloses(t *testing.T) {
 	m := New("closed-inbound")
 	// The source owns the ONLY read loop in this machine: a terminal declared with Output
 	// has none, so the count below names one loop unambiguously.
-	src, ingest := m.Source[int]("closed-inbound.source", WithEdge[int](func(string) (Edge[int], error) {
+	src, ingest := m.Source[int]("closed-inbound.source", WithEdge[int](func(string, Report) (Edge[int], error) {
 		return inbound, nil
 	}))
 	out := src.Output("closed-inbound.out", WithEdge(Channel[int](4)))

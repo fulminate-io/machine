@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -19,20 +20,21 @@ func passThrough(f Frame[int]) int { return f.Value() }
 // failingFactory is an EdgeFactory that never produces an edge, which leaves the node
 // it was given to without a transport.
 func failingFactory[T any](err error) EdgeFactory[T] {
-	return func(string) (Edge[T], error) { return nil, err }
+	return func(string, Report) (Edge[T], error) { return nil, err }
 }
 
 // haltingEdge refuses to come up: Start returns an error rather than nil, which is the
 // failure Machine.Start surfaces from startEdges before it spawns anything.
 type haltingEdge[T any] struct {
-	ch  chan Frame[T]
-	err error
+	ch   chan Frame[T]
+	err  error
+	stop sync.Once
 }
 
 func (e *haltingEdge[T]) Start(context.Context) error        { return e.err }
 func (*haltingEdge[T]) Send(context.Context, Frame[T]) error { return nil }
 func (e *haltingEdge[T]) Receive() <-chan Frame[T]           { return e.ch }
-func (e *haltingEdge[T]) Close() error                       { close(e.ch); return nil }
+func (e *haltingEdge[T]) Close() error                       { e.stop.Do(func() { close(e.ch) }); return nil }
 
 func TestSecondStartIsRefused(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -166,7 +168,7 @@ func TestStartReportsAnEdgeThatRefusesToComeUp(t *testing.T) {
 
 	refused := errors.New("edge refused to come up")
 	m := New("halting")
-	src, _ := m.Source[int]("halting.source", WithEdge[int](func(string) (Edge[int], error) {
+	src, _ := m.Source[int]("halting.source", WithEdge[int](func(string, Report) (Edge[int], error) {
 		return &haltingEdge[int]{ch: make(chan Frame[int]), err: refused}, nil
 	}))
 	src.Drop("halting.drop")

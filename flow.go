@@ -117,13 +117,18 @@ func newWorker[I any](m *Machine, name string, opts ...NodeOption[I]) *worker[I]
 	}
 	w := &worker[I]{machine: m, name: name, handler: cfg.handler, caps: newCapabilities(name, cfg)}
 	w.record = m.register(name)
-	edge, err := cfg.factory(name)
+	edge, err := cfg.factory(name, w.report)
 	if err != nil {
 		m.fail(fmt.Errorf("machine: the edge factory for node %q failed: %w", name, err))
 		return w
 	}
 	w.edge = edge
 	m.addEdge(edge.Start)
+	m.addCloser(func(ctx context.Context) {
+		if failure := edge.Close(); failure != nil {
+			w.report(ctx, fmt.Errorf("machine: closing the edge for node %q: %w", name, failure))
+		}
+	})
 	return w
 }
 
@@ -238,6 +243,16 @@ func (w *worker[I]) dispatch(ctx context.Context, err NodeError[I]) {
 		return
 	}
 	global(NodeError[any]{Node: err.Node, Err: err.Err, Payload: err.Payload, Panic: err.Panic})
+}
+
+// report is the edge's half of the error contract, handed to every EdgeFactory. An
+// edge-originated failure has no datum to attribute, so the NodeError carries the zero
+// payload and Panic is false; routing below this point is the node's own dispatch,
+// unchanged, which is what makes an edge failure and a node failure land in the same
+// handler.
+func (w *worker[I]) report(ctx context.Context, err error) {
+	var zero I
+	w.dispatch(ctx, NodeError[I]{Node: w.name, Err: err, Payload: zero, Panic: false})
 }
 
 func (w *worker[I]) emit(ctx context.Context, out *emitter[I], f Frame[I]) {

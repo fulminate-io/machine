@@ -63,3 +63,54 @@ jobs:
           coverage-reports: "coverage.out"
           force-coverage-parser: go
           language: go
+
+  # The edge modules are SEPARATE Go modules: a root-scoped `go list ./...` prints only
+  # the root package, which is the exact mechanism by which they rotted against v3
+  # invisibly. They get a job each so that cannot happen again.
+  edge-http:
+    name: edge/http
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'edge/http/go.mod'
+          cache-dependency-path: 'edge/http/go.sum'
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+          working-directory: edge/http
+          args: --config ${{ github.workspace }}/.golangci.yml
+          github-token: ${{ github.token }}
+          only-new-issues: true
+      - name: Go Build
+        working-directory: edge/http
+        run: go build ./...
+      - name: Go Test
+        working-directory: edge/http
+        run: go test -timeout 600s ./...
+
+  edge-pubsub:
+    name: edge/pubsub
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'edge/pubsub/go.mod'
+          cache-dependency-path: 'edge/pubsub/go.sum'
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+          working-directory: edge/pubsub
+          args: --config ${{ github.workspace }}/.golangci.yml
+          github-token: ${{ github.token }}
+          only-new-issues: true
+      - name: Go Build
+        working-directory: edge/pubsub
+        run: go build ./...
+      - name: Go Test
+        working-directory: edge/pubsub
+        run: go test -timeout 600s ./...

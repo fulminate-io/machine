@@ -33,6 +33,7 @@ type Machine struct {
 	nodes     map[string]*node
 	order     []*node
 	edges     []func(ctx context.Context) error
+	closers   []func(ctx context.Context)
 	checks    []func() error
 }
 
@@ -176,6 +177,14 @@ func (m *Machine) addEdge(start func(ctx context.Context) error) {
 	m.edges = append(m.edges, start)
 }
 
+// addCloser registers an edge teardown to run when the machine's context ends. It
+// mirrors addEdge, which registers the matching bring-up.
+func (m *Machine) addCloser(closer func(ctx context.Context)) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	m.closers = append(m.closers, closer)
+}
+
 func (m *Machine) addCheck(check func() error) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
@@ -203,7 +212,27 @@ func (m *Machine) Start(ctx context.Context) error {
 		return err
 	}
 	m.spawn(ctx)
+	go m.shutdown(ctx)
 	return nil
+}
+
+// shutdown closes every constructed edge once the machine's context ends. Machine
+// shutdown IS context cancellation: Start is the only lifecycle entry, so there is no
+// Stop to call and no exported method is added here.
+//
+// Each closer runs under a context DERIVED FROM the canceled one with its cancellation
+// stripped, because a transport's own teardown — draining a subscription, shutting an
+// http server — needs a live context to do the work being asked of it.
+func (m *Machine) shutdown(ctx context.Context) {
+	<-ctx.Done()
+	m.mutex.Lock()
+	closers := make([]func(ctx context.Context), len(m.closers))
+	copy(closers, m.closers)
+	m.mutex.Unlock()
+	teardown := context.WithoutCancel(ctx)
+	for _, closer := range closers {
+		closer(teardown)
+	}
 }
 
 func (m *Machine) begin() error {
