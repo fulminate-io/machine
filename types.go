@@ -27,6 +27,3 @@ type Duplicator[T any] func(d T) (a, b T)
 // Ingest submits a payload into the Source that returned it. Returning does not
 // mean the datum has finished traversing the graph.
 type Ingest[T any] func(ctx context.Context, payload T) error
-
-type recursiveBaseFn[T any] func(recursiveBaseFn[T]) Monad[T]
-type memoizedBaseFn[T any] func(h memoizedBaseFn[T], m map[string]T) Monad[T]

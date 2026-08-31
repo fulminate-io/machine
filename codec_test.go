@@ -35,11 +35,11 @@ var (
 	codecUnregistered = NewKey("codec.unregistered", func(v unregisteredValue) unregisteredValue { return v })
 )
 
-// codecFixture builds the frame both codecs are driven with. It goes through
-// RebuildFrame rather than a running machine, because a codec is off the node path.
-func codecFixture(t *testing.T) Frame[string] {
+// codecFixture builds the packet both codecs are driven with. It goes through
+// RebuildPacket rather than a running machine, because a codec is off the node path.
+func codecFixture(t *testing.T) Packet[string] {
 	t.Helper()
-	frame, err := RebuildFrame(FrameData{
+	packet, err := RebuildPacket(FrameData{
 		ID:     "id-1",
 		Parent: "id-0",
 		Source: "src",
@@ -52,7 +52,7 @@ func codecFixture(t *testing.T) Frame[string] {
 	if err != nil {
 		t.Fatalf("building the codec fixture failed: %v", err)
 	}
-	return frame
+	return packet
 }
 
 // jsonCodec is the KNOWN-NEGATIVE, and the only JSON-shaped codec in this repo. It
@@ -60,21 +60,21 @@ func codecFixture(t *testing.T) Frame[string] {
 // to demonstrate the loss GobCodec's doc comment describes.
 type jsonCodec[T any] struct{}
 
-func (jsonCodec[T]) Marshal(frame Frame[T]) ([]byte, error) {
-	return json.Marshal(envelope[T]{Frame: frame.Data(), Payload: frame.Value()})
+func (jsonCodec[T]) Marshal(packet Packet[T]) ([]byte, error) {
+	return json.Marshal(envelope[T]{Frame: packet.Data(), Payload: packet.Value()})
 }
 
-func (jsonCodec[T]) Unmarshal(data []byte) (Frame[T], error) {
+func (jsonCodec[T]) Unmarshal(data []byte) (Packet[T], error) {
 	var body envelope[T]
 	if err := json.Unmarshal(data, &body); err != nil {
-		return Frame[T]{}, err
+		return Packet[T]{}, err
 	}
-	return RebuildFrame(body.Frame, body.Payload)
+	return RebuildPacket(body.Frame, body.Payload)
 }
 
-// TestGobCodecPreservesStackValueTypes reads the restored values through Data() rather
-// than Get(): a rebuilt frame carries no capability view, so Get would panic in the
-// capability check instead of reporting on the codec.
+// TestGobCodecPreservesStackValueTypes reads the restored values through Data(): a
+// packet has no gated accessor at all, so the projection is the only way to see the
+// restored stack values, and it is the surface a remote transport actually uses.
 func TestGobCodecPreservesStackValueTypes(t *testing.T) {
 	gob.Register(trailStep{})
 	codec := GobCodec[string]{}
@@ -110,13 +110,13 @@ func TestGobCodecPreservesStackValueTypes(t *testing.T) {
 	}
 }
 
-func assertLineage(t *testing.T, frame Frame[string]) {
+func assertLineage(t *testing.T, packet Packet[string]) {
 	t.Helper()
 	for _, check := range []struct{ name, got, want string }{
-		{"ID", frame.ID(), "id-1"},
-		{"Parent", frame.Parent(), "id-0"},
-		{"Source", frame.Source(), "src"},
-		{"Node", frame.Node(), "n1"},
+		{"ID", packet.ID(), "id-1"},
+		{"Parent", packet.Parent(), "id-0"},
+		{"Source", packet.Source(), "src"},
+		{"Node", packet.Node(), "n1"},
 	} {
 		if check.got != check.want {
 			t.Errorf("%s came back as %q, want %q", check.name, check.got, check.want)
@@ -152,7 +152,7 @@ func TestJSONShapedCodecLosesStackValueTypes(t *testing.T) {
 }
 
 func TestGobCodecMarshalReportsAnUnregisteredStackValue(t *testing.T) {
-	frame, err := RebuildFrame(FrameData{
+	packet, err := RebuildPacket(FrameData{
 		ID:     "id-2",
 		Source: "src",
 		Node:   "n1",
@@ -162,7 +162,7 @@ func TestGobCodecMarshalReportsAnUnregisteredStackValue(t *testing.T) {
 		t.Fatalf("building the unregistered fixture failed: %v", err)
 	}
 
-	if _, err = (GobCodec[string]{}).Marshal(frame); err == nil {
+	if _, err = (GobCodec[string]{}).Marshal(packet); err == nil {
 		t.Fatal("marshalling an unregistered stack value succeeded, so gob refused nothing")
 	}
 	if !strings.Contains(err.Error(), `encoding frame "id-2" failed`) {

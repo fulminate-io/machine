@@ -7,6 +7,10 @@
 // value is both halves of a one-way hop: Send publishes the marshaled envelope to a
 // topic, and a subscription delivers a peer's message into the node this edge feeds.
 //
+// This transport traffics in machine.Packet and never in machine.Frame. The runtime
+// converts on the way out and mints the receiving node's frame on the way in, so nothing
+// here can reach a node's capability-gated state.
+//
 // A TRANSPORT FAILURE LANDS IN ONE OF TWO PLACES, AND THEY ARE DIFFERENT NODES. A
 // PUBLISH failure is returned from Send and dispatched by the SENDING worker, so it is
 // attributed to the node that produced the datum. A RECEIVE-side refusal, and a
@@ -24,7 +28,7 @@
 //
 // Trace context rides the message attributes, injected by Send and extracted by the
 // subscription callback through the propagator resolved from the OpenTelemetry global at
-// each point of use. No trace field is added to the frame projection.
+// each point of use. No trace field is added to the packet projection.
 package pubsub
 
 import (
@@ -54,7 +58,7 @@ func WithCodec[T any](codec machine.Codec[T]) Option[T] {
 
 // WithBuffer sets the depth of the inbound channel the subscription delivers into. It
 // defaults to zero, an unbuffered handoff, so a slow node exerts backpressure on the
-// callback rather than accumulating frames.
+// callback rather than accumulating packets.
 func WithBuffer[T any](buffer int) Option[T] {
 	return func(s *settings[T]) { s.buffer = buffer }
 }
@@ -64,7 +68,7 @@ type Edge[T any] struct {
 	publisher  *pubsub.Publisher
 	subscriber *pubsub.Subscriber
 	settings   settings[T]
-	in         chan machine.Frame[T]
+	in         chan machine.Packet[T]
 	done       chan struct{}
 	once       sync.Once
 	mutex      sync.Mutex
@@ -83,7 +87,7 @@ func New[T any](client *pubsub.Client, topic, subscription string, options ...Op
 		publisher:  client.Publisher(topic),
 		subscriber: client.Subscriber(subscription),
 		settings:   config,
-		in:         make(chan machine.Frame[T], config.buffer),
+		in:         make(chan machine.Packet[T], config.buffer),
 		done:       make(chan struct{}),
 	}
 }
@@ -146,7 +150,7 @@ func (e *Edge[T]) consume(ctx context.Context, node string, report machine.Repor
 // follows because it is what stops an undecodable message returning forever.
 func (e *Edge[T]) accept(inner context.Context, node string, report machine.Report, message *pubsub.Message) {
 	ctx := otel.GetTextMapPropagator().Extract(inner, propagation.MapCarrier(message.Attributes))
-	frame, err := e.settings.codec.Unmarshal(message.Data)
+	packet, err := e.settings.codec.Unmarshal(message.Data)
 	if err != nil {
 		report(ctx, fmt.Errorf("machine/edge/pubsub: node %q refused an inbound message: %w", node, err))
 		message.Ack()
@@ -154,20 +158,20 @@ func (e *Edge[T]) accept(inner context.Context, node string, report machine.Repo
 	}
 	message.Ack()
 	select {
-	case e.in <- frame:
+	case e.in <- packet:
 	case <-ctx.Done():
 	case <-e.done:
 	}
 }
 
-// Send marshals the frame, injects the caller's trace context into the message
+// Send marshals the packet, injects the caller's trace context into the message
 // attributes and publishes it. NOTHING IN THIS FILE PANICS: a failure is returned to the
 // emitter, whose worker dispatches it as a node failure of the SENDING node.
-func (e *Edge[T]) Send(ctx context.Context, frame machine.Frame[T]) error {
+func (e *Edge[T]) Send(ctx context.Context, packet machine.Packet[T]) error {
 	node, _ := e.bound()
-	body, err := e.settings.codec.Marshal(frame)
+	body, err := e.settings.codec.Marshal(packet)
 	if err != nil {
-		return fmt.Errorf("machine/edge/pubsub: marshaling a frame for %q failed: %w", node, err)
+		return fmt.Errorf("machine/edge/pubsub: marshaling a packet for %q failed: %w", node, err)
 	}
 	// The attribute map is built FRESH on every send: Inject writes into the carrier, and
 	// injecting into a nil map panics.
@@ -180,7 +184,7 @@ func (e *Edge[T]) Send(ctx context.Context, frame machine.Frame[T]) error {
 }
 
 // Receive hands the runtime the channel the subscription delivers into.
-func (e *Edge[T]) Receive() <-chan machine.Frame[T] { return e.in }
+func (e *Edge[T]) Receive() <-chan machine.Packet[T] { return e.in }
 
 // Close is idempotent, as the machine.Edge contract requires. It does NOT close the
 // inbound channel: a delivery already in flight would then send on a closed channel.

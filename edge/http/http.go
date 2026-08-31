@@ -5,9 +5,13 @@
 
 // Package http is the HTTP transport for a machine edge. One Edge value is BOTH halves
 // of a one-way hop: Send POSTs the marshaled envelope to a peer, and ServeHTTP accepts a
-// peer's POST and delivers the rebuilt frame into the node this edge feeds. It is a
-// one-way hop rather than a remote call, because a response body cannot carry the frame
+// peer's POST and delivers the rebuilt packet into the node this edge feeds. It is a
+// one-way hop rather than a remote call, because a response body cannot carry the packet
 // of a datum that is still traveling.
+//
+// This transport traffics in machine.Packet and never in machine.Frame. The runtime
+// converts on the way out and mints the receiving node's frame on the way in, so nothing
+// here can reach a node's capability-gated state.
 //
 // A TRANSPORT FAILURE LANDS IN ONE OF TWO PLACES, AND THEY ARE DIFFERENT NODES. A SEND
 // failure is returned to the emitter and dispatched by the SENDING worker, so it is
@@ -16,15 +20,15 @@
 // DELIVERS INTO. A user who registers an error handler on the wrong one of those two
 // nodes sees silence, so the choice is worth making deliberately.
 //
-// A refused frame is consequently loud on both sides: ServeHTTP reports the refusal
+// A refused packet is consequently loud on both sides: ServeHTTP reports the refusal
 // locally AND answers 400, and the peer's Send turns that 400 into an error its own
-// supervisor routes. Those are two distinct true facts — "I refused an inbound frame"
-// and "my peer refused my frame" — which in a distributed deployment are observed in two
+// supervisor routes. Those are two distinct true facts — "I refused an inbound packet"
+// and "my peer refused my packet" — which in a distributed deployment are observed in two
 // different processes.
 //
 // Trace context crosses the boundary in the request headers, injected by Send and
 // extracted by ServeHTTP through the propagator resolved from the OpenTelemetry global
-// at each point of use. No trace field is added to the frame projection.
+// at each point of use. No trace field is added to the packet projection.
 package http
 
 import (
@@ -87,7 +91,7 @@ func WithMaxBody[T any](maxBody int64) Option[T] {
 type Edge[T any] struct {
 	target   string
 	settings settings[T]
-	in       chan machine.Frame[T]
+	in       chan machine.Packet[T]
 	done     chan struct{}
 	once     sync.Once
 	mutex    sync.Mutex
@@ -105,7 +109,7 @@ func New[T any](target string, options ...Option[T]) *Edge[T] {
 	return &Edge[T]{
 		target:   target,
 		settings: config,
-		in:       make(chan machine.Frame[T], config.buffer),
+		in:       make(chan machine.Packet[T], config.buffer),
 		done:     make(chan struct{}),
 	}
 }
@@ -152,13 +156,13 @@ func (e *Edge[T]) Start(ctx context.Context) error {
 	return nil
 }
 
-// Send marshals the frame, injects the caller's trace context into the request headers
+// Send marshals the packet, injects the caller's trace context into the request headers
 // and POSTs it. NOTHING IN THIS FILE PANICS: a failure is returned to the emitter, whose
 // worker dispatches it as a node failure of the SENDING node.
-func (e *Edge[T]) Send(ctx context.Context, frame machine.Frame[T]) error {
-	body, err := e.settings.codec.Marshal(frame)
+func (e *Edge[T]) Send(ctx context.Context, packet machine.Packet[T]) error {
+	body, err := e.settings.codec.Marshal(packet)
 	if err != nil {
-		return fmt.Errorf("machine/edge/http: marshaling a frame for %s failed: %w", e.target, err)
+		return fmt.Errorf("machine/edge/http: marshaling a packet for %s failed: %w", e.target, err)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, e.target, bytes.NewReader(body))
 	if err != nil {
@@ -168,7 +172,7 @@ func (e *Edge[T]) Send(ctx context.Context, frame machine.Frame[T]) error {
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(request.Header))
 	response, err := e.settings.client.Do(request)
 	if err != nil {
-		return fmt.Errorf("machine/edge/http: posting a frame to %s failed: %w", e.target, err)
+		return fmt.Errorf("machine/edge/http: posting a packet to %s failed: %w", e.target, err)
 	}
 	defer func() { _, _ = io.Copy(io.Discard, response.Body); _ = response.Body.Close() }()
 	return e.accepted(response)
@@ -181,12 +185,12 @@ func (e *Edge[T]) accepted(response *http.Response) error {
 		return nil
 	}
 	detail, _ := io.ReadAll(io.LimitReader(response.Body, maxDetail))
-	return fmt.Errorf("machine/edge/http: %s refused the frame: %s: %s",
+	return fmt.Errorf("machine/edge/http: %s refused the packet: %s: %s",
 		e.target, response.Status, strings.TrimSpace(string(detail)))
 }
 
 // Receive hands the runtime the channel ServeHTTP delivers into.
-func (e *Edge[T]) Receive() <-chan machine.Frame[T] { return e.in }
+func (e *Edge[T]) Receive() <-chan machine.Packet[T] { return e.in }
 
 // Close is idempotent, as the machine.Edge contract requires. It does NOT close the
 // inbound channel: a delivery already in flight would then send on a closed channel.
@@ -194,7 +198,7 @@ func (e *Edge[T]) Close() error { e.shut(); return nil }
 
 func (e *Edge[T]) shut() { e.once.Do(func() { close(e.done) }) }
 
-// ServeHTTP accepts a peer's POST and delivers the rebuilt frame into the node this edge
+// ServeHTTP accepts a peer's POST and delivers the rebuilt packet into the node this edge
 // feeds. It EXTRACTS the peer's trace context FIRST, so a read failure or a codec
 // refusal is already reported under the peer's trace id.
 func (e *Edge[T]) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -209,27 +213,27 @@ func (e *Edge[T]) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		e.refuse(ctx, writer, node, report, err)
 		return
 	}
-	frame, err := e.settings.codec.Unmarshal(body)
+	packet, err := e.settings.codec.Unmarshal(body)
 	if err != nil {
 		e.refuse(ctx, writer, node, report, err)
 		return
 	}
-	e.deliver(ctx, writer, frame)
+	e.deliver(ctx, writer, packet)
 }
 
 // refuse is loud on both sides: the local supervisor hears it attributed to the
 // RECEIVING node, and the peer hears it as the 400 its own Send turns into an error.
 func (*Edge[T]) refuse(ctx context.Context, writer http.ResponseWriter, node string,
 	report machine.Report, err error) {
-	report(ctx, fmt.Errorf("machine/edge/http: node %q refused an inbound frame: %w", node, err))
+	report(ctx, fmt.Errorf("machine/edge/http: node %q refused an inbound packet: %w", node, err))
 	http.Error(writer, err.Error(), http.StatusBadRequest)
 }
 
-// deliver hands the frame to the node, or answers 503 if the request or the edge ends
+// deliver hands the packet to the node, or answers 503 if the request or the edge ends
 // first. Nothing is retained for redelivery: that is the broker's or the user's concern.
-func (e *Edge[T]) deliver(ctx context.Context, writer http.ResponseWriter, frame machine.Frame[T]) {
+func (e *Edge[T]) deliver(ctx context.Context, writer http.ResponseWriter, packet machine.Packet[T]) {
 	select {
-	case e.in <- frame:
+	case e.in <- packet:
 		writer.WriteHeader(http.StatusAccepted)
 	case <-ctx.Done():
 		http.Error(writer, ctx.Err().Error(), http.StatusServiceUnavailable)

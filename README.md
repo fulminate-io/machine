@@ -80,9 +80,12 @@ Three types carry the whole API.
 | --- | --- |
 | `Machine` | The supervisor. Owns the node registry, the heap store, the telemetry handles and the declaration errors. Its exported method set is deliberately closed at `Host`, `Name`, `Source` and `Start`. |
 | `Flow[T, U]` | A declared node's outbound handle — `T` is the source payload type, `U` the current one. It holds only the machine and the emitter, so it is cheap to pass by value. |
-| `Frame[T]` | The envelope. It **wraps** the payload rather than traveling beside it, so a node function takes `Frame[T]` and returns a bare payload. |
+| `Frame[T]` | The **node-facing** envelope. It **wraps** the payload rather than traveling beside it, so a node function takes `Frame[T]` and returns a bare payload. |
+| `Packet[T]` | The **edge-facing** envelope. It carries identity, lineage and the serializable projection of the datum's stack state, and no capability-gated accessor at all. |
 
-A node function cannot drop the frame by ignoring it and cannot forge one — the runtime re-wraps the returned payload onto the same frame state. There is no exported frame constructor other than `RebuildFrame`, which a remote transport uses to restore one from the wire.
+A node function cannot drop the frame by ignoring it and cannot forge one — the runtime re-wraps the returned payload onto the same frame state. There is no exported frame constructor at all.
+
+`Frame` and `Packet` are one state seen from two sides. The runtime converts a frame to a packet when it hands a datum to an edge, and mints a fresh frame carrying the **receiving** node's declared capability view when a packet arrives. That conversion is unexported, so a node cannot obtain a packet and an edge never sees a frame. For a channel edge the packet wraps the same state pointer and costs nothing; the projection is built only when a remote codec asks for it.
 
 Declaration is lazy and `Start` does the real work: it validates the whole graph, joins **every** declaration error rather than reporting the first, brings up every edge, and only then spawns the nodes. A mis-declared graph is inert rather than half-running.
 
@@ -97,13 +100,11 @@ Every builder method takes a node name. Names are unique per machine — a dupli
 | Method | Effect |
 | --- | --- |
 | `Map[V](name, fn, opts...)` | Applies `fn` to each frame and forwards the transformed payload, changing the flow's payload type. |
-| `Recurse(name, fn, opts...)` | Applies a recursive function to the payload through a Y combinator. |
-| `Memoize(name, fn, index, opts...)` | As `Recurse`, plus a per-datum cache keyed by `index`. |
 | `If(name, fn, opts...)` | Splits the flow in two, routing the **intact** frame down one branch. |
 | `Tee(name, fn, opts...)` | Duplicates the flow, deep-copying the envelope into both branches. |
 | `Send(target)` | Merges this flow into the same consumer `target` already feeds. This is how a cycle closes. |
 | `Drop(name, opts...)` | Terminates the flow, discarding each frame and reclaiming its stack state. |
-| `Output(name, opts...)` | Terminal consumption surface: returns `<-chan Frame[U]`. Does not process, so it does not advance the frame's `Node` stamp. |
+| `Output(name, opts...)` | Terminal consumption surface: returns `<-chan Packet[U]`. Does not process, so it does not advance the datum's `Node` stamp. |
 
 #### Branching
 
@@ -142,31 +143,28 @@ Feeding `0` into that graph yields `5`.
 
 #### Recursion
 
-`Recurse` and `Memoize` drive a Y combinator. The function you supply receives the recursive continuation wrapped in a frame carrying the same state and capability view, and returns the body to apply. To advance the recursion you hand the continuation a frame carrying the next payload, which `RebuildFrame` builds from the current frame's projection:
+Recursion is plain Go inside a `Map` body: declare a closure and call it. There is no recursion builder, because none is needed — the frame stays the runtime's, so declared handles keep working from inside the recursion exactly as they do anywhere else in the body.
+
+Memoization is yours to place. A map closed over by the body memoizes **within one datum**; a heap `Cell` memoizes **across data**.
 
 ```golang
-// step hands the recursive continuation a frame carrying the next payload.
-func step(next machine.Monad[int], from machine.Frame[int], payload int) int {
-	advanced, err := machine.RebuildFrame(from.Data(), payload)
-	if err != nil {
-		return 0
-	}
-	return next(advanced)
-}
-
-out := src.Memoize("fib", func(f machine.Frame[machine.Monad[int]]) machine.Monad[int] {
-	next := f.Value()
-	return func(inner machine.Frame[int]) int {
-		n := inner.Value()
+out := src.Map("fib", func(f machine.Frame[int]) int {
+	cache := map[int]int{}
+	var fib func(int) int
+	fib = func(n int) int {
+		if seen, ok := cache[n]; ok {
+			return seen
+		}
 		if n < 2 {
+			cache[n] = n
 			return n
 		}
-		return step(next, inner, n-1) + step(next, inner, n-2)
+		cache[n] = fib(n-1) + fib(n-2)
+		return cache[n]
 	}
-}, strconv.Itoa).Output("out")
+	return fib(f.Value())
+}).Output("out")
 ```
-
-`RebuildFrame` restores lineage and declared stack values, but the frame it returns carries no capability view, so a recursion body that reaches a declared handle must do so through the frame the runtime handed it rather than through one it built.
 
 ------
 
@@ -211,7 +209,6 @@ The type parameter on `WithReads` / `WithWrites` cannot be inferred from a `KeyR
 | --- | --- | --- |
 | `Value()` | none | The payload. |
 | `ID()`, `Parent()`, `Source()`, `Node()` | none | Frame identity and lineage. `Parent` is empty for a frame born at a `Source`. |
-| `Data()` | none | The serializable projection of the frame's **stack** state. |
 | `Has(ref)` | read | Whether a declared handle currently holds a value — which is what distinguishes a handle never written from one holding the zero value. |
 | `Get(k)` | read | The stack value, or the zero value of `V` if never written. |
 | `Set(k, v)` | write | Writes a stack value. |
@@ -328,21 +325,26 @@ A transport is any implementation of `Edge[T]`, constructed by an `EdgeFactory[T
 ```golang
 type Edge[T any] interface {
 	Start(ctx context.Context) error
-	Send(ctx context.Context, frame Frame[T]) error
-	Receive() <-chan Frame[T]
+	Send(ctx context.Context, packet Packet[T]) error
+	Receive() <-chan Packet[T]
 	Close() error
 }
 
 type EdgeFactory[T any] func(node string, report Report) (Edge[T], error)
+
+type Codec[T any] interface {
+	Marshal(packet Packet[T]) ([]byte, error)
+	Unmarshal(data []byte) (Packet[T], error)
+}
 ```
 
 `EdgeFactory` is a function type rather than an interface because Go forbids type parameters on interface methods. It is handed a `Report` — the path by which an edge hands the supervisor a failure that has **no datum to attribute**, such as a refused inbound message or a broken connection. `Close` must be idempotent: the runtime closes every constructed edge at shutdown and a caller may close one directly as well.
 
-Edges carry `Frame` values rather than bare payloads, because the execution state must travel with the datum. A remote transport marshals it with a `Codec`, and the shipped default is `GobCodec[T]` — gob rather than JSON because a stack value travels as an interface value, and JSON restores every number as `float64` and every struct as a map, which the receiving node's typed `Get` then fails on. A value type outside gob's built-ins must be `gob.Register`'d before it crosses a remote edge; gob's own error at marshal time is the enforcement.
+Edges carry `Packet` values rather than bare payloads, because the execution state must travel with the datum. A packet offers `Value()`, `ID()`, `Parent()`, `Source()`, `Node()` and `Data()`, and nothing else — it has no capability-gated accessor, so a transport cannot reach a node's state. `RebuildPacket` is the only exported way to make one, and it takes a wire projection rather than a frame. A remote transport marshals a packet with a `Codec`, and the shipped default is `GobCodec[T]` — gob rather than JSON because a stack value travels as an interface value, and JSON restores every number as `float64` and every struct as a map, which the receiving node's typed `Get` then fails on. A value type outside gob's built-ins must be `gob.Register`'d before it crosses a remote edge; gob's own error at marshal time is the enforcement.
 
 #### edge/http
 
-`github.com/whitaker-io/machine/edge/http`. One `Edge` value is **both halves** of a one-way hop: `Send` POSTs the marshaled envelope to a peer, and `ServeHTTP` accepts a peer's POST and delivers the rebuilt frame into the node this edge feeds. It is a one-way hop rather than a remote call, because a response body cannot carry the frame of a datum that is still traveling.
+`github.com/whitaker-io/machine/edge/http`. One `Edge` value is **both halves** of a one-way hop: `Send` POSTs the marshaled envelope to a peer, and `ServeHTTP` accepts a peer's POST and delivers the rebuilt packet into the node this edge feeds. It is a one-way hop rather than a remote call, because a response body cannot carry the packet of a datum that is still traveling.
 
 ```golang
 edge := http.New[Order]("https://peer.internal/orders")
@@ -356,7 +358,7 @@ src.Map("remote", handle, machine.WithEdge(edge.Factory()))
 
 Options: `WithCodec` (defaults to `machine.GobCodec[T]{}`), `WithClient` (defaults to `http.DefaultClient`), `WithBuffer` (defaults to an unbuffered handoff) and `WithMaxBody` (defaults to 4 MiB).
 
-A refused frame is loud on both sides: `ServeHTTP` reports the refusal locally **and** answers 400, and the peer's `Send` turns that 400 into an error its own supervisor routes. Trace context crosses in the request headers, injected by `Send` and extracted by `ServeHTTP`.
+A refused packet is loud on both sides: `ServeHTTP` reports the refusal locally **and** answers 400, and the peer's `Send` turns that 400 into an error its own supervisor routes. Trace context crosses in the request headers, injected by `Send` and extracted by `ServeHTTP`.
 
 #### edge/pubsub
 
@@ -368,7 +370,7 @@ edge := pubsub.New[Order](client, "orders-topic", "orders-subscription")
 src.Map("remote", handle, machine.WithEdge(edge.Factory()))
 ```
 
-Options: `WithCodec` and `WithBuffer`, which defaults to an unbuffered handoff so a slow node exerts backpressure on the callback rather than accumulating frames.
+Options: `WithCodec` and `WithBuffer`, which defaults to an unbuffered handoff so a slow node exerts backpressure on the callback rather than accumulating packets.
 
 A refused message is reported and then **settled**. The report is the point; the acknowledgement is what stops the broker redelivering a message nothing in this process can ever decode. It is deliberately not nacked: with no redelivery limit a poison message would return forever. Nothing here retries, backs off or redelivers — those are the broker's and your concerns. Trace context rides the message attributes.
 

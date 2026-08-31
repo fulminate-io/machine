@@ -60,8 +60,10 @@ func WithWrites[T any](refs ...KeyRef) NodeOption[T] {
 	return func(c *nodeConfig[T]) { c.writes = append(c.writes, refs...) }
 }
 
-// runner processes one datum for a node.
-type runner[I any] func(ctx context.Context, f Frame[I])
+// runner processes one datum for a node. It takes the PACKET the edge delivered; the
+// frame is minted inside the node's own bind, so the capability view a node sees is
+// always the one it declared.
+type runner[I any] func(ctx context.Context, p Packet[I])
 
 // emitter is a node's outbound hook. Because a node owns its inbound edge, an
 // emitter is bound only once the downstream node is declared, which is why the
@@ -94,10 +96,11 @@ func (e *emitter[T]) bind(consumer string, edge Edge[T]) {
 	e.consumer = consumer
 }
 
-// send clears the frame's capability view on the way out, so state access is
-// possible only inside a node that declared it.
+// send is the frame boundary on the way out: it converts to a packet, which carries no
+// capability view and declares no gated accessor, so state access is possible only
+// inside a node that declared it.
 func (e *emitter[T]) send(ctx context.Context, f Frame[T]) error {
-	return e.edge.Send(ctx, Frame[T]{payload: f.payload, state: f.state})
+	return e.edge.Send(ctx, packetOf(f))
 }
 
 // worker is the shared per-node runtime every builder method drives.
@@ -160,11 +163,11 @@ func (w *worker[I]) readLoop(ctx context.Context, run runner[I]) {
 		select {
 		case <-ctx.Done():
 			return
-		case f, ok := <-in:
+		case p, ok := <-in:
 			if !ok {
 				return
 			}
-			w.step(ctx, sem, run, f)
+			w.step(ctx, sem, run, p)
 		}
 	}
 }
@@ -172,30 +175,32 @@ func (w *worker[I]) readLoop(ctx context.Context, run runner[I]) {
 // step dispatches one datum: inline under FIFO, through the semaphore when bounded,
 // and as a bare goroutine when unbounded, which is the default and the prior
 // behavior.
-func (w *worker[I]) step(ctx context.Context, sem chan struct{}, run runner[I], f Frame[I]) {
+func (w *worker[I]) step(ctx context.Context, sem chan struct{}, run runner[I], p Packet[I]) {
 	if w.machine.cfg.fifo {
-		run(ctx, f)
+		run(ctx, p)
 		return
 	}
 	if sem == nil {
-		go run(ctx, f)
+		go run(ctx, p)
 		return
 	}
 	sem <- struct{}{}
 	go func() {
 		defer func() { <-sem }()
-		run(ctx, f)
+		run(ctx, p)
 	}()
 }
 
-// bind is the state handoff, and the ONLY place a node is given reach into state.
-// It stamps the node name, attaches THIS node's capability view and attaches the
-// machine's private heap store. A frame that was never bound has a nil capability
-// view, so every gated accessor fails loudly.
-func (w *worker[I]) bind(f Frame[I]) Frame[I] {
-	f.state.node = w.name
-	f.state.store = w.machine.cfg.store
-	return Frame[I]{payload: f.payload, state: f.state, caps: w.caps}
+// bind is the MINT: it turns the packet the edge delivered into the frame this node
+// sees, and it is the ONLY place a node is given reach into state. It stamps the node
+// name, attaches THIS node's capability view and attaches the machine's private heap
+// store, so the view a frame carries is the receiving node's declared one regardless of
+// where the packet came from. A frame that was never bound has a nil capability view,
+// so every gated accessor fails loudly.
+func (w *worker[I]) bind(p Packet[I]) Frame[I] {
+	p.state.node = w.name
+	p.state.store = w.machine.cfg.store
+	return Frame[I]{payload: p.payload, state: p.state, caps: w.caps}
 }
 
 // guard is the panic boundary and runs for every datum in every node kind. It
@@ -208,7 +213,7 @@ func (w *worker[I]) bind(f Frame[I]) Frame[I] {
 // deferred block is load-bearing: dispatch, then the frame state is released, and
 // only then finish, which ends the span — so an ended span orders an outside reader
 // after the reclaim.
-func (w *worker[I]) guard(ctx context.Context, f Frame[I], fn runner[I]) {
+func (w *worker[I]) guard(ctx context.Context, f Frame[I], fn func(ctx context.Context, f Frame[I])) {
 	spanCtx, span := w.record.instruments.start(ctx)
 	started := time.Now()
 	defer func() {
@@ -266,8 +271,8 @@ func (w *worker[I]) emit(ctx context.Context, out *emitter[I], f Frame[I]) {
 // frame state: the runtime owns frame propagation, so a node can neither drop the
 // frame nor forge one.
 func (w *worker[I]) transform[O any](out *emitter[O], fn func(f Frame[I]) O) runner[I] {
-	return func(ctx context.Context, f Frame[I]) {
-		w.guard(ctx, w.bind(f), func(spanCtx context.Context, inner Frame[I]) {
+	return func(ctx context.Context, p Packet[I]) {
+		w.guard(ctx, w.bind(p), func(spanCtx context.Context, inner Frame[I]) {
 			next := rewrap(inner, fn(inner))
 			if err := out.send(spanCtx, next); err != nil {
 				w.dispatch(spanCtx, NodeError[I]{Node: w.name, Err: err, Payload: inner.Value()})
@@ -277,8 +282,8 @@ func (w *worker[I]) transform[O any](out *emitter[O], fn func(f Frame[I]) O) run
 }
 
 func (w *worker[I]) route(onTrue, onFalse *emitter[I], fn Filter[I]) runner[I] {
-	return func(ctx context.Context, f Frame[I]) {
-		w.guard(ctx, w.bind(f), func(spanCtx context.Context, inner Frame[I]) {
+	return func(ctx context.Context, p Packet[I]) {
+		w.guard(ctx, w.bind(p), func(spanCtx context.Context, inner Frame[I]) {
 			out := onFalse
 			if fn(inner) {
 				out = onTrue
@@ -289,8 +294,8 @@ func (w *worker[I]) route(onTrue, onFalse *emitter[I], fn Filter[I]) runner[I] {
 }
 
 func (w *worker[I]) split(onLeft, onRight *emitter[I], fn Duplicator[I]) runner[I] {
-	return func(ctx context.Context, f Frame[I]) {
-		w.guard(ctx, w.bind(f), func(spanCtx context.Context, inner Frame[I]) {
+	return func(ctx context.Context, p Packet[I]) {
+		w.guard(ctx, w.bind(p), func(spanCtx context.Context, inner Frame[I]) {
 			left, right := fn(inner.Value())
 			w.emit(spanCtx, onLeft, Frame[I]{payload: left, state: inner.state.clone()})
 			w.emit(spanCtx, onRight, Frame[I]{payload: right, state: inner.state.clone()})
@@ -299,8 +304,8 @@ func (w *worker[I]) split(onLeft, onRight *emitter[I], fn Duplicator[I]) runner[
 }
 
 func (w *worker[I]) drain() runner[I] {
-	return func(ctx context.Context, f Frame[I]) {
-		w.guard(ctx, w.bind(f), func(_ context.Context, inner Frame[I]) {
+	return func(ctx context.Context, p Packet[I]) {
+		w.guard(ctx, w.bind(p), func(_ context.Context, inner Frame[I]) {
 			inner.state.release()
 		})
 	}
@@ -327,13 +332,33 @@ func (m *Machine) Source[T any](name string, opts ...NodeOption[T]) (Flow[T, T],
 		go w.readLoop(ctx, w.transform(out, func(f Frame[T]) T { return f.Value() }))
 	}
 	ingest := func(ctx context.Context, payload T) error {
-		return w.edge.Send(ctx, newFrame(name, payload, m.cfg.store))
+		return w.edge.Send(ctx, packetOf(newFrame(name, payload, m.cfg.store)))
 	}
 	return Flow[T, T]{machine: m, out: out}, ingest
 }
 
 // Map applies fn to each frame and forwards the transformed payload, changing the
 // flow's payload type. V is inferred from the transformation.
+//
+// Map is also where recursion lives. Recursion is plain Go inside the body: declare
+// a recursive closure over the payload and call it. The frame stays the runtime's,
+// so declared handles keep working inside the recursion exactly as they do in any
+// other Map body.
+//
+//	.Map("walk", func(f machine.Frame[*tree]) *tree {
+//		var visit func(n *node) *node
+//		visit = func(n *node) *node {
+//			if n == nil {
+//				return nil
+//			}
+//			n.left, n.right = visit(n.left), visit(n.right)
+//			return n
+//		}
+//		return &tree{root: visit(f.Value().root)}
+//	})
+//
+// Memoization is the caller's: a map closed over by the body memoizes within one
+// datum, and a heap Cell memoizes across data.
 func (f Flow[T, U]) Map[V any](name string, fn Transformation[U, V], opts ...NodeOption[U]) Flow[T, V] {
 	w := newWorker[U](f.machine, name, opts...)
 	f.out.bind(name, w.edge)
@@ -342,35 +367,6 @@ func (f Flow[T, U]) Map[V any](name string, fn Transformation[U, V], opts ...Nod
 		go w.readLoop(ctx, w.transform(out, fn))
 	}
 	return Flow[T, V]{machine: f.machine, out: out}
-}
-
-// Recurse applies a recursive function to the payload through a Y Combinator. The
-// recursive continuation arrives wrapped in a frame carrying the same state and
-// capability view, so the recursion body can still reach declared handles.
-func (f Flow[T, U]) Recurse(name string, fn Monad[Monad[U]], opts ...NodeOption[U]) Flow[T, U] {
-	g := func(h recursiveBaseFn[U]) Monad[U] {
-		return func(inner Frame[U]) U {
-			return fn(rewrap(inner, h(h)))(inner)
-		}
-	}
-	return f.Map(name, Transformation[U, U](g(g)), opts...)
-}
-
-// Memoize applies a recursive function through a Y Combinator and memoizes the
-// results per datum, keyed by the index function.
-func (f Flow[T, U]) Memoize(name string, fn Monad[Monad[U]], index func(U) string, opts ...NodeOption[U]) Flow[T, U] {
-	g := func(h memoizedBaseFn[U], cache map[string]U) Monad[U] {
-		return func(inner Frame[U]) U {
-			id := index(inner.Value())
-			if seen, ok := cache[id]; ok {
-				return seen
-			}
-			cache[id] = fn(rewrap(inner, h(h, cache)))(inner)
-			return cache[id]
-		}
-	}
-	p := Monad[U](func(inner Frame[U]) U { return g(g, map[string]U{})(inner) })
-	return f.Map(name, Transformation[U, U](p), opts...)
 }
 
 // If splits the flow, routing the INTACT frame down one branch: no copy and no
@@ -430,10 +426,16 @@ func (f Flow[T, U]) Drop(name string, opts ...NodeOption[U]) {
 }
 
 // Output is the terminal consumption surface: it hands the caller the channel of
-// frames leaving the flow. Frames reaching it belong to the CALLER and are NOT
-// reclaimed. Output does not process, so it does not advance the frame's Node stamp
+// packets leaving the flow. Packets reaching it belong to the CALLER and are NOT
+// reclaimed. Output does not process, so it does not advance the datum's Node stamp
 // and has no read loop of its own.
-func (f Flow[T, U]) Output(name string, opts ...NodeOption[U]) <-chan Frame[U] {
+//
+// It hands back the edge's own channel, so what leaves the flow is what the edge
+// carried: a packet, with the identity accessors and the projection and no reach into
+// state. That is not a narrowing — a frame leaving a flow never carried a capability
+// view either, so every gated accessor on it panicked; the difference is that the call
+// now fails to compile instead.
+func (f Flow[T, U]) Output(name string, opts ...NodeOption[U]) <-chan Packet[U] {
 	w := newWorker[U](f.machine, name, opts...)
 	f.out.bind(name, w.edge)
 	if w.edge == nil {

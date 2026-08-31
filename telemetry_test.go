@@ -122,7 +122,7 @@ func spanNames(spans []sdktrace.ReadOnlySpan) []string {
 // straightPipeline declares the graph the telemetry tests drive: an ingestion node,
 // one identity Map and a terminal Output, buffered so a test can feed before it
 // drains.
-func straightPipeline(m *Machine) (Ingest[int], <-chan Frame[int]) {
+func straightPipeline(m *Machine) (Ingest[int], <-chan Packet[int]) {
 	src, ingest := m.Source[int](probeSource, WithEdge(Channel[int](16)))
 	out := src.Map(probeNode, func(f Frame[int]) int { return f.Value() },
 		WithEdge(Channel[int](16))).Output(probeOut, WithEdge(Channel[int](16)))
@@ -133,14 +133,14 @@ func straightPipeline(m *Machine) (Ingest[int], <-chan Frame[int]) {
 // its PRODUCER fail on the send path, which is the failure class guard's recover
 // never sees and dispatch does.
 type failingEdge[T any] struct {
-	ch   chan Frame[T]
+	ch   chan Packet[T]
 	err  error
 	stop sync.Once
 }
 
-func (*failingEdge[T]) Start(context.Context) error            { return nil }
-func (e *failingEdge[T]) Send(context.Context, Frame[T]) error { return e.err }
-func (e *failingEdge[T]) Receive() <-chan Frame[T]             { return e.ch }
+func (*failingEdge[T]) Start(context.Context) error             { return nil }
+func (e *failingEdge[T]) Send(context.Context, Packet[T]) error { return e.err }
+func (e *failingEdge[T]) Receive() <-chan Packet[T]             { return e.ch }
 func (e *failingEdge[T]) Close() error                         { e.stop.Do(func() { close(e.ch) }); return nil }
 
 // awaitSpan waits for a node to END a span and returns it. A span ends in guard's
@@ -348,7 +348,7 @@ func TestSendErrorIsRecordedAndRouted(t *testing.T) {
 	// raised by its PRODUCER on the send path — the class guard's recover never sees.
 	src.Map(probeNode, func(f Frame[int]) int { return f.Value() },
 		WithEdge[int](func(string, Report) (Edge[int], error) {
-			return &failingEdge[int]{ch: make(chan Frame[int]), err: refused}, nil
+			return &failingEdge[int]{ch: make(chan Packet[int]), err: refused}, nil
 		})).Drop(probeOut, WithEdge(Channel[int](16)))
 
 	startMachine(t, ctx, m)

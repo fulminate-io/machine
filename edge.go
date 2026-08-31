@@ -15,10 +15,15 @@ import (
 // refusal rather than a silent drop: a closed edge has nobody left to deliver to.
 var ErrEdgeClosed = errors.New("machine: the edge is closed")
 
-// Edge is the transport seam. Edges carry Frame values rather than bare payloads,
+// Edge is the transport seam. Edges carry Packet values rather than bare payloads,
 // because the execution state must travel with the datum; the in-memory channel
-// edge passes the frame by reference, and a remote transport marshals it with a
+// edge passes the packet by reference, and a remote transport marshals it with a
 // Codec. A node owns its INBOUND edge, selected with WithEdge.
+//
+// An edge never sees a Frame. The runtime converts on the way out, stripping the
+// capability view as it goes, and on the way in it mints a fresh frame carrying the
+// RECEIVING node's declared capability view. A transport therefore has no reach into
+// state at all: it holds an identity view and a projection, and nothing else.
 //
 // Close must be idempotent. The runtime closes every constructed edge when the
 // machine's context ends, and a caller may close one directly as well, so the
@@ -26,8 +31,8 @@ var ErrEdgeClosed = errors.New("machine: the edge is closed")
 // way io.Closer leaves it.
 type Edge[T any] interface {
 	Start(ctx context.Context) error
-	Send(ctx context.Context, frame Frame[T]) error
-	Receive() <-chan Frame[T]
+	Send(ctx context.Context, packet Packet[T]) error
+	Receive() <-chan Packet[T]
 	Close() error
 }
 
@@ -49,17 +54,17 @@ type Report func(ctx context.Context, err error)
 // on interface methods, so no interface can express a generic constructor.
 type EdgeFactory[T any] func(node string, report Report) (Edge[T], error)
 
-// Codec marshals and unmarshals a Frame for a remote transport. It is stated in
-// terms of Frame rather than a bare payload because the execution state must cross
-// the wire with the datum: an implementation projects the state with Frame.Data and
-// restores it with RebuildFrame.
+// Codec marshals and unmarshals a Packet for a remote transport. It is stated in
+// terms of Packet rather than a bare payload because the execution state must cross
+// the wire with the datum: an implementation projects the state with Packet.Data and
+// restores it with RebuildPacket.
 type Codec[T any] interface {
-	Marshal(frame Frame[T]) ([]byte, error)
-	Unmarshal(data []byte) (Frame[T], error)
+	Marshal(packet Packet[T]) ([]byte, error)
+	Unmarshal(data []byte) (Packet[T], error)
 }
 
 type channelEdge[T any] struct {
-	ch   chan Frame[T]
+	ch   chan Packet[T]
 	stop sync.Once
 	done chan struct{}
 }
@@ -69,19 +74,19 @@ type channelEdge[T any] struct {
 // each transport that buffers sets its own depth where the edge is constructed.
 func Channel[T any](buffer int) EdgeFactory[T] {
 	return func(_ string, _ Report) (Edge[T], error) {
-		return &channelEdge[T]{ch: make(chan Frame[T], buffer), done: make(chan struct{})}, nil
+		return &channelEdge[T]{ch: make(chan Packet[T], buffer), done: make(chan struct{})}, nil
 	}
 }
 
 func (*channelEdge[T]) Start(_ context.Context) error { return nil }
 
-// Send blocks until the frame is accepted, the context is done or the edge closes. The
+// Send blocks until the packet is accepted, the context is done or the edge closes. The
 // leading non-blocking select is what makes a closed edge REFUSE rather than probably
 // refuse: with the done arm only in the main select, a closed edge that still has spare
 // buffer offers two ready arms and Go chooses uniformly, so it silently accepts about
 // half of everything offered into a channel nobody will read. The done arm stays in the
 // main select too, so a producer already parked there is released when the edge closes.
-func (c *channelEdge[T]) Send(ctx context.Context, frame Frame[T]) error {
+func (c *channelEdge[T]) Send(ctx context.Context, packet Packet[T]) error {
 	select {
 	case <-c.done:
 		return ErrEdgeClosed
@@ -92,14 +97,14 @@ func (c *channelEdge[T]) Send(ctx context.Context, frame Frame[T]) error {
 		return ctx.Err()
 	case <-c.done:
 		return ErrEdgeClosed
-	case c.ch <- frame:
+	case c.ch <- packet:
 		return nil
 	}
 }
 
-func (c *channelEdge[T]) Receive() <-chan Frame[T] { return c.ch }
+func (c *channelEdge[T]) Receive() <-chan Packet[T] { return c.ch }
 
-// Close signals the refusal rather than closing the frame channel: a producer racing
+// Close signals the refusal rather than closing the packet channel: a producer racing
 // shutdown would panic on a send to a closed channel, and the sync.Once is what makes
 // the second close the interface documents a no-op.
 func (c *channelEdge[T]) Close() error {

@@ -30,10 +30,10 @@ type envelope[T any] struct {
 // enforcement.
 type GobCodec[T any] struct{}
 
-// Marshal projects the frame's stack state beside its payload and encodes both as one
+// Marshal projects the packet's stack state beside its payload and encodes both as one
 // self-contained gob stream.
-func (GobCodec[T]) Marshal(frame Frame[T]) ([]byte, error) {
-	body := envelope[T]{Frame: frame.Data(), Payload: frame.Value()}
+func (GobCodec[T]) Marshal(packet Packet[T]) ([]byte, error) {
+	body := envelope[T]{Frame: packet.Data(), Payload: packet.Value()}
 	var sink bytes.Buffer
 	if err := gob.NewEncoder(&sink).Encode(body); err != nil {
 		return nil, fmt.Errorf("machine: encoding frame %q failed: %w", body.Frame.ID, err)
@@ -41,12 +41,12 @@ func (GobCodec[T]) Marshal(frame Frame[T]) ([]byte, error) {
 	return sink.Bytes(), nil
 }
 
-// Unmarshal decodes a gob stream and rebuilds the frame, so a projection naming an
-// undeclared stack key is refused by RebuildFrame rather than here.
-func (GobCodec[T]) Unmarshal(data []byte) (Frame[T], error) {
+// Unmarshal decodes a gob stream and rebuilds the packet, so a projection naming an
+// undeclared stack key is refused by RebuildPacket rather than here.
+func (GobCodec[T]) Unmarshal(data []byte) (Packet[T], error) {
 	var body envelope[T]
 	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&body); err != nil {
-		return Frame[T]{}, fmt.Errorf("machine: decoding a frame failed: %w", err)
+		return Packet[T]{}, fmt.Errorf("machine: decoding a frame failed: %w", err)
 	}
-	return RebuildFrame(body.Frame, body.Payload)
+	return RebuildPacket(body.Frame, body.Payload)
 }

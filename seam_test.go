@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // reportingEdge wraps a channel edge, keeps the Report the factory handed it and
@@ -41,11 +42,11 @@ func reportingFactory(hold **reportingEdge) EdgeFactory[int] {
 
 func (e *reportingEdge) Start(ctx context.Context) error { return e.inner.Start(ctx) }
 
-func (e *reportingEdge) Send(ctx context.Context, frame Frame[int]) error {
-	return e.inner.Send(ctx, frame)
+func (e *reportingEdge) Send(ctx context.Context, packet Packet[int]) error {
+	return e.inner.Send(ctx, packet)
 }
 
-func (e *reportingEdge) Receive() <-chan Frame[int] { return e.inner.Receive() }
+func (e *reportingEdge) Receive() <-chan Packet[int] { return e.inner.Receive() }
 
 // Close guards its WHOLE body rather than leaning on the inner edge's own idempotence:
 // that would be a hop to a different receiver, and this fixture's contract should not
@@ -62,20 +63,20 @@ func (e *reportingEdge) Close() error {
 // closeFailingEdge is the fixture for the other half of the closer contract: a Close
 // that FAILS is reported through the same node-attributed path an edge failure takes.
 type closeFailingEdge struct {
-	ch   chan Frame[int]
+	ch   chan Packet[int]
 	err  error
 	once sync.Once
 }
 
 func closeFailingFactory(err error) EdgeFactory[int] {
 	return func(string, Report) (Edge[int], error) {
-		return &closeFailingEdge{ch: make(chan Frame[int]), err: err}, nil
+		return &closeFailingEdge{ch: make(chan Packet[int]), err: err}, nil
 	}
 }
 
-func (*closeFailingEdge) Start(context.Context) error            { return nil }
-func (*closeFailingEdge) Send(context.Context, Frame[int]) error { return nil }
-func (e *closeFailingEdge) Receive() <-chan Frame[int]           { return e.ch }
+func (*closeFailingEdge) Start(context.Context) error             { return nil }
+func (*closeFailingEdge) Send(context.Context, Packet[int]) error { return nil }
+func (e *closeFailingEdge) Receive() <-chan Packet[int]           { return e.ch }
 
 func (e *closeFailingEdge) Close() error {
 	var err error
@@ -184,10 +185,42 @@ func TestClosedEdgeRefusesSendWithoutPanicking(t *testing.T) {
 	ctx := context.Background()
 	store := NewMemStore()
 	for i := 1; i <= 200; i++ {
-		failed := edge.Send(ctx, newFrame("closed", i, store))
+		failed := edge.Send(ctx, packetOf(newFrame("closed", i, store)))
 		if !errors.Is(failed, ErrEdgeClosed) {
 			t.Fatalf("send %d of 200 into a closed buffer-4 edge returned %v, want ErrEdgeClosed", i, failed)
 		}
+	}
+}
+
+// TestSendParkedOnAFullEdgeIsReleasedByClose is the DETERMINISTIC cover of the done arm
+// in channelEdge.Send's main select. Nothing ever reads this edge, so the send arm is
+// never ready and the done arm is the only one that can fire; the sleep puts the producer
+// provably past the leading non-blocking refusal before Close signals. Its sibling
+// TestConcurrentSendAndCloseNeverPanics reaches the same arm only by race, which is why
+// the coverage floor flaked without this test.
+func TestSendParkedOnAFullEdgeIsReleasedByClose(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemStore()
+	edge, err := Channel[int](0)("parked", func(context.Context, error) {})
+	if err != nil {
+		t.Fatalf("channel factory: %v", err)
+	}
+
+	parked := make(chan error, 1)
+	go func() { parked <- edge.Send(ctx, packetOf(newFrame("parked", 1, store))) }()
+
+	time.Sleep(50 * time.Millisecond)
+	if failure := edge.Close(); failure != nil {
+		t.Fatalf("closing the parked edge: %v", failure)
+	}
+
+	select {
+	case got := <-parked:
+		if !errors.Is(got, ErrEdgeClosed) {
+			t.Fatalf("the parked send returned %v, want ErrEdgeClosed", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the parked send was never released by Close")
 	}
 }
 
@@ -209,7 +242,7 @@ func TestConcurrentSendAndCloseNeverPanics(t *testing.T) {
 		for sender := 0; sender < 8; sender++ {
 			go func() {
 				defer group.Done()
-				_ = edge.Send(ctx, newFrame("race", round, store))
+				_ = edge.Send(ctx, packetOf(newFrame("race", round, store)))
 			}()
 		}
 		go func() {

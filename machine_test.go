@@ -57,6 +57,9 @@ var (
 	unboundKey     = NewKey("gate/unbound", identityString)
 	absentCell     = NewCell[int]("heap/never-written")
 	presentCell    = NewCell[int]("heap/written")
+	receivedKey    = NewKey("wire/received", identityString)
+	unmintedKey    = NewKey("wire/undeclared", identityString)
+	identityKey    = NewKey("faces/identity", identityString)
 )
 
 // countingStore is the injected Store fixture. snapshot copies under the lock and
@@ -117,16 +120,16 @@ func feed[T any](t *testing.T, ctx context.Context, ingest Ingest[T], count int,
 	}
 }
 
-func drain[T any](t *testing.T, out <-chan Frame[T], count int) []Frame[T] {
+func drain[T any](t *testing.T, out <-chan Packet[T], count int) []Packet[T] {
 	t.Helper()
-	got := make([]Frame[T], 0, count)
+	got := make([]Packet[T], 0, count)
 	deadline := time.After(10 * time.Second)
 	for len(got) < count {
 		select {
-		case f := <-out:
-			got = append(got, f)
+		case p := <-out:
+			got = append(got, p)
 		case <-deadline:
-			t.Fatalf("drained %d of %d frames before the deadline", len(got), count)
+			t.Fatalf("drained %d of %d packets before the deadline", len(got), count)
 		}
 	}
 	return got
@@ -224,22 +227,22 @@ func recoverPanic(t *testing.T, what string, fn func()) any {
 // meets a CLOSED inbound channel rather than a cancelled context: the two are separate
 // exits from the read loop and only cancellation is reachable through the machine.
 type closableEdge[T any] struct {
-	ch   chan Frame[T]
+	ch   chan Packet[T]
 	stop sync.Once
 }
 
 func (*closableEdge[T]) Start(context.Context) error { return nil }
 
-func (e *closableEdge[T]) Send(ctx context.Context, frame Frame[T]) error {
+func (e *closableEdge[T]) Send(ctx context.Context, packet Packet[T]) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case e.ch <- frame:
+	case e.ch <- packet:
 		return nil
 	}
 }
 
-func (e *closableEdge[T]) Receive() <-chan Frame[T] { return e.ch }
+func (e *closableEdge[T]) Receive() <-chan Packet[T] { return e.ch }
 func (e *closableEdge[T]) Close() error             { e.stop.Do(func() { close(e.ch) }); return nil }
 
 // readLoopGoroutines counts the goroutines currently inside a worker's read loop, read
@@ -265,7 +268,7 @@ func TestSendUnblocksOnCancel(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	sent := make(chan error, 1)
-	go func() { sent <- edge.Send(ctx, newFrame("cancel", 1, NewMemStore())) }()
+	go func() { sent <- edge.Send(ctx, packetOf(newFrame("cancel", 1, NewMemStore()))) }()
 
 	time.Sleep(50 * time.Millisecond)
 	cancel()
@@ -290,7 +293,7 @@ func TestChannelEdgeBufferAcceptsWithoutReader(t *testing.T) {
 	accepted := make(chan error, 1)
 	go func() {
 		for i := 1; i <= 2; i++ {
-			if failed := edge.Send(ctx, newFrame("buffered", i, store)); failed != nil {
+			if failed := edge.Send(ctx, packetOf(newFrame("buffered", i, store))); failed != nil {
 				accepted <- failed
 				return
 			}
@@ -341,34 +344,173 @@ func TestHeapUpdateIsAtomic(t *testing.T) {
 	}
 }
 
-func TestFrameDataRoundTripsThroughRebuild(t *testing.T) {
+// TestPacketRoundTripsThroughRebuild drives the whole wire path a remote transport
+// takes: a frame becomes a packet, the packet projects, and the projection rebuilds
+// into a packet again. The restored stack value is read out of the projection rather
+// than through an accessor, because a packet has no gated accessor to read it with.
+func TestPacketRoundTripsThroughRebuild(t *testing.T) {
 	store := NewMemStore()
 	frame := testFrame("origin", "payload", store, []KeyRef{roundTripKey}, []KeyRef{roundTripKey})
 	frame.Set(roundTripKey, "carried")
+	packet := packetOf(frame)
 
-	rebuilt, err := RebuildFrame(frame.Data(), frame.Value())
+	rebuilt, err := RebuildPacket(packet.Data(), packet.Value())
 	if err != nil {
-		t.Fatalf("RebuildFrame refused a faithful projection: %v", err)
+		t.Fatalf("RebuildPacket refused a faithful projection: %v", err)
 	}
-	if rebuilt.ID() != frame.ID() {
-		t.Fatalf("rebuilt frame has id %q, want %q", rebuilt.ID(), frame.ID())
+	if rebuilt.ID() != packet.ID() {
+		t.Fatalf("rebuilt packet has id %q, want %q", rebuilt.ID(), packet.ID())
 	}
-	if rebuilt.Source() != frame.Source() || rebuilt.Node() != frame.Node() {
-		t.Fatalf("rebuilt frame reports source %q node %q, want %q and %q",
-			rebuilt.Source(), rebuilt.Node(), frame.Source(), frame.Node())
+	if rebuilt.Parent() != packet.Parent() {
+		t.Fatalf("rebuilt packet reports parent %q, want %q", rebuilt.Parent(), packet.Parent())
 	}
-	rebuilt.caps = frame.caps
-	if got := rebuilt.Get(roundTripKey); got != "carried" {
-		t.Fatalf("rebuilt frame holds %q under the stack key, want %q", got, "carried")
+	if rebuilt.Source() != packet.Source() || rebuilt.Node() != packet.Node() {
+		t.Fatalf("rebuilt packet reports source %q node %q, want %q and %q",
+			rebuilt.Source(), rebuilt.Node(), packet.Source(), packet.Node())
+	}
+	if got := rebuilt.Value(); got != "payload" {
+		t.Fatalf("rebuilt packet carries payload %q, want %q", got, "payload")
+	}
+	if got := rebuilt.Data().Values[roundTripKey.Name()]; got != "carried" {
+		t.Fatalf("rebuilt packet projects %v under the stack key, want %q", got, "carried")
 	}
 
 	undeclared := FrameData{
-		ID:     frame.ID(),
+		ID:     packet.ID(),
 		Source: "origin",
 		Values: map[string]any{"seam/never-declared": 1},
 	}
-	if _, err := RebuildFrame(undeclared, "payload"); err == nil {
-		t.Fatal("RebuildFrame accepted a projection naming an undeclared key")
+	if _, err := RebuildPacket(undeclared, "payload"); err == nil {
+		t.Fatal("RebuildPacket accepted a projection naming an undeclared key")
+	}
+}
+
+// TestFrameAndPacketAgreeOnIdentity gates the two faces: the same state read through a
+// frame and through the packet made from it reports the same identity, and the packet
+// projects the frame's stack values. The last assertion is the one that proves the
+// REFERENCE face — a write through the frame AFTER the packet was made is visible
+// through the packet, which it could not be if packetOf had copied the state.
+func TestFrameAndPacketAgreeOnIdentity(t *testing.T) {
+	store := NewMemStore()
+	frame := testFrame("faces", "payload", store, []KeyRef{identityKey}, []KeyRef{identityKey})
+	frame.Set(identityKey, "first")
+	packet := packetOf(frame)
+
+	for _, check := range []struct{ name, got, want string }{
+		{"ID", packet.ID(), frame.ID()},
+		{"Parent", packet.Parent(), frame.Parent()},
+		{"Source", packet.Source(), frame.Source()},
+		{"Node", packet.Node(), frame.Node()},
+		{"Value", packet.Value(), frame.Value()},
+	} {
+		if check.got != check.want {
+			t.Errorf("the packet reports %s as %q, want the frame's %q", check.name, check.got, check.want)
+		}
+	}
+	if got := packet.Data().Values[identityKey.Name()]; got != "first" {
+		t.Fatalf("the packet projects %v under the stack key, want %q", got, "first")
+	}
+
+	frame.Set(identityKey, "second")
+	if got := packet.Data().Values[identityKey.Name()]; got != "second" {
+		t.Fatalf("after a write through the frame the packet still projects %v, want %q: "+
+			"the packet copied the frame state instead of sharing it", got, "second")
+	}
+}
+
+// wireObservation is what the receiving node reports back out of itself. The assertions
+// run in the test goroutine rather than in the node, because a node body is not the
+// goroutine t.Fatalf may be called from.
+type wireObservation struct {
+	value     string
+	node      string
+	source    string
+	recovered any
+}
+
+// TestReceivedPacketIsMintedWithTheReceivingNodesCapabilities gates the ticket's receive
+// path: bytes become a packet carrying stack values and NO capability view, and the
+// runtime mints the frame the node sees with the RECEIVING node's declared view. The
+// wire's own source survives, the node stamp is the receiver's, a declared handle reads,
+// and an undeclared one raises a *CapabilityError naming the receiver.
+func TestReceivedPacketIsMintedWithTheReceivingNodesCapabilities(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	arrived, err := RebuildPacket(FrameData{
+		ID:     "wire-1",
+		Parent: "wire-0",
+		Source: "upstream.remote",
+		Node:   "upstream.remote",
+		Values: map[string]any{receivedKey.Name(): "from-the-wire"},
+	}, 7)
+	if err != nil {
+		t.Fatalf("RebuildPacket refused the wire projection: %v", err)
+	}
+
+	observed := make(chan wireObservation, 1)
+	var inbound Edge[int]
+	m := New("wire")
+	src, _ := m.Source[int]("wire.source")
+	out := src.Map("wire.node", func(f Frame[int]) int {
+		seen := wireObservation{value: f.Get(receivedKey), node: f.Node(), source: f.Source()}
+		func() {
+			defer func() { seen.recovered = recover() }()
+			_ = f.Get(unmintedKey)
+		}()
+		observed <- seen
+		return f.Value()
+	},
+		WithEdge[int](func(node string, report Report) (Edge[int], error) {
+			edge, failure := Channel[int](1)(node, report)
+			inbound = edge
+			return edge, failure
+		}),
+		WithReads[int](receivedKey)).Output("wire.out", WithEdge(Channel[int](1)))
+
+	startMachine(t, ctx, m)
+	if failure := inbound.Send(ctx, arrived); failure != nil {
+		t.Fatalf("sending the received packet into the node's inbound edge: %v", failure)
+	}
+
+	var seen wireObservation
+	select {
+	case seen = <-observed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the receiving node never ran on the packet that arrived from the wire")
+	}
+
+	if seen.value != "from-the-wire" {
+		t.Fatalf("the minted frame reads %q under the declared key, want %q", seen.value, "from-the-wire")
+	}
+	if seen.node != "wire.node" {
+		t.Fatalf("the minted frame reports node %q, want the RECEIVING node %q", seen.node, "wire.node")
+	}
+	if seen.source != "upstream.remote" {
+		t.Fatalf("the minted frame reports source %q, want the WIRE's source %q",
+			seen.source, "upstream.remote")
+	}
+	if seen.recovered == nil {
+		t.Fatal("reading a handle the receiving node never declared did not panic; " +
+			"the packet's values were minted with more than the node's declared view")
+	}
+	failure, ok := seen.recovered.(error)
+	if !ok {
+		t.Fatalf("the undeclared read panicked with %v (%T), want an error", seen.recovered, seen.recovered)
+	}
+	var capErr *CapabilityError
+	if !errors.As(failure, &capErr) {
+		t.Fatalf("the undeclared read panicked with %v, want a *CapabilityError", failure)
+	}
+	if capErr.Node != "wire.node" {
+		t.Fatalf("the CapabilityError names node %q, want the RECEIVING node %q", capErr.Node, "wire.node")
+	}
+	if capErr.Key != unmintedKey.Name() || capErr.Access != accessRead {
+		t.Fatalf("the CapabilityError reports key %q access %q", capErr.Key, capErr.Access)
+	}
+
+	if delivered := drain(t, out, 1)[0]; delivered.ID() != "wire-1" {
+		t.Fatalf("the packet leaving the node has id %q, want the wire's %q", delivered.ID(), "wire-1")
 	}
 }
 
@@ -786,28 +928,30 @@ func TestChainCyclePanicAndState(t *testing.T) {
 		return f.Value()
 	}, WithReads[int](chainFactorKey), WithWrites[int](chainFactorKey))
 
-	recursed := seeded.Recurse("chain.recurse", func(f Frame[Monad[int]]) Monad[int] {
-		next := f.Value()
+	scaled := seeded.Map("chain.scale", func(f Frame[int]) int {
 		factor := f.Get(chainFactorKey)
-		return func(inner Frame[int]) int {
-			if inner.Value() > 50 {
-				return inner.Value()
+		var grow func(int) int
+		grow = func(n int) int {
+			if n > 50 {
+				return n
 			}
-			return next(rewrap(inner, inner.Value()*factor))
+			return grow(n * factor)
 		}
+		return grow(f.Value())
 	}, WithReads[int](chainFactorKey))
 
-	memoized := recursed.Memoize("chain.memoize", func(f Frame[Monad[int]]) Monad[int] {
-		next := f.Value()
-		return func(inner Frame[int]) int {
-			if inner.Value()%2 == 0 {
-				return inner.Value()
+	evened := scaled.Map("chain.even", func(f Frame[int]) int {
+		var next func(int) int
+		next = func(n int) int {
+			if n%2 == 0 {
+				return n
 			}
-			return next(rewrap(inner, inner.Value()+1))
+			return next(n + 1)
 		}
-	}, strconv.Itoa)
+		return next(f.Value())
+	})
 
-	kept, discarded := memoized.If("chain.if", func(f Frame[int]) bool { return f.Value() > 50 })
+	kept, discarded := evened.If("chain.if", func(f Frame[int]) bool { return f.Value() > 50 })
 	discarded.Drop("chain.if.drop")
 
 	left, right := kept.Tee("chain.tee", func(d int) (int, int) { return d, d })
@@ -923,7 +1067,7 @@ func TestPanicReclaimsFrameState(t *testing.T) {
 	src, ingest := m.Source[int]("reclaim.source")
 	src.Map("reclaim.node", func(f Frame[int]) int {
 		f.Set(reclaimKey, "held")
-		held <- len(f.Data().Values)
+		held <- len(f.state.values)
 		captured <- f
 		panic("after writing state")
 	}, WithReads[int](reclaimKey), WithWrites[int](reclaimKey)).Drop("reclaim.drop")
@@ -942,7 +1086,7 @@ func TestPanicReclaimsFrameState(t *testing.T) {
 	// because a frame's state has a single owner and reading it from here while the
 	// node still owns it would be a race rather than an observation.
 	if before := <-held; before != 1 {
-		t.Fatalf("the node's frame projected %d values before the panic, want 1", before)
+		t.Fatalf("the node's frame held %d values before the panic, want 1", before)
 	}
 	// The span ENDS after the guard reclaims: guard dispatches, then releases the
 	// frame state, and only then finishes, which is what calls span.End(). So
@@ -956,8 +1100,8 @@ func TestPanicReclaimsFrameState(t *testing.T) {
 		}
 		return false
 	})
-	if got := len(frame.Data().Values); got != 0 {
-		t.Fatalf("the panicking node's frame still projects %d values; the guard dispatched without reclaiming",
+	if got := len(frame.state.values); got != 0 {
+		t.Fatalf("the panicking node's frame still holds %d values; the guard dispatched without reclaiming",
 			got)
 	}
 }
@@ -1056,12 +1200,11 @@ func TestNewKeyRefusesANilCloner(t *testing.T) {
 }
 
 func TestUnboundFrameRefusesGatedAccess(t *testing.T) {
-	// The frame RebuildFrame hands back was never bound to a node, so it carries no
-	// capability view at all — the state no frame inside a running machine can reach.
-	rebuilt, err := RebuildFrame(FrameData{ID: "rebuilt", Source: "origin", Node: "origin"}, 1)
-	if err != nil {
-		t.Fatalf("RebuildFrame refused a projection naming no keys: %v", err)
-	}
+	// A frame straight out of newFrame was never bound to a node, so it carries no
+	// capability view at all. With RebuildFrame gone this is the ONLY state an unbound
+	// frame can be reached in, and it is the state every frame passes through before its
+	// first bind.
+	rebuilt := newFrame("origin", 1, NewMemStore())
 
 	recovered := recoverPanic(t, "reading a stack key through an unbound frame", func() {
 		_ = rebuilt.Get(unboundKey)
@@ -1144,7 +1287,11 @@ func TestAbsentHeapCellReadsAsMissing(t *testing.T) {
 	}
 }
 
-func TestMemoizeReturnsTheCachedResultForARepeatedIndex(t *testing.T) {
+// TestPlainGoRecursionInAMapBody is the compiled template the README's Recursion
+// section is transcribed from: it is the idiom that replaced the deleted Y-combinator
+// builders. Recursion is a plain Go closure inside the Map body, and memoization is
+// the caller's — here a map closed over by the body, which memoizes within one datum.
+func TestPlainGoRecursionInAMapBody(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -1156,26 +1303,32 @@ func TestMemoizeReturnsTheCachedResultForARepeatedIndex(t *testing.T) {
 	const withoutMemoization = 177     // 2*fib(target+1)-1, the un-cached body count
 
 	var calls atomic.Int64
-	m := New("memoize")
-	src, ingest := m.Source[int]("memoize.source", WithEdge(Channel[int](4)))
-	out := src.Memoize("memoize.fib", func(f Frame[Monad[int]]) Monad[int] {
-		next := f.Value()
-		return func(inner Frame[int]) int {
+	m := New("recursion")
+	src, ingest := m.Source[int]("recursion.source", WithEdge(Channel[int](4)))
+	out := src.Map("recursion.fib", func(f Frame[int]) int {
+		cache := map[int]int{}
+		var fib func(int) int
+		fib = func(n int) int {
+			if seen, ok := cache[n]; ok {
+				return seen
+			}
 			calls.Add(1)
-			n := inner.Value()
 			if n < 2 {
+				cache[n] = n
 				return n
 			}
-			return next(rewrap(inner, n-1)) + next(rewrap(inner, n-2))
+			cache[n] = fib(n-1) + fib(n-2)
+			return cache[n]
 		}
-	}, strconv.Itoa, WithEdge(Channel[int](4))).Output("memoize.out", WithEdge(Channel[int](4)))
+		return fib(f.Value())
+	}, WithEdge(Channel[int](4))).Output("recursion.out", WithEdge(Channel[int](4)))
 
 	startMachine(t, ctx, m)
 	feed(t, ctx, ingest, 1, target)
 
 	got := drain(t, out, 1)[0]
 	if got.Value() != 55 {
-		t.Fatalf("the memoized recursion computed fib(%d) as %d, want 55", target, got.Value())
+		t.Fatalf("the plain-Go recursion computed fib(%d) as %d, want 55", target, got.Value())
 	}
 	// The count is the assertion that the cache was READ, not merely written: the answer
 	// alone is the same either way.
@@ -1199,7 +1352,7 @@ func TestEmitFailureRoutesToTheNodesHandler(t *testing.T) {
 	taken, skipped := src.If("emit-failure.branch", func(Frame[int]) bool { return true },
 		WithErrorHandler(func(e NodeError[int]) { errs <- e }))
 	taken.Drop("emit-failure.dead", WithEdge[int](func(string, Report) (Edge[int], error) {
-		return &failingEdge[int]{ch: make(chan Frame[int]), err: refused}, nil
+		return &failingEdge[int]{ch: make(chan Packet[int]), err: refused}, nil
 	}))
 	skipped.Drop("emit-failure.skipped")
 
@@ -1231,7 +1384,7 @@ func TestReadLoopReturnsWhenItsInboundChannelCloses(t *testing.T) {
 		return readLoopGoroutines() == 0
 	})
 
-	inbound := &closableEdge[int]{ch: make(chan Frame[int], 1)}
+	inbound := &closableEdge[int]{ch: make(chan Packet[int], 1)}
 	m := New("closed-inbound")
 	// The source owns the ONLY read loop in this machine: a terminal declared with Output
 	// has none, so the count below names one loop unambiguously.

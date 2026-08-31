@@ -23,7 +23,7 @@ const (
 
 // The declaration registry is PROCESS-wide: NewKey and NewCell write to it once
 // per handle at declaration time, and its only reader on the data plane side is
-// RebuildFrame, which restores cloners for a frame arriving from a remote
+// RebuildPacket, which restores cloners for a datum arriving from a remote
 // transport. No per-datum frame path touches it.
 var registryMu sync.Mutex
 var registry = map[string]func(any) any{}
@@ -270,26 +270,8 @@ func (f Frame[T]) Update[V any](c Cell[V], fn func(V) V) V {
 	return updated.(V)
 }
 
-// Data projects the frame's STACK state for a Codec. Heap state is machine-scoped
-// and is never projected.
-func (f Frame[T]) Data() FrameData {
-	data := FrameData{
-		ID:     f.state.id,
-		Parent: f.state.parent,
-		Source: f.state.source,
-		Node:   f.state.node,
-	}
-	if len(f.state.values) > 0 {
-		data.Values = make(map[string]any, len(f.state.values))
-		for name, value := range f.state.values {
-			data.Values[name] = value
-		}
-	}
-	return data
-}
-
 // FrameData is the serializable projection of a frame's stack state, produced by
-// Frame.Data and consumed by RebuildFrame. A remote transport marshals it alongside
+// Packet.Data and consumed by RebuildPacket. A remote transport marshals it alongside
 // the payload.
 type FrameData struct {
 	ID     string         `json:"id"`
@@ -297,32 +279,6 @@ type FrameData struct {
 	Source string         `json:"source"`
 	Node   string         `json:"node"`
 	Values map[string]any `json:"values,omitempty"`
-}
-
-// RebuildFrame reconstructs a frame from its projection, restoring each value's
-// cloner from the process declaration registry. It REFUSES a projection naming an
-// undeclared key rather than handing back a frame whose later Tee would have no
-// cloner for that value.
-func RebuildFrame[T any](data FrameData, payload T) (Frame[T], error) {
-	state := &frameState{
-		id:      data.ID,
-		parent:  data.Parent,
-		source:  data.Source,
-		node:    data.Node,
-		values:  make(map[string]any, len(data.Values)),
-		cloners: make(map[string]func(any) any, len(data.Values)),
-	}
-	registryMu.Lock()
-	defer registryMu.Unlock()
-	for name, value := range data.Values {
-		clone, ok := registry[name]
-		if !ok {
-			return Frame[T]{}, fmt.Errorf("machine: frame names undeclared stack key %q", name)
-		}
-		state.values[name] = value
-		state.cloners[name] = clone
-	}
-	return Frame[T]{payload: payload, state: state}, nil
 }
 
 // newFrame is the only place a frame is born, called by the Ingest closure a Source
@@ -341,8 +297,7 @@ func newFrame[T any](source string, payload T, store Store) Frame[T] {
 }
 
 // rewrap carries one frame's state and capability view onto a payload of a
-// different type. It is how the runtime re-wraps a node's bare return value, and
-// how the Y-combinator drivers hand the recursive continuation to a user function.
+// different type. It is how the runtime re-wraps a node's bare return value.
 func rewrap[T, U any](f Frame[T], payload U) Frame[U] {
 	return Frame[U]{payload: payload, state: f.state, caps: f.caps}
 }

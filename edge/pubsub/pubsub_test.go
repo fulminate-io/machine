@@ -120,7 +120,7 @@ func (c *captured) count() int {
 }
 
 // wireEnvelope mirrors the codec's own envelope so a test can forge one WITHOUT going
-// through RebuildFrame, which is the only way to put an undeclared key on the wire: the
+// through RebuildPacket, which is the only way to put an undeclared key on the wire: the
 // declaration registry is process-wide, so anything this process could declare would be
 // declared on the receiving side too.
 type wireEnvelope struct {
@@ -271,11 +271,11 @@ func TestPubSubInjectsTheSendersTraceContext(t *testing.T) {
 	ctx := trace.ContextWithSpanContext(context.Background(), spanContext)
 
 	client, server := fake(t)
-	frame, err := machine.RebuildFrame(machine.FrameData{ID: "id-1", Source: "peer", Node: "peer"}, 1)
+	packet, err := machine.RebuildPacket(machine.FrameData{ID: "id-1", Source: "peer", Node: "peer"}, 1)
 	if err != nil {
-		t.Fatalf("building the frame: %v", err)
+		t.Fatalf("building the packet: %v", err)
 	}
-	if err = New[int](client, topicName, subscription).Send(ctx, frame); err != nil {
+	if err = New[int](client, topicName, subscription).Send(ctx, packet); err != nil {
 		t.Fatalf("sending: %v", err)
 	}
 
