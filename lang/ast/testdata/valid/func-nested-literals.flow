@@ -1,0 +1,13 @@
+flow orders
+source ingest Poll
+sink done audit.Store from ingest
+
+func Lookup(f machine.Frame[Order]) Result {
+	g, ctx := errgroup.WithContext(f.Context())
+	g.Go(func() error { return resolve(ctx) })
+	g.Go(func() error { return fetch(ctx) })
+	if err := g.Wait(); err != nil {
+		return Result{Err: err}
+	}
+	return Result{Ok: true}
+}

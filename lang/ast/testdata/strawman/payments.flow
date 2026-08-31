@@ -1,0 +1,41 @@
+flow payments
+note """
+Stripe webhook intake. Payments are fraud-screened, enriched via the
+Stripe API (transient failures retry with backoff, bounded by attempt
+count), then recorded to the warehouse over pub/sub and pushed to the
+live dashboard. Non-payment events and fraud suspects are quarantined.
+"""
+import "github.com/stripe/stripe-go/v82"
+import "github.com/acme/fraudsvc"
+import "github.com/acme/ratelimit"
+import "acme.dev/flows/warehouse"
+import "acme.dev/flows/ops"
+state {
+  processed int
+  by_type map[string]int
+}
+var attempt int
+var span *ops.Span clone ops.CloneSpan
+on error ops.PageOnCall
+source events stripe.Listen[stripe.Event](":8443")
+branch classify stripe.IsPayment from events -> payments, other
+branch screen fraudsvc.Clean from payments -> clean, suspect
+  note """fraudsvc scores synchronously; suspects never reach enrichment"""
+loop retry
+transform try stripe.TryEnrich from clean, retry
+  reads attempt  writes by_type
+  checkpoint
+  on error stripe.VoidCharge
+  note """returns EnrichResult{Ok, Retryable}; transient failures loop below"""
+branch settle stripe.Succeeded from try -> enriched, flaky
+transform backoff ratelimit.Wait from flaky
+  reads attempt  writes attempt
+  note """increments attempt; gives up past 5 by returning a dead-lettered result"""
+send backoff -> retry
+tee record from enriched -> wh, live
+sink store warehouse.Insert from wh
+  writes processed
+  over pubsub.Topic("wh-ingest")
+sink push ops.Dashboard from live
+sink hold fraudsvc.Quarantine from suspect, other
+  on error ops.PageOnCall

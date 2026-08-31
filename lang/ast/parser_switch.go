@@ -56,10 +56,10 @@ func (p *parser) parseSwitchBody(stmt *SwitchStmt) bool {
 // clean here, because requiring one would make every provably-exhaustive switch
 // unparseable.
 func (p *parser) parseSwitchArms(stmt *SwitchStmt) {
+	// As in the state block, no blank-line guard is needed: the lexer collapses
+	// a run of blank lines into one newline token and every arm consumes its own
+	// line terminator.
 	for !p.at(tokEOF) && !p.at(tokRBrace) {
-		if p.accept(tokNewline) {
-			continue
-		}
 		if p.at(kwElse) {
 			p.parseSwitchElse(stmt)
 			continue

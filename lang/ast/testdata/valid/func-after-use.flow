@@ -1,0 +1,6 @@
+flow orders
+source ingest Poll
+transform enrich Enrich from ingest
+sink done audit.Store from enrich
+
+func Enrich(f machine.Frame[Order]) Result { return Result{} }

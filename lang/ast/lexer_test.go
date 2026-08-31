@@ -5,6 +5,7 @@
 package ast
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -283,5 +284,59 @@ func TestLexPositionsAreByteAccurate(t *testing.T) {
 	}
 	if toks[len(toks)-1].pos.Offset != len(src) {
 		t.Fatalf("EOF at offset %d, want %d", toks[len(toks)-1].pos.Offset, len(src))
+	}
+}
+
+// TestLexNumbersAndEscapes covers the two token forms no corpus file reaches
+// through the parser.
+//
+// Numbers are a case worth stating plainly: the lexer produces them, but every
+// position where a numeric literal can appear in this language sits inside an
+// opaque Go span, so nothing but a direct lex ever sees one. The scanner still
+// has to be right, because that stops being true the moment the grammar grows a
+// production that takes one.
+func TestLexNumbersAndEscapes(t *testing.T) {
+	toks, diags := lexAll("12 3.14 5. 0.5\n")
+	if len(diags) != 0 {
+		t.Fatalf("numbers produced diagnostics: %v", diags)
+	}
+	want := []string{"12", "3.14", "5", ".", "0.5", "\n"}
+	for i, w := range want {
+		if toks[i].text != w {
+			t.Errorf("token %d is %q, want %q", i, toks[i].text, w)
+		}
+	}
+
+	// A backslash escape must not end a string early, and a quoted literal must
+	// not run past its line.
+	escaped, escapedDiags := lexAll(`import "a\"b"` + "\n")
+	if len(escapedDiags) != 0 {
+		t.Fatalf("an escaped quote produced diagnostics: %v", escapedDiags)
+	}
+	if escaped[1].text != `"a\"b"` {
+		t.Errorf("escaped string is %q", escaped[1].text)
+	}
+
+	// A source that ends mid-escape must not read past its own last byte. This
+	// is the one call site that drives the cursor's bounds guard.
+	truncated, truncatedDiags := lexAll(`import "abc\`)
+	if len(truncatedDiags) != 1 {
+		t.Fatalf("a string ending mid-escape produced %d diagnostics, want 1", len(truncatedDiags))
+	}
+	if truncated[len(truncated)-1].kind != tokEOF {
+		t.Errorf("lexing did not reach EOF after a trailing backslash")
+	}
+
+	// The same two forms inside a Go func body, where the func scan owns the
+	// skipping rather than the string scanner.
+	l := newLexer([]byte("func F() string { s := \"a\\\"}\\\"b\"; c := '\\''; return s }\n"))
+	l.next()
+	l.next()
+	span := l.scanGoFuncSpan()
+	if !strings.HasSuffix(span.text, "return s }") {
+		t.Errorf("escapes inside a func body truncated the span: %q", span.text)
+	}
+	if len(l.diags) != 0 {
+		t.Fatalf("a balanced body with escapes produced diagnostics: %v", l.diags)
 	}
 }

@@ -76,6 +76,13 @@ func (p *parser) parseFunc() Decl {
 	decl := FuncDecl{Start: start}
 	if !p.at(tokIdent) {
 		p.diagAtf(start, keywordEnd, "a func declaration needs a name")
+		// The name and body are anchored where the name SHOULD have been rather
+		// than left as zero values: an unpositioned child inside a positioned
+		// parent is a span an editor cannot place, and a recovered tree is
+		// exactly the tree it spends its time holding.
+		missing := p.tok.pos
+		decl.Name = Ident{NamePos: missing}
+		decl.Body = GoSpan{Start: missing, Stop: missing}
 		decl.Stop = p.skipToStatementBoundary()
 		return decl
 	}
@@ -155,6 +162,9 @@ func (p *parser) parseFlowBody(decl *FlowDecl) {
 // of the rule that a flow-level `on error` or `note` precedes the first
 // statement.
 func (p *parser) parseFlowEntry(decl *FlowDecl) {
+	if p.hoistFileDecl() {
+		return
+	}
 	switch p.tok.kind {
 	case kwNote:
 		p.flowNote(decl)
@@ -172,6 +182,30 @@ func (p *parser) parseFlowEntry(decl *FlowDecl) {
 			decl.Body = append(decl.Body, bad)
 		}
 	}
+}
+
+// hoistFileDecl parses a FILE-level declaration written inside a flow body
+// region and reports whether it did.
+//
+// The grammar is FLAT: a flow declaration is one entry and what follows it is
+// more entries rather than children of it, so an import, const or param written
+// under a flow line belongs to the FILE — which is also the scope it actually
+// has. All three canonical strawmen place their imports this way, and treating
+// one as a statement would reject every one of them.
+func (p *parser) hoistFileDecl() bool {
+	var parse func(*parser) Decl
+	switch p.tok.kind {
+	case kwImport:
+		parse = (*parser).parseImport
+	case kwConst:
+		parse = (*parser).parseConst
+	case kwParam:
+		parse = (*parser).parseParam
+	default:
+		return false
+	}
+	p.hoisted = append(p.hoisted, parse(p))
+	return true
 }
 
 // flowNote attaches a flow-level note, keeping the first when a flow declares
@@ -221,10 +255,10 @@ func (p *parser) parseState() Decl {
 	open := p.tok.pos
 	p.expect(tokLBrace, "\"{\"")
 	p.expect(tokNewline, "a newline after the opening brace")
+	// There is no blank-line guard in this loop and none is needed: the lexer
+	// collapses a run of blank lines into ONE newline token, and every field
+	// consumes its own line terminator, so the loop never sees a newline here.
 	for !p.at(tokEOF) && !p.at(tokRBrace) {
-		if p.accept(tokNewline) {
-			continue
-		}
 		field, ok := p.parseStateField()
 		if !ok {
 			break

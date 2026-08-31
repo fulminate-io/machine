@@ -1,0 +1,17 @@
+import billing "github.com/acme/billing"
+import "acme.dev/flows/audit"
+
+flow orders
+note """every declaration form the language has, in one flow"""
+state {
+  charged int
+  by_type map[string]int
+}
+var attempt int
+var span *ops.Span clone ops.CloneSpan
+var h func(int) error
+on error audit.Alert
+source ingest Poll
+transform charge billing.Charge from ingest
+  reads attempt  writes charged
+sink done audit.Store from charge

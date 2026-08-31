@@ -40,6 +40,12 @@ type parser struct {
 	// suppressed counts the diagnostics the cap refused to record.
 	suppressed int
 
+	// hoisted holds FILE-level declarations written inside a flow body region.
+	// The grammar is FLAT — a flow declaration is one entry and what follows it
+	// is more entries rather than children of it — so an import written under a
+	// flow line belongs to the file, which is also the scope it actually has.
+	hoisted []Decl
+
 	// skippedFrom, skippedTo and didSkip carry the span recovery discarded
 	// while parsing the current statement, so the tree can carry a BadStmt
 	// covering exactly that text.
@@ -138,6 +144,10 @@ func (p *parser) parseFile() *File {
 		if decl := p.parseEntry(&sawFlow); decl != nil {
 			file.Decls = append(file.Decls, decl)
 		}
+		if len(p.hoisted) > 0 {
+			file.Decls = append(file.Decls, p.hoisted...)
+			p.hoisted = nil
+		}
 	}
 	file.Stop = p.tok.pos
 	return file
@@ -190,7 +200,7 @@ func (p *parser) parseStatement() Stmt {
 	p.didSkip = false
 	parse, ok := stmtParsers[p.tok.kind]
 	if !ok {
-		p.diagHeref("expected a statement, found %s", describe(p.tok))
+		p.diagHeref("unknown leading token: %s", p.tok.text)
 		p.skipToStatementBoundary()
 		return nil
 	}

@@ -1,0 +1,19 @@
+flow orders
+source ingest Poll
+sink done audit.Store from ingest
+
+func InString() string { s := "}"; return s }
+
+func InRune() rune { r := '}'; return r }
+
+func InLineComment() int {
+	// a closing brace } lives inside this comment
+	return 1
+}
+
+func InBlockComment() int {
+	/* a closing brace } lives inside this comment */
+	return 2
+}
+
+func InRawString() string { s := `}`; return s }

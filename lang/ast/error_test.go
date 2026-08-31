@@ -143,3 +143,42 @@ func TestErrorIsTheOnlyExportedErrorType(t *testing.T) {
 		t.Fatalf("exported types implementing error: %v, want exactly [Error]", errorTypes)
 	}
 }
+
+// TestErrorMessageRendersFirstDiagnosticAndCount pins what a caller printing the
+// error actually sees.
+//
+// This is the package's one exported error rendering and it is what an editor,
+// a build log and a `go run` all surface, so its three shapes are asserted
+// rather than left to whatever the first caller happens to observe.
+func TestErrorMessageRendersFirstDiagnosticAndCount(t *testing.T) {
+	at := Position{Offset: 4, Line: 2, Col: 3}
+
+	empty := &Error{}
+	if got := empty.Error(); got != "no diagnostics" {
+		t.Errorf("an Error carrying nothing renders %q", got)
+	}
+
+	single := &Error{Diagnostics: []Diagnostic{{Pos: at, Message: "something is wrong"}}}
+	if got, want := single.Error(), "2:3: something is wrong"; got != want {
+		t.Errorf("single-diagnostic rendering is %q, want %q", got, want)
+	}
+
+	several := &Error{Diagnostics: []Diagnostic{
+		{Pos: at, Message: "something is wrong"},
+		{Pos: at, Message: "so is this"},
+		{Pos: at, Message: "and this"},
+	}}
+	if got, want := several.Error(), "2:3: something is wrong (and 2 more)"; got != want {
+		t.Errorf("multi-diagnostic rendering is %q, want %q", got, want)
+	}
+
+	// The rendering must come from a REAL parse too, not only from hand-built
+	// values: a caller reaches it through the error interface.
+	_, err := Parse([]byte("flow orders\nnode broken\n"))
+	if err == nil {
+		t.Fatalf("CONTROL FAILED: the fixture parsed clean")
+	}
+	if !strings.Contains(err.Error(), "unknown leading token") {
+		t.Errorf("a real parse error renders %q", err.Error())
+	}
+}

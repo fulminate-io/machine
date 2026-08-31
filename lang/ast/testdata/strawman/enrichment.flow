@@ -1,0 +1,46 @@
+flow enrichment
+
+import "github.com/acme/enrichsvc"
+import "github.com/acme/ratelimit"
+import "acme.dev/flows/warehouse"
+
+state {
+  enriched_total int
+}
+
+var attempt int
+
+source orders enrichsvc.Listen[Order](":9090")
+
+loop retry
+
+transform enrich Lookup from orders, retry
+  reads attempt
+  checkpoint
+
+branch settle Succeeded from enrich -> done, flaky
+
+transform backoff ratelimit.Wait from flaky
+  reads attempt  writes attempt
+
+send backoff -> retry
+
+sink store warehouse.Insert from done
+  over pubsub.Topic("enriched")
+  writes enriched_total
+
+func Lookup(f machine.Frame[Order]) EnrichResult {
+    ctx := f.Context()
+    order := f.Value()
+    g, gctx := errgroup.WithContext(ctx)
+    var geo GeoInfo
+    var profile CRMProfile
+    g.Go(func() error { var err error; geo, err = geoClient.Resolve(gctx, order.IP); return err })
+    g.Go(func() error { var err error; profile, err = crmClient.Fetch(gctx, order.CustomerID); return err })
+    if err := g.Wait(); err != nil {
+        return EnrichResult{Retryable: isTransient(err), Err: err.Error()}
+    }
+    return EnrichResult{Ok: true, Record: merge(order, geo, profile)}
+}
+
+func Succeeded(f machine.Frame[EnrichResult]) bool { return f.Value().Ok }

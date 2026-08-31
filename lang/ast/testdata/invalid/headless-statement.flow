@@ -1,0 +1,2 @@
+import "github.com/acme/billing"
+transform charge billing.Charge from ingest

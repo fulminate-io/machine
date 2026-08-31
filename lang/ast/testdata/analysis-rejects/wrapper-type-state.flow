@@ -1,0 +1,10 @@
+note """analysis check: state entries hold bare Go types. The cell[T] and key[T] wrapper spellings are retired, and a per-datum value belongs in a flow-body var."""
+flow orders
+state {
+  charged cell[int]
+  attempt key[int]
+}
+source ingest Poll
+transform charge billing.Charge from ingest
+  reads attempt  writes charged
+sink done audit.Store from charge

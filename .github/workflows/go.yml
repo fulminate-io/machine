@@ -143,4 +143,25 @@ jobs:
         run: go build ./...
       - name: Go Test
         working-directory: lang/ast
-        run: go test -timeout 600s ./...
+        run: go test -timeout 600s -coverprofile=coverage.out ./...
+
+      # The floor is the coverage the suite actually achieves, so a change that
+      # drops below it fails here rather than surfacing later in a coverage
+      # report. It was measured against this suite rather than copied from the
+      # root job: the marker methods that seal the AST have empty bodies and so
+      # contribute no statements, which is why a parser package reaches the same
+      # number the runtime does.
+      - name: Enforce coverage floor
+        working-directory: lang/ast
+        env:
+          COVERAGE_FLOOR: "100"
+        run: |
+          total=$(go tool cover -func=coverage.out | awk '$1 == "total:" { print $NF }')
+          test -n "$total" || { echo "coverage.out yielded no total line"; exit 1; }
+          echo "total statement coverage: $total"
+          awk -v got="${total%\%}" -v floor="$COVERAGE_FLOOR" 'BEGIN {
+            if (got + 0 < floor + 0) {
+              printf "coverage %s%% is below the %s%% floor\n", got, floor
+              exit 1
+            }
+          }'

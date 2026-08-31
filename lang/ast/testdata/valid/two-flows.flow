@@ -1,0 +1,7 @@
+flow first
+source ingest Poll
+sink done audit.Store from ingest
+
+flow second
+source other Gen
+drop other

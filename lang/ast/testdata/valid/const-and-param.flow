@@ -1,0 +1,7 @@
+const retries = 3
+const window time.Duration = 5 * time.Second
+param endpoint string = ":8080"
+
+flow orders
+source ingest http.Listen[Order](endpoint)
+sink done audit.Store from ingest

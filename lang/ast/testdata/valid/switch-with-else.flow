@@ -1,0 +1,10 @@
+flow routing
+source ingest Poll
+switch route from ingest on ingest.Kind {
+  "card", "wallet" -> billable
+  isRefund(ingest) -> refundable
+  else -> other
+}
+transform charge billing.Charge from billable
+transform refund billing.Refund from refundable
+sink hold audit.Store from other, charge, refund

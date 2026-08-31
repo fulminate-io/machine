@@ -1,0 +1,9 @@
+note """analysis check: a switch arm value is MATCHED, not destructured. The parser records the arm as an opaque span; binding a pattern is not a form this language has."""
+flow orders
+source ingest Poll
+switch route from ingest on ingest.Kind {
+  Order{Kind: "card"} -> billable
+  else -> other
+}
+sink charge audit.Store from billable
+sink hold audit.Store from other

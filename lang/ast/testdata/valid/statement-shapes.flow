@@ -1,0 +1,16 @@
+flow shapes
+source ingest Poll
+transform enrich Lookup from ingest
+branch split Valid from enrich -> good, bad
+tee fan from good -> ledger, mirror
+sink store warehouse.Insert from ledger
+loop retry
+transform redo billing.Backoff from retry, mirror
+send redo -> retry
+drop bad
+
+flow sendtonode
+source in Poll
+transform first Step from in
+transform second Step from first
+send second -> first

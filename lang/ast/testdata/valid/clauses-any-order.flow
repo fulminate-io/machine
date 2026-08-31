@@ -1,0 +1,15 @@
+flow clauses
+state {
+  seen map[string]bool
+}
+var attempt int
+source ingest Poll
+transform a Step from ingest
+  reads attempt  writes seen  over ratelimit.New(10)  checkpoint
+transform b Step from a
+  checkpoint  over ratelimit.New(5)  writes seen  reads attempt
+transform c Step from b
+  note """clauses may be split across continuation lines"""
+  on error Handle
+sink done Store from c
+  checkpoint

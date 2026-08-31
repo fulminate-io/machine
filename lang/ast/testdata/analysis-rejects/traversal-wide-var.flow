@@ -1,0 +1,7 @@
+note """analysis check: a var is fresh per datum and copied per tee branch, so a counter accumulating across datums belongs in state rather than in a var."""
+flow orders
+var total int
+source ingest Poll
+transform count Increment from ingest
+  writes total
+sink done audit.Store from count

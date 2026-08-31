@@ -205,3 +205,180 @@ func assertTreeOrder(t *testing.T, body []Stmt) {
 		previous = end.Offset
 	}
 }
+
+// TestRecoveryReportsMalformedDeclarations covers the declaration-level recovery
+// paths: each is a shape an editor sees mid-edit, and each must produce a named
+// diagnostic rather than a silently wrong tree.
+func TestRecoveryReportsMalformedDeclarations(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		src  string
+		want string
+	}{
+		{
+			name: "a second flow-level note",
+			src:  "flow orders\nnote \"\"\"first\"\"\"\nnote \"\"\"second\"\"\"\nsource in Poll\n",
+			want: "already carries a note",
+		},
+		{
+			name: "a second state block",
+			src:  "flow orders\nstate {\n\ta int\n}\nstate {\n\tb int\n}\nsource in Poll\n",
+			want: "already declares state",
+		},
+		{
+			name: "a second flow-level error handler",
+			src:  "flow orders\non error First\non error Second\nsource in Poll\n",
+			want: "already declares an error handler",
+		},
+		{
+			name: "a note keyword with no body",
+			src:  "flow orders\nnote Handle\nsource in Poll\n",
+			want: "expected a note body",
+		},
+		{
+			name: "on without error",
+			src:  "flow orders\non Handle\nsource in Poll\n",
+			want: `expected "error" after "on"`,
+		},
+		{
+			name: "a state field with no name",
+			src:  "flow orders\nstate {\n\t\"quoted\" int\n}\nsource in Poll\n",
+			want: "expected a state field name",
+		},
+		{
+			name: "a state block closed by the wrong token",
+			src:  "flow orders\nstate {\n\ta int\n)\nsource in Poll\n",
+			want: "to close the state block",
+		},
+		{
+			name: "an import with no path",
+			src:  "flow orders\nimport\nsource in Poll\n",
+			want: "expected a quoted import path",
+		},
+		{
+			name: "an unterminated string literal",
+			src:  "flow orders\nimport \"unterminated\nsource in Poll\n",
+			want: "unterminated string literal",
+		},
+		{
+			name: "a switch arm with no value",
+			src:  "flow orders\nsource in Poll\nswitch route from in on in.Kind {\n\t-> first\n}\n",
+			want: "expected a switch arm value",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			file, err := Parse([]byte(tc.src))
+			if file == nil {
+				t.Fatalf("Parse returned a nil File")
+			}
+			parseErr, ok := err.(*Error)
+			if !ok {
+				t.Fatalf("Parse returned %T, want *Error", err)
+			}
+			requireDiagnostic(t, parseErr.Diagnostics, tc.want)
+
+			// Recovery kept the tree: the flow declaration always survives.
+			if len(file.Decls) == 0 {
+				t.Errorf("the mistake cost the whole file")
+			}
+		})
+	}
+}
+
+// TestFileLevelDeclarationsInsideAFlowBody covers the hoist.
+//
+// The grammar is FLAT — a flow declaration is one entry and what follows it is
+// more entries rather than children of it — so an import, const or param written
+// under a flow line belongs to the FILE. All three canonical strawmen place
+// their imports this way, so treating one as a statement would reject every one
+// of them.
+func TestFileLevelDeclarationsInsideAFlowBody(t *testing.T) {
+	file := mustParse(t, `flow orders
+import billing "example.com/billing"
+const retries = 3
+param endpoint string = ":8080"
+source ingest Poll
+sink done billing.Store from ingest
+`)
+
+	var imports, consts, params, flows int
+	for _, decl := range file.Decls {
+		switch decl.(type) {
+		case ImportDecl:
+			imports++
+		case ConstDecl:
+			consts++
+		case ParamDecl:
+			params++
+		case FlowDecl:
+			flows++
+		}
+	}
+	if imports != 1 || consts != 1 || params != 1 || flows != 1 {
+		t.Fatalf("hoisted %d imports, %d consts, %d params beside %d flows; want one of each",
+			imports, consts, params, flows)
+	}
+	if got := len(flowAt(t, file, 0).Body); got != 2 {
+		t.Errorf("the flow body holds %d statements, want 2 — a declaration was read as one", got)
+	}
+}
+
+// TestRecoveryReportsMalformedStatements covers the statement-level recovery
+// paths, including the two switch-body shapes and the orphaned statement that a
+// func declaration strands.
+func TestRecoveryReportsMalformedStatements(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		src  string
+		want string
+	}{
+		{
+			// A func line ENDS the preceding flow body, so a statement written
+			// after one has no flow to belong to — a different way of arriving
+			// at the same wrong place as a headless statement, and it says so.
+			name: "a statement stranded by a func declaration",
+			src:  "flow orders\nsource in Poll\nfunc F() error { return nil }\ntransform t Step from in\n",
+			want: "a func declaration ended the preceding flow body",
+		},
+		{
+			name: "a switch with no opening brace",
+			src:  "flow orders\nsource in Poll\nswitch route from in on in.Kind\n",
+			want: `expected "{"`,
+		},
+		{
+			name: "a switch arm with no arrow",
+			src:  "flow orders\nsource in Poll\nswitch route from in on in.Kind {\n\t\"card\"\n}\n",
+			want: `expected "->"`,
+		},
+		{
+			name: "two else arms",
+			src:  "flow orders\nsource in Poll\nswitch route from in on in.Kind {\n\t\"a\" -> x\n\telse -> y\n\telse -> z\n}\n",
+			want: "at most one else",
+		},
+		{
+			name: "a note clause with no body",
+			src:  "flow orders\nsource in Poll\ntransform t Step from in note Handle\n",
+			want: "expected a note body",
+		},
+		{
+			name: "a from-list ending in a comma",
+			src:  "flow orders\nsource in Poll\ntransform t Step from in,\n",
+			want: "expected an input name",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			file, err := Parse([]byte(tc.src))
+			if file == nil {
+				t.Fatalf("Parse returned a nil File")
+			}
+			parseErr, ok := err.(*Error)
+			if !ok {
+				t.Fatalf("Parse returned %T, want *Error", err)
+			}
+			requireDiagnostic(t, parseErr.Diagnostics, tc.want)
+			if len(file.Decls) == 0 {
+				t.Errorf("the mistake cost the whole file")
+			}
+		})
+	}
+}

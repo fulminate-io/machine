@@ -1,0 +1,5 @@
+flow orders
+source ingest http.Listen[Order](":8080")
+sink done audit.Store from ingest
+
+func (f machine.Frame[Order]) Result { return Result{} }

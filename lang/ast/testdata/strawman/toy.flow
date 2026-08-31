@@ -1,0 +1,24 @@
+flow orders
+note """
+Order intake: validate, charge billables, archive rejects.
+"""
+import "github.com/acme/billing"
+import "acme.dev/flows/audit"
+state {
+  charged int
+}
+var attempt int
+on error audit.Alert
+source ingest http.Listen[Order](":8080")
+branch validate billing.Validate from ingest -> billable, rejected
+transform charge billing.Charge from billable
+  reads attempt  writes charged
+  over pubsub.Topic("charges")
+  on error billing.Refund
+  note """idempotent: broker may redeliver during failover"""
+tee split from charge -> ledger, mirror
+transform archive audit.Store from rejected, mirror
+drop ledger
+loop retry
+transform redo billing.Backoff from retry
+send redo -> charge
