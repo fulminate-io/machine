@@ -95,7 +95,7 @@ type FlowGraph struct {
 
 // FileGraphs is one source file's derived graphs.
 type FileGraphs struct {
-	Path   string
+	Src    Source
 	Graphs []FlowGraph
 }
 
@@ -135,7 +135,7 @@ func runFlowgraph(p *Pass) (any, error) {
 
 	set := &GraphSet{Files: make([]FileGraphs, 0, len(table.Files))}
 	for _, file := range table.Files {
-		graphs := FileGraphs{Path: file.Path, Graphs: make([]FlowGraph, 0, len(file.Flows))}
+		graphs := FileGraphs{Src: file.Src, Graphs: make([]FlowGraph, 0, len(file.Flows))}
 		for i := range file.Flows {
 			graphs.Graphs = append(graphs.Graphs, buildGraph(&file.Flows[i]))
 		}

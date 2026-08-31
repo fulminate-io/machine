@@ -40,7 +40,7 @@ func runResolve(p *Pass) (any, error) {
 	}
 	for f := range table.Files {
 		for i := range table.Files[f].Flows {
-			resolveFlow(p, &table.Files[f].Flows[i])
+			resolveFlow(p, table.Files[f].Src, &table.Files[f].Flows[i])
 		}
 	}
 	return nil, nil
@@ -54,29 +54,29 @@ func runResolve(p *Pass) (any, error) {
 // at the end, but a run that emitted a different SET on different iterations
 // would be a different problem, and reproducing one is far easier when the
 // emission order is fixed too.
-func resolveFlow(p *Pass, flow *FlowSymbols) {
+func resolveFlow(p *Pass, src Source, flow *FlowSymbols) {
 	for _, name := range sortedNames(flow.Consumers) {
 		for _, ref := range flow.Consumers[name] {
 			if insideBadSpan(flow, ref.Pos) {
 				continue
 			}
-			checkReference(p, flow, name, ref)
+			checkReference(p, src, flow, name, ref)
 		}
 	}
 }
 
 // checkReference reports one reference that does not resolve, or resolves only
 // to a later declaration.
-func checkReference(p *Pass, flow *FlowSymbols, name string, ref NameRef) {
+func checkReference(p *Pass, src Source, flow *FlowSymbols, name string, ref NameRef) {
 	declared, ok := flow.Producers[name]
 	if !ok {
-		p.Report(undefinedName(flow, name, ref))
+		p.Report(src, undefinedName(flow, name, ref))
 		return
 	}
 	if isSendTarget(flow, ref) || declaredBefore(declared, ref) {
 		return
 	}
-	p.Report(declaredLater(flow, name, ref, declared[0]))
+	p.Report(src, declaredLater(flow, name, ref, declared[0]))
 }
 
 // undefinedName builds the diagnostic for a name nothing declares.

@@ -34,8 +34,8 @@ func runReachability(p *Pass) (any, error) {
 	for f := range set.Files {
 		for i := range set.Files[f].Graphs {
 			graph := &set.Files[f].Graphs[i]
-			reportDeadNodes(p, graph)
-			reportUnconsumedOutputs(p, graph)
+			reportDeadNodes(p, set.Files[f].Src, graph)
+			reportUnconsumedOutputs(p, set.Files[f].Src, graph)
 		}
 	}
 	return nil, nil
@@ -99,13 +99,13 @@ func nodeReachable(n *GraphNode, available map[string]bool) bool {
 }
 
 // reportDeadNodes reports every statement the fixpoint could not reach.
-func reportDeadNodes(p *Pass, graph *FlowGraph) {
+func reportDeadNodes(p *Pass, src Source, graph *FlowGraph) {
 	reached := reachableNodes(graph)
 	for i := range graph.Nodes {
 		if reached[i] || graph.Nodes[i].Kind == kindBad {
 			continue
 		}
-		p.Report(Diagnostic{
+		p.Report(src, Diagnostic{
 			Pos: graph.Nodes[i].Pos,
 			End: endOfName(graph.Nodes[i].Pos, graph.Nodes[i].Label),
 			Message: "no data can reach the " + graph.Nodes[i].Kind + " " + graph.Nodes[i].Label +
@@ -126,7 +126,7 @@ func reportDeadNodes(p *Pass, graph *FlowGraph) {
 // of declaring them, so an analysis looking only inside the flow sees a dead end
 // that is not one. Whether a declared output is actually delivered is a separate
 // question and the signature analyzer owns it.
-func reportUnconsumedOutputs(p *Pass, graph *FlowGraph) {
+func reportUnconsumedOutputs(p *Pass, src Source, graph *FlowGraph) {
 	consumed := make(map[string]bool, len(graph.Nodes))
 	for _, name := range graph.Declared {
 		consumed[name] = true
@@ -144,7 +144,7 @@ func reportUnconsumedOutputs(p *Pass, graph *FlowGraph) {
 				continue
 			}
 			seen[name] = true
-			p.Report(unconsumedOutput(graph, &graph.Nodes[i], name))
+			p.Report(src, unconsumedOutput(graph, &graph.Nodes[i], name))
 		}
 	}
 }

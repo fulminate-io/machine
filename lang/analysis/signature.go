@@ -60,8 +60,8 @@ func runSignature(p *Pass) (any, error) {
 	for f := range table.Files {
 		for i := range table.Files[f].Flows {
 			flow := &table.Files[f].Flows[i]
-			reportUndeliveredOutputs(p, flow)
-			reportUseArities(p, flow)
+			reportUndeliveredOutputs(p, table.Files[f].Src, flow)
+			reportUseArities(p, table.Files[f].Src, flow)
 		}
 	}
 	return nil, nil
@@ -85,12 +85,12 @@ func exportOutputs(p *Pass, flow *FlowSymbols) {
 // This is the parser handing work over explicitly: FlowSignature's own
 // documentation says "the analysis engine checks that every declared output is
 // delivered".
-func reportUndeliveredOutputs(p *Pass, flow *FlowSymbols) {
+func reportUndeliveredOutputs(p *Pass, src Source, flow *FlowSymbols) {
 	for _, out := range flow.Outputs {
 		if _, produced := flow.Producers[out.Name.Name]; produced {
 			continue
 		}
-		p.Report(Diagnostic{
+		p.Report(src, Diagnostic{
 			Pos:      out.Name.NamePos,
 			End:      out.Name.End(),
 			Message:  "flow " + flow.Name + " declares the output " + out.Name.Name + " but no statement delivers it",
@@ -101,13 +101,13 @@ func reportUndeliveredOutputs(p *Pass, flow *FlowSymbols) {
 
 // reportUseArities checks each use statement's bindings against the embedded
 // flow's declared outputs.
-func reportUseArities(p *Pass, flow *FlowSymbols) {
+func reportUseArities(p *Pass, src Source, flow *FlowSymbols) {
 	for _, stmt := range flow.Body {
 		use, ok := stmt.(ast.UseStmt)
 		if !ok {
 			continue
 		}
-		checkUseArity(p, flow, use)
+		checkUseArity(p, src, flow, use)
 	}
 }
 
@@ -115,7 +115,7 @@ func reportUseArities(p *Pass, flow *FlowSymbols) {
 //
 // A missing fact is SILENCE rather than a diagnostic: the reference may name a
 // flow that is simply not part of this run.
-func checkUseArity(p *Pass, flow *FlowSymbols, use ast.UseStmt) {
+func checkUseArity(p *Pass, src Source, flow *FlowSymbols, use ast.UseStmt) {
 	var outputs flowOutputsFact
 	if !p.ImportFact(useReference(use), &outputs) {
 		return
@@ -123,7 +123,7 @@ func checkUseArity(p *Pass, flow *FlowSymbols, use ast.UseStmt) {
 	if len(use.Bindings) == len(outputs.Outputs) {
 		return
 	}
-	p.Report(Diagnostic{
+	p.Report(src, Diagnostic{
 		Pos: use.Instance.NamePos,
 		End: use.End(),
 		Message: "the use of " + useReference(use) + " in flow " + flow.Name + " binds " +

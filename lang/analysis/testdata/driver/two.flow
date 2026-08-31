@@ -1,0 +1,4 @@
+flow two
+import "acme.dev/flows/audit"
+source ingest Poll
+sink done audit.Store from ingest

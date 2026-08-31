@@ -55,12 +55,19 @@ func (s Severity) String() string {
 //
 // Code is the emitting analyzer's Name, so a consumer can suppress or route one
 // rule without matching on message text.
+//
+// Path is the file the diagnostic is about. A run covers many sources, and a
+// position alone cannot name one: ast.Position.Offset is per-file and every
+// parsed tree starts at offset zero, so two diagnostics in two files routinely
+// carry identical positions. The driver stamps Path from the Source the
+// reporting analyzer named, exactly as it stamps Code.
 type Diagnostic struct {
 	Pos      ast.Position
 	End      ast.Position
 	Message  string
 	Severity Severity
 	Code     string
+	Path     string
 }
 
 // Source is one file under analysis: its path, its bytes and its parsed tree.
@@ -81,7 +88,10 @@ type Source struct {
 // A parse that produced diagnostics still produced a tree, so a caller feeds the
 // tree to the analyzers AND renders these alongside whatever the analyzers find.
 // A nil error, or an error that is not an *ast.Error, yields no diagnostics.
-func ParseDiagnostics(err error) []Diagnostic {
+//
+// The path is supplied by the caller rather than read off anything, because a
+// parse error carries a tree and positions and never a file name.
+func ParseDiagnostics(path string, err error) []Diagnostic {
 	var perr *ast.Error
 	if !errors.As(err, &perr) {
 		return nil
@@ -94,6 +104,7 @@ func ParseDiagnostics(err error) []Diagnostic {
 			Message:  d.Message,
 			Severity: SeverityError,
 			Code:     parseCode,
+			Path:     path,
 		})
 	}
 	return out

@@ -56,8 +56,11 @@ func (a *Analyzer) String() string { return a.Name }
 // does that flow deliver the outputs it declares — cannot be asked one file at a
 // time.
 //
-// Report accepts a Diagnostic with its Code left unset: the driver stamps Code
-// with the reporting analyzer's Name.
+// Report takes the SOURCE the finding is about alongside the Diagnostic, and the
+// driver stamps both Code and Path from them. Passing the source rather than
+// letting an analyzer fill in a Path field is what makes a forgotten file
+// attribution a COMPILE ERROR instead of an empty string and a silently
+// degraded sort.
 //
 // ImportFact fills the value pointed at by f with a fact previously exported for
 // obj under that same pointer type, reporting whether one was found. ExportFact
@@ -66,7 +69,7 @@ func (a *Analyzer) String() string { return a.Name }
 type Pass struct {
 	Analyzer   *Analyzer
 	Sources    []Source
-	Report     func(Diagnostic)
+	Report     func(Source, Diagnostic)
 	ResultOf   map[*Analyzer]any
 	ImportFact func(obj string, f Fact) bool
 	ExportFact func(obj string, f Fact)

@@ -45,7 +45,7 @@ func TestParseDiagnosticsConvertsAParseError(t *testing.T) {
 		t.Fatalf("%s parsed clean; it is the corpus's broken fixture", path)
 	}
 
-	diags := ParseDiagnostics(err)
+	diags := ParseDiagnostics(path, err)
 	if len(diags) == 0 {
 		t.Fatal("a parse error yielded no diagnostics")
 	}
@@ -56,6 +56,9 @@ func TestParseDiagnosticsConvertsAParseError(t *testing.T) {
 		if d.Code != "parse" {
 			t.Errorf("a parse diagnostic carries code %q, want parse", d.Code)
 		}
+		if d.Path != path {
+			t.Errorf("a parse diagnostic carries path %q, want %q", d.Path, path)
+		}
 		if d.Message == "" {
 			t.Error("a parse diagnostic carries no message")
 		}
@@ -65,10 +68,10 @@ func TestParseDiagnosticsConvertsAParseError(t *testing.T) {
 // TestParseDiagnosticsIgnoresOtherErrors pins that the converter reports nothing
 // for an error it cannot read, rather than inventing a diagnostic at 0:0.
 func TestParseDiagnosticsIgnoresOtherErrors(t *testing.T) {
-	if got := ParseDiagnostics(nil); got != nil {
+	if got := ParseDiagnostics("nothing.flow", nil); got != nil {
 		t.Errorf("a nil error yielded %d diagnostics", len(got))
 	}
-	if got := ParseDiagnostics(errors.New("some unrelated failure")); got != nil {
+	if got := ParseDiagnostics("nothing.flow", errors.New("some unrelated failure")); got != nil {
 		t.Errorf("an unrelated error yielded %d diagnostics", len(got))
 	}
 }

@@ -76,17 +76,6 @@ func loadSource(t *testing.T, path string) Source {
 	return parseSource(t, path, string(src))
 }
 
-// strawmen loads the three canonical programs.
-func strawmen(t *testing.T) []Source {
-	t.Helper()
-
-	out := make([]Source, 0, len(strawmanFiles))
-	for _, name := range strawmanFiles {
-		out = append(out, loadSource(t, filepath.Join(strawmanDir, name)))
-	}
-	return out
-}
-
 // analyze runs one analyzer, and everything it requires, over one source.
 func analyze(t *testing.T, a *Analyzer, src Source) []Diagnostic {
 	t.Helper()
@@ -282,7 +271,7 @@ func sortedKeys[V any](m map[string]V) []string {
 func messages(diags []Diagnostic) []string {
 	out := make([]string, 0, len(diags))
 	for _, d := range diags {
-		out = append(out, d.Pos.String()+" ["+d.Code+"/"+d.Severity.String()+"] "+d.Message)
+		out = append(out, d.Path+":"+d.Pos.String()+" ["+d.Code+"/"+d.Severity.String()+"] "+d.Message)
 	}
 	return out
 }

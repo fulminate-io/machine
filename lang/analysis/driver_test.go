@@ -5,6 +5,7 @@
 package analysis
 
 import (
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -192,12 +193,12 @@ func TestDriverStampsTheReportingAnalyzersName(t *testing.T) {
 		Name: "stamper",
 		Doc:  "reports one diagnostic and sets no Code",
 		Run: func(p *Pass) (any, error) {
-			p.Report(Diagnostic{Message: "something", Severity: SeverityWarning})
+			p.Report(p.Sources[0], Diagnostic{Message: "something", Severity: SeverityWarning})
 			return nil, nil
 		},
 	}
 
-	diags, err := Run(nil, []*Analyzer{reporter})
+	diags, err := Run([]Source{{Path: "stamped.flow"}}, []*Analyzer{reporter})
 	if err != nil {
 		t.Fatalf("the reporting run failed: %v", err)
 	}
@@ -238,7 +239,7 @@ func TestDiagnosticsSortByPositionThenCode(t *testing.T) {
 	early := reportAt("alpha", 10)
 	tie := reportAt("beta", 10)
 
-	diags, err := Run(nil, []*Analyzer{late, tie, early})
+	diags, err := Run([]Source{{Path: "ordering.flow"}}, []*Analyzer{late, tie, early})
 	if err != nil {
 		t.Fatalf("the ordering run failed: %v", err)
 	}
@@ -258,8 +259,68 @@ func reportAt(name string, offset int) *Analyzer {
 		Name: name,
 		Doc:  "reports one diagnostic at a fixed offset",
 		Run: func(p *Pass) (any, error) {
-			p.Report(Diagnostic{Pos: position(offset), Message: name, Severity: SeverityHint})
+			p.Report(p.Sources[0], Diagnostic{Pos: position(offset), Message: name, Severity: SeverityHint})
 			return nil, nil
 		},
+	}
+}
+
+// TestDiagnosticsAreFileAttributedAndSortStable gates what the Path amendment
+// actually buys, rather than that the field exists.
+//
+// ATTRIBUTION. Both findings sit at OFFSET 0, which is the deliberate choice:
+// every parsed file's tree starts there, so position cannot tell them apart and
+// the only thing that can is the file each is about. They also carry the same
+// message and the same code, so nothing else in the sort key can stand in for
+// Path.
+//
+// SORT STABILITY ACROSS SOURCES ORDER. Running the same two files with the
+// Sources slice reversed returns identical diagnostics. That is the property a
+// consumer needs — two runs over the same files produce the same output — and it
+// is the leg that discriminates: with Path leading the key the order follows the
+// content, while without it the two findings tie and the sort falls back to
+// arrival order, so reversing the input reverses the output.
+func TestDiagnosticsAreFileAttributedAndSortStable(t *testing.T) {
+	one := loadSource(t, filepath.Join("testdata", "driver", "one.flow"))
+	two := loadSource(t, filepath.Join("testdata", "driver", "two.flow"))
+
+	atZero := &Analyzer{
+		Name: "at-zero",
+		Doc:  "reports one identical diagnostic at offset zero for every source",
+		Run: func(p *Pass) (any, error) {
+			for _, src := range p.Sources {
+				p.Report(src, Diagnostic{
+					Pos:      position(0),
+					Message:  "a finding about this file",
+					Severity: SeverityWarning,
+				})
+			}
+			return nil, nil
+		},
+	}
+
+	forward, err := Run([]Source{one, two}, []*Analyzer{atZero})
+	if err != nil {
+		t.Fatalf("the forward run failed: %v", err)
+	}
+	if len(forward) != 2 {
+		t.Fatalf("got %d diagnostics, want one per source: %v", len(forward), messages(forward))
+	}
+	if forward[0].Path == forward[1].Path {
+		t.Fatalf("two findings in two files both carry path %q, so neither can be attributed", forward[0].Path)
+	}
+	for i, want := range []string{one.Path, two.Path} {
+		if forward[i].Path != want {
+			t.Errorf("diagnostic %d carries path %q, want %q", i, forward[i].Path, want)
+		}
+	}
+
+	reverse, rerr := Run([]Source{two, one}, []*Analyzer{atZero})
+	if rerr != nil {
+		t.Fatalf("the reversed run failed: %v", rerr)
+	}
+	if !reflect.DeepEqual(forward, reverse) {
+		t.Errorf("reversing the Sources slice changed the output.\nforward: %v\nreverse: %v",
+			messages(forward), messages(reverse))
 	}
 }

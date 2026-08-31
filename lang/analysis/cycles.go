@@ -41,7 +41,7 @@ type Cycle struct {
 
 // FileCycles is one source file's cycles.
 type FileCycles struct {
-	Path   string
+	Src    Source
 	Cycles []Cycle
 }
 
@@ -59,13 +59,13 @@ func runCycles(p *Pass) (any, error) {
 
 	out := &CycleSet{Files: make([]FileCycles, 0, len(set.Files))}
 	for f := range set.Files {
-		found := FileCycles{Path: set.Files[f].Path}
+		found := FileCycles{Src: set.Files[f].Src}
 		for i := range set.Files[f].Graphs {
 			graph := &set.Files[f].Graphs[i]
 			for _, cycle := range cyclesIn(graph) {
 				found.Cycles = append(found.Cycles, cycle)
 				if !cycle.HasSend {
-					p.Report(sendFreeCycle(graph, cycle))
+					p.Report(set.Files[f].Src, sendFreeCycle(graph, cycle))
 				}
 			}
 		}

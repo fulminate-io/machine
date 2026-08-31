@@ -50,7 +50,7 @@ func Run(srcs []Source, analyzers []*Analyzer) ([]Diagnostic, error) {
 		pass := &Pass{
 			Analyzer:   a,
 			Sources:    srcs,
-			Report:     func(d Diagnostic) { d.Code = a.Name; diags = append(diags, d) },
+			Report:     func(src Source, d Diagnostic) { diags = append(diags, stamp(a, src, d)) },
 			ResultOf:   results,
 			ImportFact: func(obj string, f Fact) bool { return importFact(facts, obj, f) },
 			ExportFact: func(obj string, f Fact) { facts[factKey{obj: obj, typ: factType(f)}] = f },
@@ -66,17 +66,31 @@ func Run(srcs []Source, analyzers []*Analyzer) ([]Diagnostic, error) {
 	return diags, nil
 }
 
+// stamp fills in the two fields the driver owns rather than the analyzer: the
+// reporting analyzer's Name as the rule Code, and the reported Source's path.
+//
+// Both are stamped here so neither can drift. An analyzer cannot emit under a
+// foreign code, and cannot attribute a finding to a file it was not looking at.
+func stamp(a *Analyzer, src Source, d Diagnostic) Diagnostic {
+	d.Code = a.Name
+	d.Path = src.Path
+	return d
+}
+
 // sortDiagnostics puts the run's findings in a stable order so two runs over the
 // same sources produce byte-identical output.
 //
-// THE KEY DOES NOT INCLUDE A FILE PATH, and that is a property of the locked
-// Diagnostic rather than an oversight: a Diagnostic carries a position, a
-// message, a severity and a rule code, and no path. Diagnostics from different
-// files whose keys tie therefore keep the order they arrived in, which is
-// Sources order because every analyzer walks Pass.Sources front to back. Within
-// one file the key is total.
+// THE KEY LEADS WITH PATH, which is what makes the order a function of the
+// CONTENT rather than of the order the caller happened to list its sources in.
+// Without it the key would tie for two findings at the same offset in different
+// files — the ordinary case, since every parsed tree starts at offset zero — and
+// the sort would fall back to arrival order, so reversing the Sources slice would
+// reverse the output.
 func sortDiagnostics(diags []Diagnostic) {
 	sort.SliceStable(diags, func(i, j int) bool {
+		if diags[i].Path != diags[j].Path {
+			return diags[i].Path < diags[j].Path
+		}
 		if diags[i].Pos.Offset != diags[j].Pos.Offset {
 			return diags[i].Pos.Offset < diags[j].Pos.Offset
 		}

@@ -74,8 +74,11 @@ type FlowSymbols struct {
 }
 
 // FileSymbols is one source file's declarations.
+//
+// Src is the source itself rather than only its path, because every analyzer
+// downstream reports against this table and Report takes a Source.
 type FileSymbols struct {
-	Path    string
+	Src     Source
 	Funcs   map[string]ast.Position
 	Imports []ImportRef
 	Flows   []FlowSymbols
@@ -115,7 +118,7 @@ func runSymbols(p *Pass) (any, error) {
 // NOT against lang/ast growing a shape, and this module is versioned separately
 // from that one.
 func tableFile(p *Pass, src Source) FileSymbols {
-	out := FileSymbols{Path: src.Path, Funcs: map[string]ast.Position{}}
+	out := FileSymbols{Src: src, Funcs: map[string]ast.Position{}}
 	for _, decl := range src.File.Decls {
 		switch d := decl.(type) {
 		case ast.ImportDecl:
@@ -123,9 +126,9 @@ func tableFile(p *Pass, src Source) FileSymbols {
 		case ast.FuncDecl:
 			out.Funcs[d.Name.Name] = d.Name.NamePos
 		case ast.FlowDecl:
-			out.Flows = append(out.Flows, tableFlow(p, d))
+			out.Flows = append(out.Flows, tableFlow(p, src, d))
 		default:
-			reportUnknownDecl(p, decl)
+			reportUnknownDecl(p, src, decl)
 		}
 	}
 	return out
@@ -148,12 +151,12 @@ func importRef(d ast.ImportDecl) ImportRef {
 // not tabled here, and are matched off before this point by the shapes above
 // only when they are the ones this analyzer wants. Anything else means lang/ast
 // grew a declaration shape and this module has not caught up.
-func reportUnknownDecl(p *Pass, decl ast.Decl) {
+func reportUnknownDecl(p *Pass, src Source, decl ast.Decl) {
 	switch decl.(type) {
 	case ast.ConstDecl, ast.ParamDecl, ast.NoteBlock, ast.StateDecl, ast.VarDecl, ast.OnErrorDecl:
 		return
 	default:
-		p.Report(Diagnostic{
+		p.Report(src, Diagnostic{
 			Pos:      decl.Pos(),
 			End:      decl.End(),
 			Message:  "this analysis module does not know the declaration shape " + typeName(decl),
@@ -163,8 +166,8 @@ func reportUnknownDecl(p *Pass, decl ast.Decl) {
 }
 
 // tableFlow reads one flow's names.
-func tableFlow(p *Pass, fd ast.FlowDecl) FlowSymbols {
-	c := &symbolCollector{pass: p, flow: newFlowSymbols(fd)}
+func tableFlow(p *Pass, src Source, fd ast.FlowDecl) FlowSymbols {
+	c := &symbolCollector{pass: p, src: src, flow: newFlowSymbols(fd)}
 	c.signature(fd.Signature)
 	for _, v := range fd.Vars {
 		c.flow.Vars[v.Name.Name] = v
@@ -202,6 +205,7 @@ func newFlowSymbols(fd ast.FlowDecl) *FlowSymbols {
 // symbolCollector accumulates one flow's tables as the walk proceeds.
 type symbolCollector struct {
 	pass *Pass
+	src  Source
 	flow *FlowSymbols
 }
 
@@ -298,7 +302,7 @@ func (c *symbolCollector) visitPlain(i int, stmt ast.Stmt) {
 // nothing while every clean-corpus assertion stayed green. Both are reported
 // rather than skipped.
 func (c *symbolCollector) unknownStmt(stmt ast.Stmt) {
-	c.pass.Report(Diagnostic{
+	c.pass.Report(c.src, Diagnostic{
 		Pos:      stmt.Pos(),
 		End:      stmt.End(),
 		Message:  "this analysis module does not know the statement shape " + typeName(stmt),
