@@ -44,7 +44,7 @@ jobs:
       # below it fails here rather than surfacing later in a coverage report.
       - name: Enforce coverage floor
         env:
-          COVERAGE_FLOOR: "99"
+          COVERAGE_FLOOR: "100"
         run: |
           total=$(go tool cover -func=coverage.out | awk '$1 == "total:" { print $NF }')
           test -n "$total" || { echo "coverage.out yielded no total line"; exit 1; }

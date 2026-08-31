@@ -348,8 +348,6 @@ func rewrap[T, U any](f Frame[T], payload U) Frame[U] {
 
 func newID() string {
 	buf := make([]byte, idBytes)
-	if _, err := rand.Read(buf); err != nil {
-		panic("machine: frame identifier generation failed: " + err.Error())
-	}
+	_, _ = rand.Read(buf)
 	return hex.EncodeToString(buf)
 }
