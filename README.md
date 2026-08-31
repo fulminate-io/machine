@@ -55,7 +55,7 @@ if err := send(ctx, 21); err != nil {
 
 `Source` returns the flow **and** the `Ingest` closure that feeds it. `Map` changes the payload type, so the chain above goes `int` → `int` → `string`.
 
-To consume results rather than discard them, end the chain with `Output`, which hands back the channel of frames leaving the flow:
+To consume results rather than discard them, end the chain with `Output`, which hands back the channel of packets leaving the flow:
 
 ```golang
 out := numbers.
@@ -64,11 +64,11 @@ out := numbers.
 
 // ... start and send ...
 
-frame := <-out
-fmt.Println(frame.Value(), frame.ID(), frame.Source(), frame.Node())
+packet := <-out
+fmt.Println(packet.Value(), packet.ID(), packet.Source(), packet.Node())
 ```
 
-Frames reaching an `Output` belong to the **caller** and are not reclaimed. Everywhere else the runtime reclaims a frame's stack state when the traversal ends.
+Packets reaching an `Output` belong to the **caller** and are not reclaimed. Everywhere else the runtime reclaims a datum's stack state when the traversal ends.
 
 ------
 
