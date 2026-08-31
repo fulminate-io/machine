@@ -128,7 +128,7 @@ func TestInitializeWithNoWorkspaceFoldersIsSingleFileMode(t *testing.T) {
 	s, _, ctx := newSession(t)
 
 	// A client that supports workspace folders but has none configured sends an
-	// explicit null. That is single-file mode, not an error, and NOT a licence
+	// explicit null. That is single-file mode, not an error, and NOT a license
 	// to substitute the process working directory.
 	if _, err := s.Initialize(ctx, &protocol.InitializeParams{
 		WorkspaceFoldersInitializeParams: protocol.WorkspaceFoldersInitializeParams{

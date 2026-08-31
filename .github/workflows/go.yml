@@ -324,3 +324,60 @@ jobs:
               exit 1
             }
           }'
+
+  # lang/lsp is a separate module for the same reason every other module here is:
+  # a root-scoped `go list ./...` prints only the root package, so without a job
+  # of its own it would rot invisibly. UNLIKE lang/ast, lang/analysis and
+  # lang/lint it HAS a go.sum — it depends on go.lsp.dev/protocol and jsonrpc2 —
+  # so the cache is pointed at that file rather than omitted. Every step that
+  # runs a command carries working-directory lang/lsp, because one that does not
+  # would build, test or measure the root module and report a green about the
+  # wrong code entirely.
+  lang-lsp:
+    name: lang/lsp
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'lang/lsp/go.mod'
+          cache-dependency-path: 'lang/lsp/go.sum'
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+          working-directory: lang/lsp
+          args: --config ${{ github.workspace }}/.golangci.yml
+          github-token: ${{ github.token }}
+          only-new-issues: true
+      - name: Go Build
+        working-directory: lang/lsp
+        run: go build ./...
+      - name: Go Test
+        working-directory: lang/lsp
+        run: go test -timeout 600s -coverprofile=coverage.out ./...
+
+      # The floor is the coverage the suite actually achieves, so a change that
+      # drops below it fails here rather than surfacing later in a coverage
+      # report. It was MEASURED against this suite rather than copied from any
+      # job above: lang/ast reaches 100 because the marker methods sealing its
+      # AST have empty bodies and contribute no statements, and a module wrapping
+      # a third-party transport has its own profile again. What sits below 100
+      # here is two things neither worth a fixture — the defensive refusal arms
+      # that fire only if a consumed contract changes underneath this module, and
+      # the stdio binary, whose whole body is the stream wiring that the
+      # in-process pipe handshake test exercises without spawning a subprocess.
+      - name: Enforce coverage floor
+        working-directory: lang/lsp
+        env:
+          COVERAGE_FLOOR: "94"
+        run: |
+          total=$(go tool cover -func=coverage.out | awk '$1 == "total:" { print $NF }')
+          test -n "$total" || { echo "coverage.out yielded no total line"; exit 1; }
+          echo "total statement coverage: $total"
+          awk -v got="${total%\%}" -v floor="$COVERAGE_FLOOR" 'BEGIN {
+            if (got + 0 < floor + 0) {
+              printf "coverage %s%% is below the %s%% floor\n", got, floor
+              exit 1
+            }
+          }'
