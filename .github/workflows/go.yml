@@ -269,3 +269,58 @@ jobs:
               exit 1
             }
           }'
+
+  # lang/lint is a separate module for the same reason the lang and edge modules
+  # are: a root-scoped `go list ./...` prints only the root package, so without a
+  # job of its own it would rot invisibly. It carries no cache-dependency-path
+  # because a dependency-free module has no go.sum — lang/analysis and lang/ast
+  # both arrive through local replaces — and pointing the cache at a file that
+  # does not exist fails the job rather than missing the cache. Every step that
+  # runs a command carries working-directory lang/lint, because one that does not
+  # would build, test or measure the root module and report a green about the
+  # wrong code entirely.
+  lang-lint:
+    name: lang/lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'lang/lint/go.mod'
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+          working-directory: lang/lint
+          args: --config ${{ github.workspace }}/.golangci.yml
+          github-token: ${{ github.token }}
+          only-new-issues: true
+      - name: Go Build
+        working-directory: lang/lint
+        run: go build ./...
+      - name: Go Test
+        working-directory: lang/lint
+        run: go test -timeout 600s -coverprofile=coverage.out ./...
+
+      # The floor is the coverage the suite actually achieves, so a change that
+      # drops below it fails here rather than surfacing later in a coverage
+      # report. It was MEASURED against this suite rather than copied from the
+      # lang/ast or lang/analysis jobs above. What sits below 100 is two things
+      # neither worth a fixture: the write-error paths, which need an io.Writer
+      # that fails and this module's callers all hand it a real stream; and the
+      # process-exiting main, whose whole body is the os.Exit that run's own
+      # in-process tests exist to avoid.
+      - name: Enforce coverage floor
+        working-directory: lang/lint
+        env:
+          COVERAGE_FLOOR: "93"
+        run: |
+          total=$(go tool cover -func=coverage.out | awk '$1 == "total:" { print $NF }')
+          test -n "$total" || { echo "coverage.out yielded no total line"; exit 1; }
+          echo "total statement coverage: $total"
+          awk -v got="${total%\%}" -v floor="$COVERAGE_FLOOR" 'BEGIN {
+            if (got + 0 < floor + 0) {
+              printf "coverage %s%% is below the %s%% floor\n", got, floor
+              exit 1
+            }
+          }'
