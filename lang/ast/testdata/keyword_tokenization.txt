@@ -1,0 +1,47 @@
+# Keyword tokenization record for the flow language.
+#
+# Every keyword in the language is a SINGLE token under both of the encodings a
+# contemporary model is decoded with. A keyword that fragments costs the model
+# probability mass at every occurrence and makes constrained decoding harder, so
+# the inventory is measured rather than assumed.
+#
+# tokenizer: tiktoken 0.14.0 under python 3.14.3
+# encodings: o200k_base, cl100k_base
+# measured:  bare and leading-space forms; the after-newline form of every
+#            keyword decodes as ['\n', '<keyword>'], so the newline is its own
+#            token and the keyword stays atomic.
+#
+# THE RECORD IS DATA, NOT A HARNESS. No tokenizer dependency is added to this
+# module or to CI. TestEveryKeywordHasATokenizationRecord asserts set equality
+# between these rows and the keyword table, so a twenty-seventh keyword cannot
+# enter the language without someone measuring it first — which is exactly the
+# situation `checkpoint` and then `func` created, twice.
+#
+# format: <keyword> o200k_base=<n> cl100k_base=<n>
+
+flow o200k_base=1 cl100k_base=1
+note o200k_base=1 cl100k_base=1
+import o200k_base=1 cl100k_base=1
+state o200k_base=1 cl100k_base=1
+var o200k_base=1 cl100k_base=1
+const o200k_base=1 cl100k_base=1
+param o200k_base=1 cl100k_base=1
+on o200k_base=1 cl100k_base=1
+source o200k_base=1 cl100k_base=1
+transform o200k_base=1 cl100k_base=1
+branch o200k_base=1 cl100k_base=1
+switch o200k_base=1 cl100k_base=1
+tee o200k_base=1 cl100k_base=1
+sink o200k_base=1 cl100k_base=1
+drop o200k_base=1 cl100k_base=1
+loop o200k_base=1 cl100k_base=1
+send o200k_base=1 cl100k_base=1
+use o200k_base=1 cl100k_base=1
+from o200k_base=1 cl100k_base=1
+over o200k_base=1 cl100k_base=1
+reads o200k_base=1 cl100k_base=1
+writes o200k_base=1 cl100k_base=1
+clone o200k_base=1 cl100k_base=1
+else o200k_base=1 cl100k_base=1
+checkpoint o200k_base=1 cl100k_base=1
+func o200k_base=1 cl100k_base=1
