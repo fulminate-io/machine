@@ -214,3 +214,55 @@ jobs:
               exit 1
             }
           }'
+
+  # raft is a separate module for the same reason the edge and lang modules are: a
+  # root-scoped `go list ./...` prints only the root package, so without a job of
+  # its own it would rot invisibly. Unlike lang/ast it HAS a go.sum, so the cache
+  # is pointed at it; every step that runs a command carries working-directory
+  # raft, because one that does not would build, test or measure the root module
+  # and report a green about the wrong code entirely.
+  raft:
+    name: raft
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'raft/go.mod'
+          cache-dependency-path: 'raft/go.sum'
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+          working-directory: raft
+          args: --config ${{ github.workspace }}/.golangci.yml
+          github-token: ${{ github.token }}
+          only-new-issues: true
+      - name: Go Build
+        working-directory: raft
+        run: go build ./...
+      - name: Go Test
+        working-directory: raft
+        run: go test -timeout 600s -coverprofile=coverage.out ./...
+
+      # The floor is the coverage the suite actually achieves, so a change that
+      # drops below it fails here rather than surfacing later in a coverage
+      # report. It is measured against this suite rather than copied from the
+      # root and lang/ast jobs: those cover a runtime and a parser whose error
+      # paths are all reachable in-process, whereas a transport's paths run
+      # through real listeners and real connections. This workflow is the one
+      # place the number is declared — the module gate reads it from here.
+      - name: Enforce coverage floor
+        working-directory: raft
+        env:
+          COVERAGE_FLOOR: "90"
+        run: |
+          total=$(go tool cover -func=coverage.out | awk '$1 == "total:" { print $NF }')
+          test -n "$total" || { echo "coverage.out yielded no total line"; exit 1; }
+          echo "total statement coverage: $total"
+          awk -v got="${total%\%}" -v floor="$COVERAGE_FLOOR" 'BEGIN {
+            if (got + 0 < floor + 0) {
+              printf "coverage %s%% is below the %s%% floor\n", got, floor
+              exit 1
+            }
+          }'
