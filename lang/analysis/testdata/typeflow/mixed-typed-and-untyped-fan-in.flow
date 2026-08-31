@@ -1,0 +1,7 @@
+note """analysis check: SILENCE across a MIXED fan-in. `ok` carries the declared spelling OkResult; `tidy` is a plain node output that nothing gives a type. An untyped input must contribute NOTHING to the comparison rather than an identity of its own -- treating absence as a distinct identity turns every partly-declared fan-in into a false disagreement, and this is the only shape that tells the two implementations apart."""
+flow screening (Order) -> ok OkResult, bad OkResult
+import "github.com/acme/fraud"
+import "acme.dev/flows/audit"
+branch check fraud.Clean from in -> ok, bad
+transform tidy audit.Tag from bad
+sink merge audit.Store from ok, tidy

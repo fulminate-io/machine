@@ -151,6 +151,16 @@ func endOfName(pos ast.Position, name string) ast.Position {
 	return ast.Position{Offset: pos.Offset + len(name), Line: pos.Line, Col: pos.Col + len(name)}
 }
 
+// sortedFieldNames is a state-field table's keys in a stable order.
+func sortedFieldNames(fields map[string]ast.StateField) []string {
+	out := make([]string, 0, len(fields))
+	for name := range fields {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // sortInts orders a slice of statement indices in place.
 func sortInts(v []int) { sort.Ints(v) }
 

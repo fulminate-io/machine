@@ -68,6 +68,7 @@ type FlowSymbols struct {
 	Routing      map[string]NameRef
 	Vars         map[string]ast.VarDecl
 	State        map[string]ast.StateField
+	OnError      *ast.OnErrorDecl
 	Outputs      []ast.FlowOutput
 	HasSignature bool
 	Bad          []ast.BadStmt
@@ -191,6 +192,7 @@ func newFlowSymbols(fd ast.FlowDecl) *FlowSymbols {
 		Name:      fd.Name.Name,
 		Pos:       fd.Name.NamePos,
 		Body:      fd.Body,
+		OnError:   fd.OnError,
 		Producers: make(map[string][]NameRef, n),
 		Consumers: make(map[string][]NameRef, n),
 		Reads:     make(map[string][]NameRef, n),

@@ -1,0 +1,9 @@
+note """analysis check: a var read while nothing anywhere writes it. That is not a zero-value read, it is a value nothing ever produces. The distinction from the sibling fixture is the whole content of the rule."""
+flow orders
+import "github.com/acme/billing"
+import "acme.dev/flows/audit"
+var attempt int
+source ingest Poll
+transform charge billing.Charge from ingest
+  reads attempt
+sink done audit.Store from charge

@@ -1,0 +1,6 @@
+note """analysis check: a fan-in whose inputs carry DIFFERENT declared type identities. `ok` is declared OkResult and `bad` is declared ErrResult in the flow signature, and the sink joins both. This is the only shape v1 can decide, because a declared spelling is the only source of a type identity without go/types."""
+flow screening (Order) -> ok OkResult, bad ErrResult
+import "github.com/acme/fraud"
+import "acme.dev/flows/audit"
+branch check fraud.Clean from in -> ok, bad
+sink merge audit.Store from ok, bad

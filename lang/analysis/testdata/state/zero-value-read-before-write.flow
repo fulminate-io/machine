@@ -1,0 +1,11 @@
+note """analysis check: NOT a diagnostic. `attempt` is READ by an earlier statement and WRITTEN by a later one. Flow-level vars carry Go's zero-value semantics, so reading before the first write is legal and the rule is ordering-free. This is the fixture an ordering check fires on."""
+flow orders
+import "github.com/acme/billing"
+import "acme.dev/flows/audit"
+var attempt int
+source ingest Poll
+transform charge billing.Charge from ingest
+  reads attempt
+transform backoff billing.Backoff from charge
+  writes attempt
+sink done audit.Store from backoff

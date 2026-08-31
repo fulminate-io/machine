@@ -1,0 +1,8 @@
+note """analysis check: SILENCE, not agreement. This fan-in joins two plain node outputs, and no declared spelling gives either one a type identity, so v1 has nothing to compare. The silence here is the absence of a decidable question, never a proof that the two agree."""
+flow orders
+import "github.com/acme/billing"
+import "acme.dev/flows/audit"
+source ingest Poll
+branch check billing.Validate from ingest -> good, bad
+transform tidy billing.Tidy from good
+sink merge audit.Store from tidy, bad

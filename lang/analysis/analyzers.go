@@ -20,4 +20,8 @@ func init() {
 	Register(ReachabilityAnalyzer)
 	Register(CyclesAnalyzer)
 	Register(SignatureAnalyzer)
+	Register(StateAnalyzer)
+	Register(SwitchesAnalyzer)
+	Register(ErrorRoutingAnalyzer)
+	Register(TypeflowAnalyzer)
 }
