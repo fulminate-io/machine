@@ -30,6 +30,9 @@ var (
 
 // DidOpen records an editor's buffer and republishes.
 func (s *Server) DidOpen(ctx context.Context, params *protocol.DidOpenTextDocumentParams) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	client, err := s.clientFor(ctx)
 	if err != nil {
 		return err
@@ -40,6 +43,9 @@ func (s *Server) DidOpen(ctx context.Context, params *protocol.DidOpenTextDocume
 
 // DidChange replaces an open document's bytes and republishes.
 func (s *Server) DidChange(ctx context.Context, params *protocol.DidChangeTextDocumentParams) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	client, err := s.clientFor(ctx)
 	if err != nil {
 		return err
@@ -60,6 +66,9 @@ func (s *Server) DidChange(ctx context.Context, params *protocol.DidChangeTextDo
 // follows, because clearing it and immediately refilling it in the same
 // notification would satisfy the letter of the clear and invert its purpose.
 func (s *Server) DidClose(ctx context.Context, params *protocol.DidCloseTextDocumentParams) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	client, err := s.clientFor(ctx)
 	if err != nil {
 		return err
@@ -72,7 +81,8 @@ func (s *Server) DidClose(ctx context.Context, params *protocol.DidCloseTextDocu
 	return s.refresh(ctx, client, closed.FsPath())
 }
 
-// clientFor returns the client this request must publish to, or refuses.
+// clientFor returns the client this request must publish to, or refuses. The
+// caller holds s.mu.
 func (s *Server) clientFor(ctx context.Context) (protocol.Client, error) {
 	if s.down {
 		return nil, errShutDown
@@ -85,7 +95,8 @@ func (s *Server) clientFor(ctx context.Context) (protocol.Client, error) {
 }
 
 // refresh re-runs the analysis over every known document and publishes one
-// diagnostic set per document, skipping the path named by skip.
+// diagnostic set per document, skipping the path named by skip. The caller
+// holds s.mu, which is what keeps the newest analysis also the last published.
 //
 // ON FAILURE IT PUBLISHES NOTHING AT ALL and returns the error. An empty-array
 // publish here would tell the editor every file is clean at exactly the moment

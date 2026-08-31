@@ -61,12 +61,18 @@ func sourceSet(docs []*Document) ([]analysis.Source, map[string]bool) {
 	srcs := make([]analysis.Source, 0, len(docs))
 	damaged := make(map[string]bool)
 	for _, doc := range docs {
-		srcs = append(srcs, analysis.Source{Path: doc.Path, Src: doc.Src, File: doc.File})
+		srcs = append(srcs, source(doc))
 		if doc.ParseErr != nil {
 			damaged[doc.Path] = true
 		}
 	}
 	return srcs, damaged
+}
+
+// source projects one document onto the analysis core's source shape, dropping
+// the parse error the core has nowhere to put.
+func source(doc *Document) analysis.Source {
+	return analysis.Source{Path: doc.Path, Src: doc.Src, File: doc.File}
 }
 
 // parseDiagnostics converts every document's parse error into the framework's

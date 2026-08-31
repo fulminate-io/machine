@@ -24,6 +24,9 @@ import (
 // no other files to reach. The process working directory is NOT substituted —
 // that would manufacture a workspace the client never declared.
 func (s *Server) Initialize(_ context.Context, params *protocol.InitializeParams) (*protocol.InitializeResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if folders, ok := params.WorkspaceFolders.Get(); ok {
 		if err := s.scan(folders); err != nil {
 			return nil, err
@@ -72,6 +75,9 @@ func capabilities() protocol.ServerCapabilities {
 // once shutdown has been requested, so every document notification after this
 // point is refused by name rather than quietly processed.
 func (s *Server) Shutdown(_ context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	s.down = true
 	return nil
 }

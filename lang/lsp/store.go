@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 
 	"github.com/whitaker-io/machine/lang/ast"
 	"go.lsp.dev/uri"
@@ -66,7 +67,16 @@ type Document struct {
 // PER-CHANGE COST IS ONE REPARSE. Scan walks the filesystem once per initialize
 // and never per keystroke; Change reparses only the document whose bytes moved
 // and leaves every other cached tree alone.
+//
+// A STORE IS SAFE FOR CONCURRENT USE, and that is a requirement rather than a
+// courtesy. go.lsp.dev/protocol wires every connection through
+// jsonrpc2.AsyncHandler, which releases the read loop as soon as a handler
+// starts, so two didChange notifications — or a didChange and a completion —
+// genuinely run at the same time. Without the lock the map writes below are a
+// hard "concurrent map writes" panic while an author is typing, which was
+// observed under -race before this lock existed.
 type Store struct {
+	mu      sync.RWMutex
 	docs    map[string]*Document
 	overlay map[string]bool
 }
@@ -82,6 +92,9 @@ func NewStore() *Store {
 // about what its author is looking at, and re-reading the file underneath it
 // would answer with bytes nobody is editing.
 func (s *Store) Scan(root string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -93,7 +106,8 @@ func (s *Store) Scan(root string) error {
 	})
 }
 
-// loadFromDisk reads and parses one file, unless an overlay outranks it.
+// loadFromDisk reads and parses one file, unless an overlay outranks it. The
+// caller holds the write lock.
 func (s *Store) loadFromDisk(path string) error {
 	if s.overlay[path] {
 		return nil
@@ -112,6 +126,9 @@ func (s *Store) loadFromDisk(path string) error {
 //
 // From here the overlay outranks the file on disk for this path until Close.
 func (s *Store) Open(u uri.URI, src []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	path := u.FsPath()
 	s.overlay[path] = true
 	s.put(u, path, src)
@@ -131,6 +148,9 @@ func (s *Store) Change(u uri.URI, src []byte) {
 // A document with nothing on disk behind it — an unsaved buffer the editor
 // created and closed — is forgotten rather than left holding bytes no file has.
 func (s *Store) Close(u uri.URI) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	path := u.FsPath()
 	delete(s.overlay, path)
 	if err := s.loadFromDisk(path); err != nil {
@@ -140,7 +160,21 @@ func (s *Store) Close(u uri.URI) {
 
 // Get returns the document for a URI, and whether the store knows it.
 func (s *Store) Get(u uri.URI) (*Document, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	doc, ok := s.docs[u.FsPath()]
+	return doc, ok
+}
+
+// byPath returns the document at a filesystem path, which is the key the
+// analysis tables record against — a diagnostic's Path and a FileSymbols'
+// Src.Path are both this, never a URI.
+func (s *Store) byPath(path string) (*Document, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	doc, ok := s.docs[path]
 	return doc, ok
 }
 
@@ -151,6 +185,9 @@ func (s *Store) Get(u uri.URI) (*Document, bool) {
 // IT RETURNS DOCUMENTS RATHER THAN analysis.Source VALUES so the parse error
 // travels with the tree; the analysis adapter builds its sources from these.
 func (s *Store) Documents() []*Document {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	out := make([]*Document, 0, len(s.docs))
 	for _, doc := range s.docs {
 		out = append(out, doc)
@@ -159,7 +196,8 @@ func (s *Store) Documents() []*Document {
 	return out
 }
 
-// put parses src and records the document under its path.
+// put parses src and records the document under its path. The caller holds the
+// write lock.
 //
 // A DAMAGED DOCUMENT IS STILL RECORDED, tree and error together. That is the
 // suppression policy's foundation: the buffer being typed stays in the analysis

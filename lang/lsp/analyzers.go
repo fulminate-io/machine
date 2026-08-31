@@ -48,6 +48,8 @@ func (s *Server) Request(ctx context.Context, method string, params any) (any, e
 	switch method {
 	case flowAnalyzersMethod:
 		return analyzerRoster(), nil
+	case flowGuidanceMethod:
+		return s.guidance(params)
 	default:
 		return s.UnimplementedServer.Request(ctx, method, params)
 	}

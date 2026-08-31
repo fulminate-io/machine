@@ -7,6 +7,7 @@ package lsp
 import (
 	"context"
 	"io"
+	"sync"
 
 	"go.lsp.dev/jsonrpc2"
 	"go.lsp.dev/protocol"
@@ -30,9 +31,21 @@ const serverName = "flowlsp"
 // out of the connection it is given, which means the Server value must exist
 // before any Client does. Handlers reach it through protocol.ClientFromContext
 // and fail loudly when it is absent.
+//
+// HANDLERS RUN CONCURRENTLY AND ARE SERIALIZED HERE. protocol.Handlers wraps
+// every handler in jsonrpc2.AsyncHandler, which releases the read loop the
+// moment a handler begins, so a didChange and a completion request really do
+// execute at the same time. The mutex is held for a whole document
+// notification, INCLUDING the publish, for two reasons: without it the Store's
+// maps race (observed under -race), and with a narrower lock two racing changes
+// could still publish out of order, leaving an editor rendering diagnostics for
+// text its author already replaced. Serializing costs nothing measurable —
+// these operations are tens of microseconds — and it is what makes the serial
+// design this module is built on true rather than assumed.
 type Server struct {
 	protocol.UnimplementedServer
 
+	mu    sync.Mutex
 	store *Store
 	snap  *snapshot
 	down  bool
