@@ -301,7 +301,9 @@ func (l *Ledger) appendEpoch() {
 		return
 	}
 	if err := l.raft.Apply(data, 0).Error(); err != nil {
-		l.logger.Error("ledger: appending the leadership epoch entry failed; this term is not established and reads on it will report a timeout until the next election",
+		l.logger.Error(
+			"ledger: appending the leadership epoch entry failed; this term is not established"+
+				" and reads on it report a timeout until the next election",
 			"flow", l.cfg.Flow, "error", err)
 	}
 }
@@ -325,7 +327,8 @@ func openStores(cfg Config, logger hclog.Logger) (stores, error) {
 	if err != nil {
 		_ = bolt.Close()
 
-		return stores{}, fmt.Errorf("ledger: opening the snapshot store for flow %q under %q: %w", cfg.Flow, cfg.Dir, err)
+		return stores{}, fmt.Errorf(
+			"ledger: opening the snapshot store for flow %q under %q: %w", cfg.Flow, cfg.Dir, err)
 	}
 
 	return stores{logs: bolt, stable: bolt, snaps: snaps, bolt: bolt}, nil

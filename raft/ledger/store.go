@@ -21,7 +21,7 @@ import (
 // This implementation cannot do that and does not pretend to: it reads through the
 // linearizable barrier, applies fn AT THE CALLER, and replicates the result as an
 // ordinary write. Two concurrent Updates to the same path can therefore both read
-// the same prior value and the later append wins, losing the earlier one. Funnelling
+// the same prior value and the later append wins, losing the earlier one. Funneling
 // fn to the leader to compute, and replicating the closure itself as a command, were
 // both considered and rejected: the first makes every update a round trip carrying
 // caller code, and the second requires every peer to run a build that can execute

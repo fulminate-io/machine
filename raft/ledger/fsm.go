@@ -64,7 +64,8 @@ func (f *fsm) applyEntry(index uint64, entry Entry) any {
 
 		return nil
 	default:
-		return f.poisonAt(index, fmt.Errorf("ledger: log index %d applies kind %d, which this build declares but does not handle: %w",
+		return f.poisonAt(index, fmt.Errorf(
+			"ledger: log index %d applies kind %d, which this build declares but does not handle: %w",
 			index, uint8(entry.Kind), ErrPoisonedJournal))
 	}
 }
@@ -123,14 +124,6 @@ func (f *fsm) advanceLocked(index uint64) {
 	f.applied = index
 	close(f.wake)
 	f.wake = make(chan struct{})
-}
-
-// appliedIndex reports the index of the last entry this state machine applied.
-func (f *fsm) appliedIndex() uint64 {
-	f.mutex.RLock()
-	defer f.mutex.RUnlock()
-
-	return f.applied
 }
 
 // get reads one journaled value.

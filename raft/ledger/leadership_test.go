@@ -21,15 +21,35 @@ type clusterNode struct {
 	ledger *Ledger
 }
 
-// newCluster stands up n ledgers for one flow and bootstraps them as one group.
-// Bootstrap is left off on the Config because Open's bootstrap elects a SINGLE
-// voter; a real group is bootstrapped once, naming every member.
+// newCluster stands up n ledgers for one flow on n fresh muxes.
 func newCluster(t *testing.T, flow string, n int) []*clusterNode {
 	t.Helper()
 
-	nodes := make([]*clusterNode, 0, n)
-	for i := range n {
-		mux := testMux(t)
+	return newClusterOn(t, flow, newMuxes(t, n))
+}
+
+// newMuxes binds n shared listeners, one per node.
+func newMuxes(t *testing.T, n int) []*transport.Mux {
+	t.Helper()
+
+	muxes := make([]*transport.Mux, 0, n)
+	for range n {
+		muxes = append(muxes, testMux(t))
+	}
+
+	return muxes
+}
+
+// newClusterOn stands up one flow's group across already-bound muxes, so several
+// flows can be raised on the SAME listeners — which is the whole point of the mux.
+//
+// Bootstrap is left off on the Config because Open's bootstrap elects a SINGLE
+// voter; a real group is bootstrapped once, naming every member.
+func newClusterOn(t *testing.T, flow string, muxes []*transport.Mux) []*clusterNode {
+	t.Helper()
+
+	nodes := make([]*clusterNode, 0, len(muxes))
+	for i, mux := range muxes {
 		id := fmt.Sprintf("n%d", i)
 		nodes = append(nodes, &clusterNode{
 			id:     id,
@@ -38,7 +58,7 @@ func newCluster(t *testing.T, flow string, n int) []*clusterNode {
 		})
 	}
 
-	servers := make([]raft.Server, 0, n)
+	servers := make([]raft.Server, 0, len(nodes))
 	for _, node := range nodes {
 		servers = append(servers, raft.Server{
 			ID:      raft.ServerID(node.id),

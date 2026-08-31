@@ -8,6 +8,19 @@ import (
 	"github.com/hashicorp/raft"
 )
 
+// appliedIndex reports the index of the last entry this state machine applied.
+//
+// It lives here rather than beside the tracker because production reads the index
+// through observe(), which returns it alongside the wake channel and the poison as
+// one consistent triple. A second accessor reachable only from tests would be dead
+// weight in the package proper, and the linter says so.
+func (f *fsm) appliedIndex() uint64 {
+	f.mutex.RLock()
+	defer f.mutex.RUnlock()
+
+	return f.applied
+}
+
 func TestConfigurationCommitsAdvanceTheTrackedAppliedIndex(t *testing.T) {
 	f := newFSM()
 
