@@ -37,6 +37,9 @@ type factKey struct {
 // analyzer runs. An analyzer returning an error aborts the run under its own
 // name; a partial result is not returned alongside a failure.
 func Run(srcs []Source, analyzers []*Analyzer) ([]Diagnostic, error) {
+	if err := checkSources(srcs); err != nil {
+		return nil, err
+	}
 	order, err := topoOrder(analyzers)
 	if err != nil {
 		return nil, err
@@ -64,6 +67,33 @@ func Run(srcs []Source, analyzers []*Analyzer) ([]Diagnostic, error) {
 
 	sortDiagnostics(diags)
 	return diags, nil
+}
+
+// checkSources refuses a source carrying no parsed tree, naming it.
+//
+// Every analyzer reads Source.File, so a nil tree is a nil dereference deep in
+// whichever analyzer happens to run first — a panic that names an internal
+// walker rather than the input that caused it. It is refused here instead,
+// once, at the entry point. A caller always has a tree to supply: ast.Parse
+// returns one even for a file it reported diagnostics on, carried on the error
+// alongside them.
+func checkSources(srcs []Source) error {
+	for _, src := range srcs {
+		if src.File == nil {
+			return errors.New("analysis: source " + describeSource(src) +
+				" carries no parsed tree; ast.Parse returns one even for a file with diagnostics")
+		}
+	}
+	return nil
+}
+
+// describeSource names a source for an error message, since an unnamed one
+// would otherwise be reported as an empty string.
+func describeSource(src Source) string {
+	if src.Path == "" {
+		return "(unnamed)"
+	}
+	return src.Path
 }
 
 // stamp fills in the two fields the driver owns rather than the analyzer: the

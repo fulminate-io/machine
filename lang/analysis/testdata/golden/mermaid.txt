@@ -1,0 +1,74 @@
+enrichment.flow
+flowchart TD
+  subgraph f0["flow enrichment"]
+    f0n0["source orders"]
+    f0n1["loop retry"]
+    f0n2["transform enrich"]
+    f0n3["branch settle"]
+    f0n4["transform backoff"]
+    f0n5["send backoff"]
+    f0n6["sink store"]
+    f0n0 -->|orders| f0n2
+    f0n1 -->|retry| f0n2
+    f0n5 -.->|retry| f0n2
+    f0n2 -->|enrich| f0n3
+    f0n3 -->|flaky| f0n4
+    f0n4 -->|backoff| f0n5
+    f0n3 -->|done| f0n6
+  end
+payments.flow
+flowchart TD
+  subgraph f0["flow payments"]
+    f0n0["source events"]
+    f0n1["branch classify"]
+    f0n2["branch screen"]
+    f0n3["loop retry"]
+    f0n4["transform try"]
+    f0n5["branch settle"]
+    f0n6["transform backoff"]
+    f0n7["send backoff"]
+    f0n8["tee record"]
+    f0n9["sink store"]
+    f0n10["sink push"]
+    f0n11["sink hold"]
+    f0n0 -->|events| f0n1
+    f0n1 -->|payments| f0n2
+    f0n2 -->|clean| f0n4
+    f0n3 -->|retry| f0n4
+    f0n7 -.->|retry| f0n4
+    f0n4 -->|try| f0n5
+    f0n5 -->|flaky| f0n6
+    f0n6 -->|backoff| f0n7
+    f0n5 -->|enriched| f0n8
+    f0n8 -->|wh| f0n9
+    f0n8 -->|live| f0n10
+    f0n2 -->|suspect| f0n11
+    f0n1 -->|other| f0n11
+  end
+toy.flow
+flowchart TD
+  subgraph f0["flow orders"]
+    f0n0["source ingest"]
+    f0n1["branch validate"]
+    f0n2["transform charge"]
+    f0n3["branch settle"]
+    f0n4["tee split"]
+    f0n5["transform archive"]
+    f0n6["drop ledger"]
+    f0n7["loop retry"]
+    f0n8["send flaky"]
+    f0n9["transform redo"]
+    f0n10["send redo"]
+    f0n0 -->|ingest| f0n1
+    f0n1 -->|billable| f0n2
+    f0n2 -->|charge| f0n3
+    f0n10 -.->|charge| f0n3
+    f0n3 -->|settled| f0n4
+    f0n1 -->|rejected| f0n5
+    f0n4 -->|mirror| f0n5
+    f0n4 -->|ledger| f0n6
+    f0n3 -->|flaky| f0n8
+    f0n7 -->|retry| f0n9
+    f0n8 -.->|retry| f0n9
+    f0n9 -->|redo| f0n10
+  end

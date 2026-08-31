@@ -198,7 +198,8 @@ func TestDriverStampsTheReportingAnalyzersName(t *testing.T) {
 		},
 	}
 
-	diags, err := Run([]Source{{Path: "stamped.flow"}}, []*Analyzer{reporter})
+	stamped := parseSource(t, "stamped.flow", "flow one\nsource ingest Poll\nsink done audit.Store from ingest\n")
+	diags, err := Run([]Source{stamped}, []*Analyzer{reporter})
 	if err != nil {
 		t.Fatalf("the reporting run failed: %v", err)
 	}
@@ -239,7 +240,8 @@ func TestDiagnosticsSortByPositionThenCode(t *testing.T) {
 	early := reportAt("alpha", 10)
 	tie := reportAt("beta", 10)
 
-	diags, err := Run([]Source{{Path: "ordering.flow"}}, []*Analyzer{late, tie, early})
+	ordering := parseSource(t, "ordering.flow", "flow one\nsource ingest Poll\nsink done audit.Store from ingest\n")
+	diags, err := Run([]Source{ordering}, []*Analyzer{late, tie, early})
 	if err != nil {
 		t.Fatalf("the ordering run failed: %v", err)
 	}
@@ -322,5 +324,34 @@ func TestDiagnosticsAreFileAttributedAndSortStable(t *testing.T) {
 	if !reflect.DeepEqual(forward, reverse) {
 		t.Errorf("reversing the Sources slice changed the output.\nforward: %v\nreverse: %v",
 			messages(forward), messages(reverse))
+	}
+}
+
+// TestDriverRefusesASourceWithNoTree pins that a caller-supplied source missing
+// its parsed tree is refused at the entry point, by name.
+//
+// Every analyzer reads Source.File, so without this the failure is a nil
+// dereference inside whichever analyzer happens to run first — a panic naming an
+// internal walker rather than the input that caused it.
+func TestDriverRefusesASourceWithNoTree(t *testing.T) {
+	good := parseSource(t, "good.flow", "flow one\nsource ingest Poll\nsink done audit.Store from ingest\n")
+
+	for _, tc := range []struct {
+		name string
+		src  Source
+		want string
+	}{
+		{name: "named", src: Source{Path: "half-read.flow"}, want: "half-read.flow"},
+		{name: "unnamed", src: Source{}, want: "(unnamed)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Run([]Source{good, tc.src}, []*Analyzer{SymbolsAnalyzer})
+			if err == nil {
+				t.Fatal("a source with no parsed tree was accepted")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the refusal does not name the offending source: %v", err)
+			}
+		})
 	}
 }

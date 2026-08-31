@@ -24,4 +24,5 @@ func init() {
 	Register(SwitchesAnalyzer)
 	Register(ErrorRoutingAnalyzer)
 	Register(TypeflowAnalyzer)
+	Register(GuidanceAnalyzer)
 }
