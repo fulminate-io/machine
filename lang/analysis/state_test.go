@@ -29,7 +29,7 @@ func TestStateRejectsBothContractFixturesAndSparesStrawmen(t *testing.T) {
 		{fixture: "wrapper-type-state.flow", says: []string{"retired wrapper spelling", "bare Go types"}},
 	} {
 		t.Run(tc.fixture, func(t *testing.T) {
-			src := loadSource(t, filepath.Join(contractDir, tc.fixture))
+			src := loadSource(t, filepath.Join(sharedContractDir, tc.fixture))
 			diags := withCode(analyze(t, StateAnalyzer, src), StateAnalyzer.Name)
 			if len(diags) == 0 {
 				t.Fatalf("%s produced no state diagnostic; its own note calls it an analysis reject", tc.fixture)

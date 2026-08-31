@@ -195,15 +195,18 @@ jobs:
         working-directory: lang/analysis
         run: go test -timeout 600s -coverprofile=coverage.out ./...
 
-      # PROVISIONAL FLOOR. The floor is the coverage the suite actually achieves,
-      # so a change that drops below it fails here rather than surfacing later in
-      # a coverage report. This number is a placeholder that stands only until the
-      # analyzers and their tests land; it is replaced with the figure measured
-      # against this suite, never copied from the lang/ast job above.
+      # The floor is the coverage the suite actually achieves, so a change that
+      # drops below it fails here rather than surfacing later in a coverage
+      # report. It was MEASURED against this suite rather than copied from the
+      # lang/ast job above: that job reaches 100 because the marker methods
+      # sealing the AST have empty bodies and contribute no statements, and an
+      # analysis module has no such property. What sits below 100 here is error
+      # paths — a prerequisite result arriving with the wrong type, a corpus file
+      # that cannot be read — which are reachable but not worth a fixture each.
       - name: Enforce coverage floor
         working-directory: lang/analysis
         env:
-          COVERAGE_FLOOR: "50"
+          COVERAGE_FLOOR: "96"
         run: |
           total=$(go tool cover -func=coverage.out | awk '$1 == "total:" { print $NF }')
           test -n "$total" || { echo "coverage.out yielded no total line"; exit 1; }

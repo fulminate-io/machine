@@ -32,8 +32,8 @@ var FlowgraphAnalyzer = &Analyzer{
 	Name: "flowgraph",
 	Doc: "flowgraph derives a directed dataflow graph per flow: a node per statement, and an " +
 		"edge from the statement producing a name to each statement consuming it. THE SEND " +
-		"MODEL IS A CHOICE AND THIS IS ITS DISCLOSURE: a send is modeled as consuming its " +
-		"Source name and producing its Target name, matching the reference implementation in " +
+		"MODEL IS A CHOICE AND THIS IS ITS DISCLOSURE: a send consumes its Source name and " +
+		"produces its Target name, matching the reference implementation in " +
 		"lang/ast. The alternative reading is that a send re-executes the target NODE; it " +
 		"changes which statements sit inside a derived cycle but not whether the cycle carries " +
 		"a send. Send edges are marked Backward because a send is the language's only backward " +

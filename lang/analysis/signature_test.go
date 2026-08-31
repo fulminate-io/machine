@@ -118,3 +118,18 @@ func TestSignatureIsSilentOnTheCanonicalCorpus(t *testing.T) {
 		}
 	}
 }
+
+// TestFlowOutputsFactIsAFact pins that the signature analyzer's fact satisfies
+// the framework's marker, which is what lets it cross a file boundary at all.
+func TestFlowOutputsFactIsAFact(t *testing.T) {
+	var fact Fact = &flowOutputsFact{Outputs: []string{"ok", "bad"}}
+	fact.AFact()
+
+	typed, ok := fact.(*flowOutputsFact)
+	if !ok {
+		t.Fatalf("the fact round-tripped as %T", fact)
+	}
+	if len(typed.Outputs) != 2 {
+		t.Errorf("the fact carries %d outputs, want 2", len(typed.Outputs))
+	}
+}

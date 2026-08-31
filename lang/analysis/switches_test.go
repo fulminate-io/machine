@@ -17,7 +17,7 @@ import (
 // future reader who assumes the valid corpus should be analysis-clean finds the
 // intent asserted here rather than having to infer it.
 func TestSwitchesArmClassificationAndExhaustiveness(t *testing.T) {
-	reject := loadSource(t, filepath.Join(contractDir, "destructuring-arm.flow"))
+	reject := loadSource(t, filepath.Join(sharedContractDir, "destructuring-arm.flow"))
 	diags := withCode(analyze(t, SwitchesAnalyzer, reject), SwitchesAnalyzer.Name)
 	if len(diags) != 1 {
 		t.Fatalf("destructuring-arm.flow produced %d switches diagnostics, want 1: %v", len(diags), messages(diags))

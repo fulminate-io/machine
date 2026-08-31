@@ -39,9 +39,6 @@ func position(offset int) ast.Position {
 // breaks the other surfaces here rather than at integration time.
 const astTestdata = "../ast/testdata"
 
-// strawmanDir holds the three canonical programs every rule is swept over.
-var strawmanDir = filepath.Join(astTestdata, "strawman")
-
 // strawmanFiles are the canonical programs, named rather than globbed so a
 // missing one is a failure instead of a shorter loop.
 var strawmanFiles = []string{"enrichment.flow", "payments.flow", "toy.flow"}

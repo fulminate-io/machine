@@ -5,16 +5,12 @@
 package analysis
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 
 	"github.com/whitaker-io/machine/lang/ast"
 )
-
-// contractDir is lang/ast's analysis-rejects corpus, read across the module
-// boundary. lang/ast owns those four files; this module reads them and never
-// writes them.
-var contractDir = filepath.Join(astTestdata, "analysis-rejects")
 
 // TestResolveRejectsDeclareAfterUseAndAcceptsHoistedFuncs pins the rule in both
 // directions.
@@ -24,7 +20,7 @@ var contractDir = filepath.Join(astTestdata, "analysis-rejects")
 // explicitly accepts, which is why the two func-ordering fixtures ride the same
 // test rather than a separate one that could be dropped independently.
 func TestResolveRejectsDeclareAfterUseAndAcceptsHoistedFuncs(t *testing.T) {
-	reject := loadSource(t, filepath.Join(contractDir, "declare-after-use-loop.flow"))
+	reject := loadSource(t, filepath.Join(sharedContractDir, "declare-after-use-loop.flow"))
 	diags := withCode(analyze(t, ResolveAnalyzer, reject), ResolveAnalyzer.Name)
 	if len(diags) == 0 {
 		t.Fatal("declare-after-use-loop.flow produced no resolve diagnostic; its own note calls it a declare-before-use reject")
@@ -118,4 +114,113 @@ func TestResolveReportsAnUndefinedName(t *testing.T) {
 			t.Errorf("no undefined-reference diagnostic names %q; got %v", name, messages(diags))
 		}
 	}
+}
+
+// TestBadSpanSuppressionDiscriminates exercises the recovered-region predicate
+// directly, and records what the corpus says about whether it can be reached.
+//
+// THE PREDICATE IS TESTED HERE RATHER THAN THROUGH AN ANALYZER because against
+// today's parser no analyzer can reach it. A BadStmt holds the span of tokens
+// the parser SKIPPED, and skipped tokens never become identifiers, so no tabled
+// reference — and therefore no diagnostic position — can land inside one. A test
+// asserting "no resolve diagnostic appeared inside a bad span" would pass on
+// every corpus file whether the suppression existed or not, which is a green
+// that proves nothing.
+//
+// The corpus scan below is a recorded OBSERVATION, not the assertion: it fails
+// only if the scan itself finds nothing to look at, so a future parser change
+// that starts tabling references inside a recovered region shows up as a
+// changed count rather than as silence.
+func TestBadSpanSuppressionDiscriminates(t *testing.T) {
+	flow := &FlowSymbols{
+		Name: "orders",
+		Bad:  []ast.BadStmt{{Start: ast.Position{Offset: 100}, Stop: ast.Position{Offset: 200}}},
+	}
+
+	for _, tc := range []struct {
+		name   string
+		offset int
+		want   bool
+	}{
+		{name: "before the region", offset: 99, want: false},
+		{name: "at its first byte", offset: 100, want: true},
+		{name: "inside it", offset: 150, want: true},
+		{name: "at its last byte", offset: 199, want: true},
+		{name: "just past its end", offset: 200, want: false},
+	} {
+		if got := insideBadSpan(flow, ast.Position{Offset: tc.offset}); got != tc.want {
+			t.Errorf("a position %s (offset %d) reported %t, want %t", tc.name, tc.offset, got, tc.want)
+		}
+	}
+
+	// A flow with no recovered region suppresses nothing, which is the case
+	// every clean file takes.
+	if insideBadSpan(&FlowSymbols{Name: "orders"}, ast.Position{Offset: 150}) {
+		t.Error("a flow with no recovered region suppressed a position anyway")
+	}
+
+	files, withBad, inside := scanRecoveredRegions(t)
+	if withBad == 0 {
+		t.Fatalf("CONTROL FAILED: none of the %d parsed corpus files carries a BadStmt, so the scan checked nothing", files)
+	}
+	t.Logf("corpus observation: %d parsed files, %d carry a recovered region, %d references sit inside one",
+		files, withBad, inside)
+}
+
+// scanRecoveredRegions counts corpus files with a recovered region, and the
+// references tabled inside one.
+func scanRecoveredRegions(t *testing.T) (files, withBad, inside int) {
+	t.Helper()
+
+	for _, dir := range []string{"broken", "invalid", "valid", "strawman", "analysis-rejects"} {
+		paths, err := filepath.Glob(filepath.Join(astTestdata, dir, "*.flow"))
+		if err != nil {
+			t.Fatalf("globbing %s failed: %v", dir, err)
+		}
+		for _, path := range paths {
+			file, ok := partialTree(t, path)
+			if !ok {
+				continue
+			}
+			files++
+			table, _ := symbolsOf(t, Source{Path: path, File: file})
+			for i := range table.Files {
+				for j := range table.Files[i].Flows {
+					flow := &table.Files[i].Flows[j]
+					if len(flow.Bad) == 0 {
+						continue
+					}
+					withBad++
+					for _, refs := range flow.Consumers {
+						for _, ref := range refs {
+							if insideBadSpan(flow, ref.Pos) {
+								inside++
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return files, withBad, inside
+}
+
+// partialTree parses a file and returns whatever tree the parser produced, which
+// for a broken source arrives on the error rather than as a return value.
+func partialTree(t *testing.T, path string) (*ast.File, bool) {
+	t.Helper()
+
+	body, err := readFixture(t, path)
+	if err != nil {
+		t.Fatalf("cannot read %s: %v", path, err)
+	}
+	file, perr := ast.Parse(body)
+	if file != nil {
+		return file, true
+	}
+	var aerr *ast.Error
+	if errors.As(perr, &aerr) && aerr.File != nil {
+		return aerr.File, true
+	}
+	return nil, false
 }

@@ -355,3 +355,11 @@ func TestDriverRefusesASourceWithNoTree(t *testing.T) {
 		})
 	}
 }
+
+// TestAnalyzerFormatsAsItsName pins the rendering a cycle error relies on: the
+// message names analyzers, and a raw pointer would tell a reader nothing.
+func TestAnalyzerFormatsAsItsName(t *testing.T) {
+	if got := (&Analyzer{Name: "symbols"}).String(); got != "symbols" {
+		t.Errorf("an analyzer formatted as %q, want its name", got)
+	}
+}
