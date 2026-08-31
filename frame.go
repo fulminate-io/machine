@@ -183,8 +183,9 @@ type Frame[T any] struct {
 	caps    *capabilities
 }
 
-// Value returns the payload. It is the ONLY ungated accessor, and so the only one a
-// node declaring no capability handles can call.
+// Value returns the payload. It takes no capability, so a node declaring no state
+// handles can still read its datum; the accessors that DO take one are Has, Get, Set,
+// Load, Save and Update.
 func (f Frame[T]) Value() T { return f.payload }
 
 // ID returns the frame's identifier.

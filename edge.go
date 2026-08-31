@@ -65,8 +65,8 @@ type channelEdge[T any] struct {
 }
 
 // Channel returns the default in-memory transport. The buffer size is a property of
-// the channel edge rather than of the machine, because buffering is meaningful only
-// to a channel edge and not to a network or pub/sub transport.
+// the edge rather than of the machine, because a buffer's meaning is transport-specific:
+// each transport that buffers sets its own depth where the edge is constructed.
 func Channel[T any](buffer int) EdgeFactory[T] {
 	return func(_ string, _ Report) (Edge[T], error) {
 		return &channelEdge[T]{ch: make(chan Frame[T], buffer), done: make(chan struct{})}, nil

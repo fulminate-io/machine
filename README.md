@@ -1,210 +1,400 @@
 [![Go](https://github.com/whitaker-io/machine/actions/workflows/go.yml/badge.svg)](https://github.com/whitaker-io/machine/actions/workflows/go.yml)
 [![CodeQL](https://github.com/whitaker-io/machine/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/whitaker-io/machine/actions/workflows/github-code-scanning/codeql)
-[![PkgGoDev](https://pkg.go.dev/badge/github.com/whitaker-io/machine)](https://pkg.go.dev/github.com/whitaker-io/machine)
-[![GoDoc](https://godoc.org/github.com/whitaker-io/machine?status.svg)](https://godoc.org/github.com/whitaker-io/machine)
-[![Go Report Card](https://goreportcard.com/badge/github.com/whitaker-io/machine)](https://goreportcard.com/report/github.com/whitaker-io/machine)
+[![PkgGoDev](https://pkg.go.dev/badge/github.com/whitaker-io/machine/v4)](https://pkg.go.dev/github.com/whitaker-io/machine/v4)
+[![Go Report Card](https://goreportcard.com/badge/github.com/whitaker-io/machine/v4)](https://goreportcard.com/report/github.com/whitaker-io/machine/v4)
 [![Codacy Badge](https://app.codacy.com/project/badge/Grade/aa8efa7beb3f4e66a5dc0247e25557b5)](https://app.codacy.com/gh/whitaker-io/machine/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
 [![Codacy Badge](https://app.codacy.com/project/badge/Coverage/aa8efa7beb3f4e66a5dc0247e25557b5)](https://app.codacy.com/gh/whitaker-io/machine/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_coverage)
 [![Version Badge](https://img.shields.io/github/v/tag/whitaker-io/machine)](https://img.shields.io/github/v/tag/whitaker-io/machine)
 
-<p align="center">
-    <img alt="Machine" height="125" src="https://raw.githubusercontent.com/whitaker-io/machine/master/docs/static/Black-No-BG.png">
-</p>
-
 `Machine` is a library for creating data workflows. These workflows can be either very concise or quite complex, even allowing for cycles for flows that need retry or self healing mechanisms.
 
-
-
 ------
+
+### **Requirements**
+
+Go **1.27** or newer. The builder is a fluent chain of **generic methods** — `Machine.Source[T]`, `Flow.Map[V]`, `Frame.Get[V]` — and methods carrying their own type parameters are a Go 1.27 language feature. There is no earlier-Go fallback.
 
 ### **Installation**
 
-Add the primary library to your project
 ```bash
-  go get github.com/whitaker-io/machine/v3
+  go get github.com/whitaker-io/machine/v4
+```
+
+The transports live in their own modules, so a program that needs neither pulls in neither:
+
+```bash
+  go get github.com/whitaker-io/machine/edge/http
+  go get github.com/whitaker-io/machine/edge/pubsub
 ```
 
 ------
 
-The two function types are:
+### **Quick start**
+
+A `Machine` is the supervisor. You declare a graph off it, then start it once.
 
 ```golang
-// Monad is a function that is applied to payload and used for transformations
-type Monad[T any] func(d T) T
+ctx, cancel := context.WithCancel(context.Background())
+defer cancel()
 
-// Filter is a function that can be used to filter the payload.
-type Filter[T any] func(d T) bool
+m := machine.New("pipeline")
 
-```
+numbers, send := m.Source[int]("numbers")
+numbers.
+	Map("double", func(f machine.Frame[int]) int { return f.Value() * 2 }).
+	Map("label", func(f machine.Frame[int]) string { return fmt.Sprintf("n=%d", f.Value()) }).
+	Drop("discard")
 
-These are used in the `Machine` for functional operations
-
-```golang
-// New is a function for creating a new Machine.
-//
-// name string
-// input chan T
-// option ...Option
-//
-// Call the startFn returned by New to start the Machine once built.
-func New[T any](name string, input chan T, options ...Option) (startFn func(context.Context), x Machine[T])
-
-// Transform is a function for converting the type of the Machine. Cannot be used inside a loop
-// until I figure out how to do it without some kind of run time error or overly complex
-// tracking method that isn't type safe. I really wish method level generics were a thing.
-func Transform[T, U any](m Machine[T], fn func(d T) U) (Machine[U], error)
-
-// Machine is the interface provided for creating a data processing stream.
-type Machine[T any] interface {
-	// Name returns the name of the Machine path. Useful for debugging or reasoning about the path.
-	Name() string
-	
-	// Then apply a mutation to each individual element of the payload.
-	Then(a Monad[T]) Machine[T]
-
-	// Recurse applies a recursive function to the payload through a Y Combinator.
-	// f is a function used by the Y Combinator to perform a recursion
-	// on the payload.
-	// Example:
-	//
-	//	func(f Monad[int]) Monad[int] {
-	//		 return func(x int) int {
-	//			 if x <= 0 {
-	//				 return 1
-	//			 } else {
-	//				 return x * f(x-1)
-	//			 }
-	//		 }
-	//	}
-	Recurse(x Monad[Monad[T]]) Machine[T]
-
-	// Memoize applies a recursive function to the payload through a Y Combinator
-	// and memoizes the results based on the index func.
-	// f is a function used by the Y Combinator to perform a recursion
-	// on the payload.
-	// Example:
-	//
-	//	func(f Monad[int]) Monad[int] {
-	//		 return func(x int) int {
-	//			 if x <= 0 {
-	//				 return 1
-	//			 } else {
-	//				 return x * f(x-1)
-	//			 }
-	//		 }
-	//	}
-	Memoize(x Monad[Monad[T]], index func(T) string) Machine[T]
-
-	// Or runs all of the functions until one succeeds or sends the payload to the right branch
-	Or(x ...Filter[T]) (Machine[T], Machine[T])
-
-	// And runs all of the functions and if one doesnt succeed sends the payload to the right branch
-	And(x ...Filter[T]) (Machine[T], Machine[T])
-
-	// Filter splits the data into multiple stream branches
-	If(f Filter[T]) (Machine[T], Machine[T])
-
-	// Select applies a series of Filters to the payload and returns a list of Builders
-	// the last one being for any unmatched payloads.
-	Select(fns ...Filter[T]) []Machine[T]
-
-	// Tee duplicates the data into multiple stream branches.
-	Tee(func(T) (a, b T)) (Machine[T], Machine[T])
-
-	// While creates a loop in the stream based on the filter
-	While(x Filter[T]) (loop, out Machine[T])
-
-	// Drop terminates the data from further processing without passing it on
-	Drop()
-
-	// Distribute is a function used for fanout
-	Distribute(Edge[T]) Machine[T]
-	
-	// Output provided channel
-	Output() chan T
+if err := m.Start(ctx); err != nil {
+	log.Fatal(err)
+}
+if err := send(ctx, 21); err != nil {
+	log.Fatal(err)
 }
 ```
 
-`Distribute` is a special method used for fan-out operations. It takes an instance of `Edge[T]` and can be used most typically to distribute work via a Pub/Sub or it can be used in a commandline utility to handle user input or a similiar blocking process. 
+`Source` returns the flow **and** the `Ingest` closure that feeds it. `Map` changes the payload type, so the chain above goes `int` → `int` → `string`.
 
-
-The `Edge[T]` interface is as follows:
+To consume results rather than discard them, end the chain with `Output`, which hands back the channel of frames leaving the flow:
 
 ```golang
-// Edge is an interface that is used for transferring data between vertices
-type Edge[T any] interface {
-	Output() chan T
-	Send(payload T)
-}
+out := numbers.
+	Map("double", func(f machine.Frame[int]) int { return f.Value() * 2 }).
+	Output("out")
+
+// ... start and send ...
+
+frame := <-out
+fmt.Println(frame.Value(), frame.ID(), frame.Source(), frame.Node())
 ```
 
-The `Send` method is used for data leaving the associated vertex and the `Output` method is used by the following vertex to receive data from the channel.
+Frames reaching an `Output` belong to the **caller** and are not reclaimed. Everywhere else the runtime reclaims a frame's stack state when the traversal ends.
 
 ------
 
-Confirguration is done using the `Option` helper
+### **The model**
+
+Three types carry the whole API.
+
+| Type | What it is |
+| --- | --- |
+| `Machine` | The supervisor. Owns the node registry, the heap store, the telemetry handles and the declaration errors. Its exported method set is deliberately closed at `Host`, `Name`, `Source` and `Start`. |
+| `Flow[T, U]` | A declared node's outbound handle — `T` is the source payload type, `U` the current one. It holds only the machine and the emitter, so it is cheap to pass by value. |
+| `Frame[T]` | The envelope. It **wraps** the payload rather than traveling beside it, so a node function takes `Frame[T]` and returns a bare payload. |
+
+A node function cannot drop the frame by ignoring it and cannot forge one — the runtime re-wraps the returned payload onto the same frame state. There is no exported frame constructor other than `RebuildFrame`, which a remote transport uses to restore one from the wire.
+
+Declaration is lazy and `Start` does the real work: it validates the whole graph, joins **every** declaration error rather than reporting the first, brings up every edge, and only then spawns the nodes. A mis-declared graph is inert rather than half-running.
+
+Shutdown **is** context cancellation. `Start` is the only lifecycle entry, so there is no `Stop`; when the context ends the runtime closes every constructed edge.
+
+------
+
+### **Building a graph**
+
+Every builder method takes a node name. Names are unique per machine — a duplicate is a declaration error reported from `Start`.
+
+| Method | Effect |
+| --- | --- |
+| `Map[V](name, fn, opts...)` | Applies `fn` to each frame and forwards the transformed payload, changing the flow's payload type. |
+| `Recurse(name, fn, opts...)` | Applies a recursive function to the payload through a Y combinator. |
+| `Memoize(name, fn, index, opts...)` | As `Recurse`, plus a per-datum cache keyed by `index`. |
+| `If(name, fn, opts...)` | Splits the flow in two, routing the **intact** frame down one branch. |
+| `Tee(name, fn, opts...)` | Duplicates the flow, deep-copying the envelope into both branches. |
+| `Send(target)` | Merges this flow into the same consumer `target` already feeds. This is how a cycle closes. |
+| `Drop(name, opts...)` | Terminates the flow, discarding each frame and reclaiming its stack state. |
+| `Output(name, opts...)` | Terminal consumption surface: returns `<-chan Frame[U]`. Does not process, so it does not advance the frame's `Node` stamp. |
+
+#### Branching
+
+`If` routes the intact frame: no copy and no reparenting, so identity and lineage survive the branch unchanged. The branches are named with a `.left` and `.right` suffix, so an unconsumed-branch error at `Start` identifies which side was left dangling.
 
 ```golang
-// Option is used to configure the machine
-type Option interface
+large, small := src.If("over-ten", func(f machine.Frame[int]) bool { return f.Value() > 10 })
 
-// OptionFIF0 controls the processing order of the payloads
-// If set to true the system will wait for one payload
-// to be processed before starting the next.
-var OptionFIF0 Option
-
-// OptionBufferSize sets the buffer size on the edge channels between the
-// vertices, this setting can be useful when processing large amounts
-// of data with FIFO turned on.
-func OptionBufferSize(size int) Option
-
-// OptionAttributes apply the slog.Attr's to the machine metrics and spans
-// Do not override the "name", "type", "duration", "error", or "value" attributes
-func OptionAttributes(attributes ...slog.Attr) Option
-
-// OptionFlush attempts to send all data to the flushFN before exiting after the gracePeriod has expired
-// Im looking for a good way to make this type specific, but want to avoid having to add separate option
-// settings for the Transform function.
-func OptionFlush(gracePeriod time.Duration, flushFN func(vertexName string, payload any)) Option
+out := large.Output("large")
+small.Drop("small")
 ```
 
-`Machine` supports collecting metrics and traces through a `log/slog` wrapper that sends 
-the telemetry to the provided [OpenTelemetry](https://github.com/open-telemetry/opentelemetry-go) `Meter` and `Tracer`
+`Tee` is the other split, and it deep-copies. You supply the payload duplicator, because only you know how to copy `T` without leaving the two branches sharing a pointer, slice or map; the runtime clones the frame. Both branches get fresh identities and both report the upstream frame as their parent.
 
 ```golang
-// import "github.com/whitaker-io/machine/telemetry"
+audit, fulfill := src.Tee("split", func(o order) (order, order) {
+	return cloneOrder(o), cloneOrder(o)
+})
+```
 
-// Make your slog handler however you please
-yourSlogHandler := slog.Default().Handler()
+#### Cycles
 
-// wrap your handler and provide your tracer and meter
-telemetryHandler := telemetry.New(
-	yourSlogHandler,
-	meterProvider.Meter("your_meter"), // Your otel metric.Meter
-	tracerProvider.Tracer("your_tracer"), // Your otel trace.Tracer
-	false, // Log Metrics and Traces to logs as well (useful for debugging)
+`Send` merges a flow into the consumer another flow already feeds, so closing a cycle means passing the flow that **precedes** the node to re-enter, not the flow that node produces. The node being re-entered is therefore declared before the `Send` that closes the loop; a target with no consumer yet is a declaration error.
+
+```golang
+src, send := m.Source[int]("in")
+
+incremented := src.Map("increment", func(f machine.Frame[int]) int { return f.Value() + 1 })
+loop, done := incremented.If("under-five", func(f machine.Frame[int]) bool { return f.Value() < 5 })
+
+loop.Send(src)
+out := done.Output("out")
+```
+
+Feeding `0` into that graph yields `5`.
+
+#### Recursion
+
+`Recurse` and `Memoize` drive a Y combinator. The function you supply receives the recursive continuation wrapped in a frame carrying the same state and capability view, and returns the body to apply. To advance the recursion you hand the continuation a frame carrying the next payload, which `RebuildFrame` builds from the current frame's projection:
+
+```golang
+// step hands the recursive continuation a frame carrying the next payload.
+func step(next machine.Monad[int], from machine.Frame[int], payload int) int {
+	advanced, err := machine.RebuildFrame(from.Data(), payload)
+	if err != nil {
+		return 0
+	}
+	return next(advanced)
+}
+
+out := src.Memoize("fib", func(f machine.Frame[machine.Monad[int]]) machine.Monad[int] {
+	next := f.Value()
+	return func(inner machine.Frame[int]) int {
+		n := inner.Value()
+		if n < 2 {
+			return n
+		}
+		return step(next, inner, n-1) + step(next, inner, n-2)
+	}
+}, strconv.Itoa).Output("out")
+```
+
+`RebuildFrame` restores lineage and declared stack values, but the frame it returns carries no capability view, so a recursion body that reaches a declared handle must do so through the frame the runtime handed it rather than through one it built.
+
+------
+
+### **State**
+
+State is reached **only** through the frame, and only where a node declared the capability for it. There are two namespaces, and they share one declaration namespace and one capability model.
+
+| Handle | Scope | Declared with |
+| --- | --- | --- |
+| `Key[V]` | **Stack** — per-traversal, travels inside the frame, reclaimed when the traversal ends. | `NewKey(name, cloner)` |
+| `Cell[V]` | **Heap** — machine-scoped, outlives every traversal. | `NewCell[V](name)` |
+
+A stack key's cloner is **mandatory**: `Tee` deep-copies the frame into both branches, and only the caller knows how to copy `V`. Both constructors panic on an empty name or a name already declared as either kind, and `NewKey` panics on a nil cloner.
+
+Capabilities are declared per node with `WithReads` and `WithWrites`, which take `KeyRef` so one declaration covers stack keys and heap cells together. **A write capability does not imply a read capability**, so a node that reads, modifies and writes one handle declares it in both.
+
+```golang
+var (
+	attempts  = machine.NewKey("attempts", func(n int) int { return n })
+	processed = machine.NewCell[int]("processed")
 )
 
-slog.SetDefault(slog.New(telemetryHandler))
+out := orders.Map("count", func(f machine.Frame[int]) int {
+	// Stack: per-traversal.
+	f.Set(attempts, f.Get(attempts)+1)
+
+	// Heap: machine-scoped, updated atomically under the store's lock.
+	f.Update(processed, func(n int) int { return n + 1 })
+
+	return f.Value()
+},
+	machine.WithReads[int](attempts, processed),
+	machine.WithWrites[int](attempts, processed),
+).Output("out")
 ```
 
-Examples of `Edge` implentations can be found in the edge directory and can be used as follows
+The type parameter on `WithReads` / `WithWrites` cannot be inferred from a `KeyRef` list, so the call site writes it.
+
+#### Frame accessors
+
+| Accessor | Capability | Returns |
+| --- | --- | --- |
+| `Value()` | none | The payload. |
+| `ID()`, `Parent()`, `Source()`, `Node()` | none | Frame identity and lineage. `Parent` is empty for a frame born at a `Source`. |
+| `Data()` | none | The serializable projection of the frame's **stack** state. |
+| `Has(ref)` | read | Whether a declared handle currently holds a value — which is what distinguishes a handle never written from one holding the zero value. |
+| `Get(k)` | read | The stack value, or the zero value of `V` if never written. |
+| `Set(k, v)` | write | Writes a stack value. |
+| `Load(c)` | read | The heap value and whether it was present. |
+| `Save(c, v)` | write | Writes a heap value. |
+| `Update(c, fn)` | read **and** write | Read-modify-write on a heap cell under the store's lock; returns the new value. |
+
+An access a node did not declare raises a `*CapabilityError`. It is a panic rather than a returned error because a node function returns a bare payload and has no error slot; the supervisor's panic boundary routes it to the registered handler as a `NodeError`, where `errors.As` recovers it intact:
 
 ```golang
-// import "github.com/whitaker-io/machine/edge/pubsub"
-
-func New[T any](
-	ctx context.Context,
-	subscription *pubsub.Subscription,
-	publisher *pubsub.Topic,
-	to func(T) *pubsub.Message,
-	from func(context.Context, *pubsub.Message) T,
-) machine.Edge[T]
-
-// import "github.com/whitaker-io/machine/edge/http"
-
-func New[T any](c http.Client, fn func(context.Context, T) *http.Request) machine.Edge[T]
+machine.WithErrorHandler(func(e machine.NodeError[int]) {
+	var capErr *machine.CapabilityError
+	if errors.As(e.Err, &capErr) {
+		log.Printf("node %s has no %s capability for %s", capErr.Node, capErr.Access, capErr.Key)
+	}
+})
 ```
+
+#### The host view
+
+`Machine.Host()` is the **host-only** heap accessor. It exists so a program can seed heap cells before `Start` and inspect them after, from outside flow execution:
+
+```golang
+m.Host().Save(processed, 7)
+value, ok := m.Host().Load(processed)
+```
+
+A node function must never call it — it bypasses the capability gate entirely, and a node reaches the heap through `Load`, `Save` and `Update`. Enforcement is structural and static; there is deliberately no runtime caller check, because a stack walk is unsound across goroutine boundaries.
+
+The heap store itself is the `Store` interface, defaulting to `NewMemStore()`. Replace it with `OptionStore` to back the heap with something else; the replacement is still reached only through the gated frame accessors and through `Host`.
+
+------
+
+### **Errors**
+
+With no handler registered the behavior is a **no-op drop**: no retry, no redelivery, no restart. Nothing is retained for redelivery — retry and dead-lettering are composed by you, inside a handler.
+
+Register a global fallback with `OptionErrorHandler` and a typed per-node handler with `WithErrorHandler`. The per-node handler wins.
+
+```golang
+m := machine.New("orders",
+	machine.OptionErrorHandler(func(e machine.NodeError[any]) {
+		log.Printf("node %s failed: %v (panic=%t)", e.Node, e.Err, e.Panic)
+	}),
+)
+
+src.Map("divide", func(f machine.Frame[int]) int {
+	return 100 / f.Value() // a panic here is recovered and routed
+},
+	machine.WithErrorHandler(func(e machine.NodeError[int]) {
+		log.Printf("divide rejected payload %d: %v", e.Payload, e.Err)
+	}),
+).Drop("done")
+```
+
+The global handler is `ErrorHandler[any]` because one machine's nodes carry many payload types; a per-node handler keeps `NodeError[T]` fully typed.
+
+```golang
+type NodeError[T any] struct {
+	Node    string
+	Err     error
+	Payload T
+	Panic   bool
+}
+```
+
+`Panic` distinguishes a recovered panic from a returned error. Every node failure and every edge failure funnels through the same dispatch, so a transport error and a panicking node land in the same handler — but note **which** node they are attributed to: a send failure belongs to the node that produced the datum, while an edge's inbound refusal belongs to the node the edge delivers into.
+
+`Start` refuses a graph that cannot run, reporting every problem at once: a duplicate node name, a flow that is never consumed, a flow consumed by two nodes, an edge factory that failed, an edge that refused to come up, a `Send` onto a target with no consumer, and instruments that could not be created.
+
+------
+
+### **Telemetry**
+
+Instrumentation is direct OpenTelemetry — no logging wrapper. The machine resolves its tracer and meter **once**, at construction, from the providers you give it, defaulting to `otel.GetTracerProvider()` and `otel.GetMeterProvider()`. A provider registered globally after construction cannot reach an existing machine.
+
+```golang
+m := machine.New("observed",
+	machine.WithTracerProvider(tracerProvider),
+	machine.WithMeterProvider(meterProvider),
+)
+```
+
+Configuring the SDK — exporters, resources, sampling — is yours. Passing a nil provider to either option is a declaration-time programmer error and panics rather than silently substituting the global.
+
+Every span and metric is attributed to the instrumentation scope `machine.ScopeName` (`github.com/whitaker-io/machine/v4`) at version `machine.Version()`. Each datum a node processes opens a span named for that node, and three instruments are recorded:
+
+| Instrument | Kind | Unit | Meaning |
+| --- | --- | --- | --- |
+| `machine.runs` | counter | `{datum}` | Data a node has begun processing. |
+| `machine.errors` | counter | `{datum}` | Failures a node has reported to its error handler. |
+| `machine.duration` | histogram | `s` | Time a node spent processing one datum. |
+
+The instrument names carry forward from v3 so an existing dashboard keeps resolving; the duration unit deliberately does not, because v3 recorded milliseconds and OpenTelemetry states durations in seconds. The duration histogram runs for every datum, failed or not, so it counts **attempts**.
+
+The only two attributes this package sets are `machine.name` and `machine.node`. Both carry node identity; nothing is derived from a datum. That is deliberate — an SDK aggregates a bounded number of attribute sets per instrument and folds everything past that into a single overflow set, so one unbounded payload-derived attribute would collapse every other series on the instrument along with it.
+
+An `Output` node does not process, so it produces no span.
+
+------
+
+### **Transports**
+
+A node owns its **inbound** edge, selected with `WithEdge`. The default is `Channel`, an in-memory channel edge, unbuffered:
+
+```golang
+src, send := m.Source[int]("in", machine.WithEdge(machine.Channel[int](64)))
+```
+
+Buffer size is a property of the edge rather than of the machine, so each edge is sized where it is constructed. The `http` and `pubsub` transports carry their own `WithBuffer` for the same reason.
+
+A transport is any implementation of `Edge[T]`, constructed by an `EdgeFactory[T]`:
+
+```golang
+type Edge[T any] interface {
+	Start(ctx context.Context) error
+	Send(ctx context.Context, frame Frame[T]) error
+	Receive() <-chan Frame[T]
+	Close() error
+}
+
+type EdgeFactory[T any] func(node string, report Report) (Edge[T], error)
+```
+
+`EdgeFactory` is a function type rather than an interface because Go forbids type parameters on interface methods. It is handed a `Report` — the path by which an edge hands the supervisor a failure that has **no datum to attribute**, such as a refused inbound message or a broken connection. `Close` must be idempotent: the runtime closes every constructed edge at shutdown and a caller may close one directly as well.
+
+Edges carry `Frame` values rather than bare payloads, because the execution state must travel with the datum. A remote transport marshals it with a `Codec`, and the shipped default is `GobCodec[T]` — gob rather than JSON because a stack value travels as an interface value, and JSON restores every number as `float64` and every struct as a map, which the receiving node's typed `Get` then fails on. A value type outside gob's built-ins must be `gob.Register`'d before it crosses a remote edge; gob's own error at marshal time is the enforcement.
+
+#### edge/http
+
+`github.com/whitaker-io/machine/edge/http`. One `Edge` value is **both halves** of a one-way hop: `Send` POSTs the marshaled envelope to a peer, and `ServeHTTP` accepts a peer's POST and delivers the rebuilt frame into the node this edge feeds. It is a one-way hop rather than a remote call, because a response body cannot carry the frame of a datum that is still traveling.
+
+```golang
+edge := http.New[Order]("https://peer.internal/orders")
+
+// Receiving side: mount the same value as an http.Handler.
+mux.Handle("/orders", edge)
+
+// The node this edge delivers into.
+src.Map("remote", handle, machine.WithEdge(edge.Factory()))
+```
+
+Options: `WithCodec` (defaults to `machine.GobCodec[T]{}`), `WithClient` (defaults to `http.DefaultClient`), `WithBuffer` (defaults to an unbuffered handoff) and `WithMaxBody` (defaults to 4 MiB).
+
+A refused frame is loud on both sides: `ServeHTTP` reports the refusal locally **and** answers 400, and the peer's `Send` turns that 400 into an error its own supervisor routes. Trace context crosses in the request headers, injected by `Send` and extracted by `ServeHTTP`.
+
+#### edge/pubsub
+
+`github.com/whitaker-io/machine/edge/pubsub`. The Google Cloud Pub/Sub transport. `Send` publishes to a topic and a subscription delivers a peer's message into the node this edge feeds. It takes the **caller's** client, because credentials and endpoint configuration are yours.
+
+```golang
+edge := pubsub.New[Order](client, "orders-topic", "orders-subscription")
+
+src.Map("remote", handle, machine.WithEdge(edge.Factory()))
+```
+
+Options: `WithCodec` and `WithBuffer`, which defaults to an unbuffered handoff so a slow node exerts backpressure on the callback rather than accumulating frames.
+
+A refused message is reported and then **settled**. The report is the point; the acknowledgement is what stops the broker redelivering a message nothing in this process can ever decode. It is deliberately not nacked: with no redelivery limit a poison message would return forever. Nothing here retries, backs off or redelivers — those are the broker's and your concerns. Trace context rides the message attributes.
+
+------
+
+### **Options**
+
+Machine options, passed to `machine.New`:
+
+| Option | Effect |
+| --- | --- |
+| `OptionFIFO` | Forces serial processing: the machine waits for one datum to be processed before starting the next. |
+| `OptionMaxConcurrency(n)` | Bounds the data a node processes at once when FIFO is off. Zero, the default, is unbounded. |
+| `OptionErrorHandler(h)` | Registers the global fallback `ErrorHandler[any]`. |
+| `OptionStore(s)` | Replaces the machine's heap `Store`. Defaults to `NewMemStore()`. |
+| `WithTracerProvider(p)` | Sets the provider the machine resolves its tracer from. Defaults to `otel.GetTracerProvider()`. |
+| `WithMeterProvider(p)` | Sets the provider the machine resolves its meter from. Defaults to `otel.GetMeterProvider()`. |
+
+Node options, passed to any builder method:
+
+| Option | Effect |
+| --- | --- |
+| `WithEdge(factory)` | Selects the transport that delivers **into** the node. Defaults to an unbuffered `Channel`. |
+| `WithErrorHandler(h)` | Registers the node's typed handler, which wins over the machine's global one. |
+| `WithReads(refs...)` | Declares the handles the node may read. |
+| `WithWrites(refs...)` | Declares the handles the node may write. |
 
 ------
 
