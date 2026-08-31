@@ -8,9 +8,11 @@ package machine
 import (
 	"context"
 	"errors"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -52,6 +54,9 @@ var (
 	chainFactorKey = NewKey("chain/factor", identityInt)
 	chainSeenCell  = NewCell[int]("chain/seen")
 	reclaimKey     = NewKey("reclaim/held", identityString)
+	unboundKey     = NewKey("gate/unbound", identityString)
+	absentCell     = NewCell[int]("heap/never-written")
+	presentCell    = NewCell[int]("heap/written")
 )
 
 // countingStore is the injected Store fixture. snapshot copies under the lock and
@@ -196,6 +201,58 @@ func assertPanics(t *testing.T, what string, fn func()) {
 		}
 	}()
 	fn()
+}
+
+// recoverPanic returns the value fn panicked with. assertPanics answers whether a call
+// panicked; this answers with WHAT, which is what the capability assertions need — the
+// package raises a *CapabilityError as the panic value so a handler can recover it
+// intact, and a test that only counted the panic would not see that.
+func recoverPanic(t *testing.T, what string, fn func()) any {
+	t.Helper()
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		fn()
+	}()
+	if recovered == nil {
+		t.Fatalf("expected a panic: %s", what)
+	}
+	return recovered
+}
+
+// closableEdge is an inbound transport whose channel the test closes. It is how a node
+// meets a CLOSED inbound channel rather than a cancelled context: the two are separate
+// exits from the read loop and only cancellation is reachable through the machine.
+type closableEdge[T any] struct{ ch chan Frame[T] }
+
+func (*closableEdge[T]) Start(context.Context) error { return nil }
+
+func (e *closableEdge[T]) Send(ctx context.Context, frame Frame[T]) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case e.ch <- frame:
+		return nil
+	}
+}
+
+func (e *closableEdge[T]) Receive() <-chan Frame[T] { return e.ch }
+func (e *closableEdge[T]) Close() error             { close(e.ch); return nil }
+
+// readLoopGoroutines counts the goroutines currently inside a worker's read loop, read
+// out of a full stack dump. A read loop that RETURNS leaves nothing else observable
+// from outside the package, and a count is assertable in both directions. The buffer
+// grows until the dump fits, because a truncated dump would undercount and make an
+// assertion of zero pass vacuously.
+func readLoopGoroutines() int {
+	buf := make([]byte, 1<<16)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			return strings.Count(string(buf[:n]), ").readLoop(")
+		}
+		buf = make([]byte, 2*len(buf))
+	}
 }
 
 func TestSendUnblocksOnCancel(t *testing.T) {
@@ -977,4 +1034,224 @@ func TestMaxConcurrencyBoundsInFlight(t *testing.T) {
 	if got < 2 {
 		t.Fatalf("peak in-flight was %d, so the run never exercised concurrency at all", got)
 	}
+}
+
+func TestMachineReportsItsName(t *testing.T) {
+	if got := New("named-machine").Name(); got != "named-machine" {
+		t.Fatalf("Name returned %q, want %q", got, "named-machine")
+	}
+}
+
+func TestNewKeyRefusesANilCloner(t *testing.T) {
+	assertPanics(t, "NewKey with a nil cloner", func() { NewKey[int]("gate/nil-cloner", nil) })
+	// The same name declares cleanly once a cloner is supplied. That is the known
+	// positive AND the proof that the cloner check runs BEFORE the name is reserved: a
+	// refusal that reserved first would make this second call panic on the duplicate.
+	if got := NewKey("gate/nil-cloner", identityInt).Name(); got != "gate/nil-cloner" {
+		t.Fatalf("NewKey returned a key named %q, want %q", got, "gate/nil-cloner")
+	}
+}
+
+func TestUnboundFrameRefusesGatedAccess(t *testing.T) {
+	// The frame RebuildFrame hands back was never bound to a node, so it carries no
+	// capability view at all — the state no frame inside a running machine can reach.
+	rebuilt, err := RebuildFrame(FrameData{ID: "rebuilt", Source: "origin", Node: "origin"}, 1)
+	if err != nil {
+		t.Fatalf("RebuildFrame refused a projection naming no keys: %v", err)
+	}
+
+	recovered := recoverPanic(t, "reading a stack key through an unbound frame", func() {
+		_ = rebuilt.Get(unboundKey)
+	})
+	failure, ok := recovered.(error)
+	if !ok {
+		t.Fatalf("the unbound read panicked with %v (%T), want an error", recovered, recovered)
+	}
+	var capErr *CapabilityError
+	if !errors.As(failure, &capErr) {
+		t.Fatalf("the unbound read panicked with %v, want a *CapabilityError", failure)
+	}
+	if capErr.Node != unboundNode {
+		t.Fatalf("the CapabilityError names node %q, want %q", capErr.Node, unboundNode)
+	}
+	if capErr.Key != unboundKey.Name() || capErr.Access != accessRead {
+		t.Fatalf("the CapabilityError reports key %q access %q", capErr.Key, capErr.Access)
+	}
+
+	// The known positive: attaching a view that declares the key makes the SAME call
+	// succeed, so the refusal above is the missing view rather than an accessor that
+	// refuses everything.
+	rebuilt.caps = testCapabilities("origin", []KeyRef{unboundKey}, nil)
+	if got := rebuilt.Get(unboundKey); got != "" {
+		t.Fatalf("the rebuilt frame holds %q under a key it never carried, want the zero value", got)
+	}
+}
+
+func TestAbsentHeapCellReadsAsMissing(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type observation struct {
+		absentValue, presentValue int
+		absentOK, presentOK       bool
+	}
+	seen := make(chan observation, 1)
+
+	m := New("absent-heap")
+	m.Host().Save(presentCell, 5)
+
+	src, ingest := m.Source[int]("absent-heap.source")
+	src.Map("absent-heap.node", func(f Frame[int]) int {
+		var o observation
+		o.absentValue, o.absentOK = f.Load(absentCell)
+		o.presentValue, o.presentOK = f.Load(presentCell)
+		seen <- o
+		return f.Value()
+	}, WithReads[int](absentCell, presentCell)).Drop("absent-heap.drop")
+
+	startMachine(t, ctx, m)
+	feed(t, ctx, ingest, 1, 1)
+
+	o := await(t, "the node's heap reads", seen)
+	// The written cell is the known positive on both accessors: the same call against the
+	// same store reports presence, so each miss below is an absent cell rather than a
+	// read that can only ever report absence.
+	if !o.presentOK || o.presentValue != 5 {
+		t.Fatalf("Frame.Load read %d (present=%t) from a written cell, want 5 and present",
+			o.presentValue, o.presentOK)
+	}
+	if o.absentOK {
+		t.Fatal("Frame.Load reported a never-written heap cell as present")
+	}
+	if o.absentValue != 0 {
+		t.Fatalf("Frame.Load returned %d for a never-written heap cell, want the zero value", o.absentValue)
+	}
+
+	hostPresent, hostPresentOK := m.Host().Load(presentCell)
+	if !hostPresentOK || hostPresent != 5 {
+		t.Fatalf("Host.Load read %d (present=%t) from a written cell, want 5 and present",
+			hostPresent, hostPresentOK)
+	}
+	hostAbsent, hostAbsentOK := m.Host().Load(absentCell)
+	if hostAbsentOK {
+		t.Fatal("Host.Load reported a never-written heap cell as present")
+	}
+	if hostAbsent != 0 {
+		t.Fatalf("Host.Load returned %d for a never-written heap cell, want the zero value", hostAbsent)
+	}
+}
+
+func TestMemoizeReturnsTheCachedResultForARepeatedIndex(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Fibonacci is the shape that reaches the cache HIT: computing fib(n-1) fills the
+	// cache for every index below it, so the fib(n-2) that follows is served from the
+	// cache rather than recomputed. A recursion that only ever descends never hits.
+	const target = 10
+	const distinctIndices = target + 1 // one per index from 10 down to 0
+	const withoutMemoization = 177     // 2*fib(target+1)-1, the un-cached body count
+
+	var calls atomic.Int64
+	m := New("memoize")
+	src, ingest := m.Source[int]("memoize.source", WithEdge(Channel[int](4)))
+	out := src.Memoize("memoize.fib", func(f Frame[Monad[int]]) Monad[int] {
+		next := f.Value()
+		return func(inner Frame[int]) int {
+			calls.Add(1)
+			n := inner.Value()
+			if n < 2 {
+				return n
+			}
+			return next(rewrap(inner, n-1)) + next(rewrap(inner, n-2))
+		}
+	}, strconv.Itoa, WithEdge(Channel[int](4))).Output("memoize.out", WithEdge(Channel[int](4)))
+
+	startMachine(t, ctx, m)
+	feed(t, ctx, ingest, 1, target)
+
+	got := drain(t, out, 1)[0]
+	if got.Value() != 55 {
+		t.Fatalf("the memoized recursion computed fib(%d) as %d, want 55", target, got.Value())
+	}
+	// The count is the assertion that the cache was READ, not merely written: the answer
+	// alone is the same either way.
+	if n := calls.Load(); n != distinctIndices {
+		t.Fatalf("the recursion body ran %d times for fib(%d), want %d — one per distinct index; "+
+			"%d is what the same recursion costs when no lookup ever hits",
+			n, target, distinctIndices, withoutMemoization)
+	}
+}
+
+func TestEmitFailureRoutesToTheNodesHandler(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	refused := errors.New("branch edge refused")
+	errs := make(chan NodeError[int], 1)
+	m := New("emit-failure")
+	src, ingest := m.Source[int]("emit-failure.source")
+	// The refusing edge is the INBOUND transport of the branch's terminal, so the failure
+	// is raised on the If node's own emit path rather than inside its filter.
+	taken, skipped := src.If("emit-failure.branch", func(Frame[int]) bool { return true },
+		WithErrorHandler(func(e NodeError[int]) { errs <- e }))
+	taken.Drop("emit-failure.dead", WithEdge[int](func(string) (Edge[int], error) {
+		return &failingEdge[int]{ch: make(chan Frame[int]), err: refused}, nil
+	}))
+	skipped.Drop("emit-failure.skipped")
+
+	startMachine(t, ctx, m)
+	feed(t, ctx, ingest, 1, 13)
+
+	e := awaitError(t, errs)
+	if e.Node != "emit-failure.branch" {
+		t.Fatalf("the handler received node %q, want %q", e.Node, "emit-failure.branch")
+	}
+	if e.Panic {
+		t.Fatal("the handler received Panic=true for a send failure")
+	}
+	if !errors.Is(e.Err, refused) {
+		t.Fatalf("the handler received %v, want %v", e.Err, refused)
+	}
+	if e.Payload != 13 {
+		t.Fatalf("the handler received payload %d, want 13", e.Payload)
+	}
+}
+
+func TestReadLoopReturnsWhenItsInboundChannelCloses(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Every other test cancels its machine on the way out, so wait for those loops to
+	// unwind first: the zero this test ends on is only readable against a zero baseline.
+	pollUntil(t, "every read loop from an earlier test unwound", func() bool {
+		return readLoopGoroutines() == 0
+	})
+
+	inbound := &closableEdge[int]{ch: make(chan Frame[int], 1)}
+	m := New("closed-inbound")
+	// The source owns the ONLY read loop in this machine: a terminal declared with Output
+	// has none, so the count below names one loop unambiguously.
+	src, ingest := m.Source[int]("closed-inbound.source", WithEdge[int](func(string) (Edge[int], error) {
+		return inbound, nil
+	}))
+	out := src.Output("closed-inbound.out", WithEdge(Channel[int](4)))
+
+	startMachine(t, ctx, m)
+	feed(t, ctx, ingest, 1, 7)
+	if got := drain(t, out, 1)[0]; got.Value() != 7 {
+		t.Fatalf("the source forwarded %d, want 7", got.Value())
+	}
+	// The known positive: the probe SEES a running loop, so the zero after the close is a
+	// loop that returned rather than a probe that never saw one.
+	if running := readLoopGoroutines(); running < 1 {
+		t.Fatal("no read loop is visible in a stack dump while the machine is processing")
+	}
+
+	if err := inbound.Close(); err != nil {
+		t.Fatalf("closing the inbound edge: %v", err)
+	}
+	pollUntil(t, "the read loop returned after its inbound channel closed", func() bool {
+		return readLoopGoroutines() == 0
+	})
 }

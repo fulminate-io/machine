@@ -40,6 +40,22 @@ jobs:
       - name: Go Test
         run: go test -timeout 120s -coverprofile=coverage.out
 
+      # The floor is the coverage the suite actually achieves, so a change that drops
+      # below it fails here rather than surfacing later in a coverage report.
+      - name: Enforce coverage floor
+        env:
+          COVERAGE_FLOOR: "99"
+        run: |
+          total=$(go tool cover -func=coverage.out | awk '$1 == "total:" { print $NF }')
+          test -n "$total" || { echo "coverage.out yielded no total line"; exit 1; }
+          echo "total statement coverage: $total"
+          awk -v got="${total%\%}" -v floor="$COVERAGE_FLOOR" 'BEGIN {
+            if (got + 0 < floor + 0) {
+              printf "coverage %s%% is below the %s%% floor\n", got, floor
+              exit 1
+            }
+          }'
+
       - name: Run codacy-coverage-reporter
         uses: codacy/codacy-coverage-reporter-action@v1
         with:

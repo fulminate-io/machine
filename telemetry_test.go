@@ -9,12 +9,14 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -428,5 +430,74 @@ func TestProvidersResolveOnceAtConstruction(t *testing.T) {
 	if !slices.Contains(spanNames(p.spans.Ended()), probeNode) {
 		t.Fatalf("the machine's own recorder ended %v, want a span named %s",
 			spanNames(p.spans.Ended()), probeNode)
+	}
+}
+
+// erroringMeter hands back a USABLE instrument alongside a creation error, which is the
+// contract newTelemetry is written against: every field is populated even on the error
+// return, and the caller records the error rather than substituting anything for it.
+type erroringMeter struct {
+	metricnoop.Meter
+	err error
+}
+
+func (m erroringMeter) Int64Counter(name string, opts ...metric.Int64CounterOption) (metric.Int64Counter, error) {
+	counter, _ := m.Meter.Int64Counter(name, opts...)
+	return counter, m.err
+}
+
+func (m erroringMeter) Float64Histogram(
+	name string, opts ...metric.Float64HistogramOption,
+) (metric.Float64Histogram, error) {
+	histogram, _ := m.Meter.Float64Histogram(name, opts...)
+	return histogram, m.err
+}
+
+// erroringMeterProvider is a MeterProvider whose every instrument fails to be created.
+// It is an ordinary implementation of the exported metric.MeterProvider interface, so
+// the failure reaches New the same way a real SDK's would.
+type erroringMeterProvider struct {
+	metricnoop.MeterProvider
+	err error
+}
+
+func (p erroringMeterProvider) Meter(string, ...metric.MeterOption) metric.Meter {
+	return erroringMeter{err: p.err}
+}
+
+func TestNilProviderOptionsPanic(t *testing.T) {
+	assertPanics(t, "WithTracerProvider given a nil provider", func() { WithTracerProvider(nil) })
+	assertPanics(t, "WithMeterProvider given a nil provider", func() { WithMeterProvider(nil) })
+	// The known positive: newProbe drives both options with REAL providers, so the panics
+	// above are the nil rather than options that refuse everything.
+	if options := newProbe().options; len(options) != 2 {
+		t.Fatalf("newProbe built %d options from real providers, want 2", len(options))
+	}
+}
+
+func TestInstrumentCreationFailureIsReportedFromStart(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	broken := errors.New("instrument unavailable")
+	m := New(probeMachine, WithMeterProvider(erroringMeterProvider{err: broken}))
+
+	err := m.Start(ctx)
+	if err == nil {
+		t.Fatal("Start accepted a machine whose instruments failed to be created")
+	}
+	if !errors.Is(err, broken) {
+		t.Fatalf("Start returned %v, want an error wrapping the meter's own %v", err, broken)
+	}
+	if !strings.Contains(err.Error(), "instrument creation failed") {
+		t.Fatalf("Start returned %v, want an error naming the instrument creation failure", err)
+	}
+
+	// The known positive: the same empty declaration starts clean with working
+	// instruments, so the refusal above is the meter rather than a Start that refuses a
+	// machine declaring no nodes.
+	working := New(probeMachine, newProbe().options...)
+	if err := working.Start(ctx); err != nil {
+		t.Fatalf("a machine with working instruments failed to start: %v", err)
 	}
 }
