@@ -226,14 +226,18 @@ func (f Frame[T]) Context() context.Context { return f.ctx }
 // value, which is the state an untaken If branch leaves behind. The store lookup is
 // safe because a frame carrying a capability view has always been bound to a node,
 // and binding attaches the store.
-func (f Frame[T]) Has(ref KeyRef) bool {
+//
+// A stack key answers from the frame itself and cannot fail, so its error is always
+// nil. A heap cell reaches the store, which can, and a non-nil error means the store
+// did not answer rather than that it answered absent.
+func (f Frame[T]) Has(ref KeyRef) (bool, error) {
 	name := ref.Name()
 	f.caps.check(name, accessRead)
 	if _, ok := f.state.values[name]; ok {
-		return true
+		return true, nil
 	}
-	_, ok := f.state.store.Load(name)
-	return ok
+	_, ok, err := f.state.store.Load(f.ctx, name)
+	return ok, err
 }
 
 // Get returns the value held under a declared stack key, or the zero value of V if
@@ -260,32 +264,50 @@ func (f Frame[T]) Set[V any](k Key[V], value V) {
 // Load returns the value held in a declared heap cell and whether it was present.
 // It takes the read capability. The heap rides the same capability gate as the
 // stack; there is no other way for a node to reach the machine's store.
-func (f Frame[T]) Load[V any](c Cell[V]) (V, bool) {
+//
+// On a non-nil error the value is the zero value of V and present is false, because
+// the store DID NOT ANSWER — which is not the same as answering absent. Reporting
+// present beside a failure would hand the caller a value the store never confirmed.
+func (f Frame[T]) Load[V any](c Cell[V]) (V, bool, error) {
 	f.caps.check(c.name, accessRead)
-	value, ok := f.state.store.Load(c.name)
-	if !ok {
+	value, ok, err := f.state.store.Load(f.ctx, c.name)
+	if !ok || err != nil {
 		var zero V
-		return zero, false
+		return zero, false, err
 	}
-	return value.(V), true
+	return value.(V), true, nil
 }
 
 // Save writes a value into a declared heap cell. It takes the write capability.
-func (f Frame[T]) Save[V any](c Cell[V], value V) {
+//
+// A non-nil error means the write may or may not have landed: what a failure implies
+// about the stored value is the store's own contract to state, not this method's.
+func (f Frame[T]) Save[V any](c Cell[V], value V) error {
 	f.caps.check(c.name, accessWrite)
-	f.state.store.Save(c.name, value)
+	return f.state.store.Save(f.ctx, c.name, value)
 }
 
-// Update applies fn to a declared heap cell under the store's lock and returns the
-// new value. It takes BOTH the read and the write capability, because it does both.
-func (f Frame[T]) Update[V any](c Cell[V], fn func(V) V) V {
+// Update applies fn to a declared heap cell and returns the new value. It takes BOTH
+// the read and the write capability, because it does both.
+//
+// WHETHER THE READ-MODIFY-WRITE IS ATOMIC IS THE STORE'S GUARANTEE AND NOT THIS
+// METHOD'S. NewMemStore holds its lock across the whole of it, so an update through a
+// frame is atomic under concurrent nodes there; a store that computes fn at the caller
+// and replicates the result gives a weaker guarantee, and this method does not add one.
+//
+// On a non-nil error the value is the zero value of V.
+func (f Frame[T]) Update[V any](c Cell[V], fn func(V) V) (V, error) {
 	f.caps.check(c.name, accessRead)
 	f.caps.check(c.name, accessWrite)
-	updated := f.state.store.Update(c.name, func(current any) any {
+	updated, err := f.state.store.Update(f.ctx, c.name, func(current any) any {
 		existing, _ := current.(V)
 		return fn(existing)
 	})
-	return updated.(V)
+	if err != nil {
+		var zero V
+		return zero, err
+	}
+	return updated.(V), nil
 }
 
 // FrameData is the serializable projection of a frame's stack state, produced by

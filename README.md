@@ -191,8 +191,12 @@ out := orders.Map("count", func(f machine.Frame[int]) int {
 	// Stack: per-traversal.
 	f.Set(attempts, f.Get(attempts)+1)
 
-	// Heap: machine-scoped, updated atomically under the store's lock.
-	f.Update(processed, func(n int) int { return n + 1 })
+	// Heap: machine-scoped. The store reports failure, so the error is bound and
+	// handled rather than discarded; whether the read-modify-write is atomic is
+	// the store's guarantee, not this method's.
+	if _, err := f.Update(processed, func(n int) int { return n + 1 }); err != nil {
+		log.Printf("heap update failed: %v", err)
+	}
 
 	return f.Value()
 },
@@ -210,12 +214,12 @@ The type parameter on `WithReads` / `WithWrites` cannot be inferred from a `KeyR
 | `Value()` | none | The payload. |
 | `ID()`, `Parent()`, `Source()`, `Node()` | none | Frame identity and lineage. `Parent` is empty for a frame born at a `Source`. |
 | `Context()` | none | This node execution's span context. An outbound call made with it is CANCELED when the machine stops, and its span is parented to the node's span. It is execution-scoped and never serialized: a datum resumed from a remote transport runs under the resuming worker's context. |
-| `Has(ref)` | read | Whether a declared handle currently holds a value — which is what distinguishes a handle never written from one holding the zero value. |
+| `Has(ref)` | read | Whether a declared handle currently holds a value — which is what distinguishes a handle never written from one holding the zero value — and the store's error. A stack key answers from the frame and cannot fail; a heap cell reaches the store, which can. |
 | `Get(k)` | read | The stack value, or the zero value of `V` if never written. |
 | `Set(k, v)` | write | Writes a stack value. |
-| `Load(c)` | read | The heap value and whether it was present. |
-| `Save(c, v)` | write | Writes a heap value. |
-| `Update(c, fn)` | read **and** write | Read-modify-write on a heap cell under the store's lock; returns the new value. |
+| `Load(c)` | read | The heap value, whether it was present, and the store's error. On a non-nil error the value is the zero value of `V` and present is false, because the store did not answer — which is not the same as answering absent. |
+| `Save(c, v)` | write | Writes a heap value; returns the store's error. |
+| `Update(c, fn)` | read **and** write | Read-modify-write on a heap cell; returns the new value and the store's error. Whether the read-modify-write is atomic is the **store's** guarantee, not this method's. |
 
 An access a node did not declare raises a `*CapabilityError`. It is a panic rather than a returned error because a node function returns a bare payload and has no error slot; the supervisor's panic boundary routes it to the registered handler as a `NodeError`, where `errors.As` recovers it intact:
 
@@ -233,13 +237,19 @@ machine.WithErrorHandler(func(e machine.NodeError[int]) {
 `Machine.Host()` is the **host-only** heap accessor. It exists so a program can seed heap cells before `Start` and inspect them after, from outside flow execution:
 
 ```golang
-m.Host().Save(processed, 7)
-value, ok := m.Host().Load(processed)
+err := m.Host().Save(ctx, processed, 7)
+value, ok, err := m.Host().Load(ctx, processed)
 ```
+
+The host view takes a context because the store may block, and the host — calling from outside flow execution — has no frame to borrow one from.
 
 A node function must never call it — it bypasses the capability gate entirely, and a node reaches the heap through `Load`, `Save` and `Update`. Enforcement is structural and static; there is deliberately no runtime caller check, because a stack walk is unsound across goroutine boundaries.
 
 The heap store itself is the `Store` interface, defaulting to `NewMemStore()`. Replace it with `OptionStore` to back the heap with something else; the replacement is still reached only through the gated frame accessors and through `Host`.
+
+Every `Store` method takes a context and returns an error, because a replacement may be remote or replicated: there a write can fail in a way that cannot be resolved locally, and a read can block on a quorum round trip. An implementation with nowhere to report that could only panic or swallow it, and a swallowed write is a silently degraded lane.
+
+Implementations are not interchangeable in their guarantees. Each documents its own, and the interface promises nothing beyond reporting failure and honoring the context. In particular it does not promise that `Update` runs `fn` under a lock held across the whole read-modify-write: `NewMemStore` guarantees that, and an implementation that computes `fn` at the caller and replicates the result does not.
 
 ------
 

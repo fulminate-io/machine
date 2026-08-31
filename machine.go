@@ -134,17 +134,29 @@ type HostState struct {
 func (m *Machine) Host() HostState { return HostState{store: m.cfg.store} }
 
 // Load returns the value held in a heap cell and whether it was present. HOST-ONLY.
-func (h HostState) Load[V any](c Cell[V]) (V, bool) {
-	value, ok := h.store.Load(c.Name())
-	if !ok {
+//
+// It takes a context because the store may block — a replicated implementation reads
+// through a quorum round trip — and because the host calls from OUTSIDE flow
+// execution, where there is no frame context to borrow.
+//
+// On a non-nil error the value is the zero value of V and present is false: the store
+// did not answer, which is not the same as answering absent.
+func (h HostState) Load[V any](ctx context.Context, c Cell[V]) (V, bool, error) {
+	value, ok, err := h.store.Load(ctx, c.Name())
+	if !ok || err != nil {
 		var zero V
-		return zero, false
+		return zero, false, err
 	}
-	return value.(V), true
+	return value.(V), true, nil
 }
 
 // Save writes a value into a heap cell. HOST-ONLY.
-func (h HostState) Save[V any](c Cell[V], value V) { h.store.Save(c.Name(), value) }
+//
+// It takes a context for the same reason Load does: the store may block, and the host
+// calls from OUTSIDE flow execution and so has no frame context to borrow.
+func (h HostState) Save[V any](ctx context.Context, c Cell[V], value V) error {
+	return h.store.Save(ctx, c.Name(), value)
+}
 
 // node is the control-plane record for one declared node. It carries no type
 // parameters: the run closure is synthesized inside the generic builder methods,

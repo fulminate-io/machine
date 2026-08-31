@@ -57,6 +57,7 @@ var (
 	unboundKey     = NewKey("gate/unbound", identityString)
 	absentCell     = NewCell[int]("heap/never-written")
 	presentCell    = NewCell[int]("heap/written")
+	failCell       = NewCell[int]("fail/reported")
 	receivedKey    = NewKey("wire/received", identityString)
 	unmintedKey    = NewKey("wire/undeclared", identityString)
 	identityKey    = NewKey("faces/identity", identityString)
@@ -75,26 +76,27 @@ func newCountingStore() *countingStore {
 	return &countingStore{values: map[string]any{}}
 }
 
-func (s *countingStore) Load(path string) (any, bool) {
+func (s *countingStore) Load(_ context.Context, path string) (any, bool, error) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	value, ok := s.values[path]
-	return value, ok
+	return value, ok, nil
 }
 
-func (s *countingStore) Save(path string, value any) {
+func (s *countingStore) Save(_ context.Context, path string, value any) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	s.saves++
 	s.values[path] = value
+	return nil
 }
 
-func (s *countingStore) Update(path string, fn func(any) any) any {
+func (s *countingStore) Update(_ context.Context, path string, fn func(any) any) (any, error) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	updated := fn(s.values[path])
 	s.values[path] = updated
-	return updated
+	return updated, nil
 }
 
 func (s *countingStore) snapshot(path string) (int, any, bool) {
@@ -102,6 +104,20 @@ func (s *countingStore) snapshot(path string) (int, any, bool) {
 	defer s.mutex.Unlock()
 	value, ok := s.values[path]
 	return s.saves, value, ok
+}
+
+// failingStore is the Store that always fails. memStore and countingStore never do,
+// so without this fixture every error path the widened seam opened is unreachable from
+// the suite: it is what makes "the seam carries the store's error" a tested claim
+// rather than a declared one. It takes unnamed parameters because it uses none of them.
+type failingStore struct{ err error }
+
+func (s *failingStore) Load(context.Context, string) (any, bool, error) { return nil, false, s.err }
+
+func (s *failingStore) Save(context.Context, string, any) error { return s.err }
+
+func (s *failingStore) Update(context.Context, string, func(any) any) (any, error) {
+	return nil, s.err
 }
 
 func startMachine(t *testing.T, ctx context.Context, m *Machine) {
@@ -330,12 +346,17 @@ func TestHeapUpdateIsAtomic(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			frame.Update(atomicCell, func(n int) int { return n + 1 })
+			if _, err := frame.Update(atomicCell, func(n int) int { return n + 1 }); err != nil {
+				t.Errorf("Update: the in-memory store never fails: %v", err)
+			}
 		}()
 	}
 	wg.Wait()
 
-	got, ok := frame.Load(atomicCell)
+	got, ok, err := frame.Load(atomicCell)
+	if err != nil {
+		t.Fatalf("Load: the in-memory store never fails: %v", err)
+	}
 	if !ok {
 		t.Fatal("heap cell holds no value after concurrent updates")
 	}
@@ -630,7 +651,7 @@ func TestUndeclaredHeapAccessFailsLoudly(t *testing.T) {
 	m := New("undeclared-heap")
 	src, ingest := m.Source[int]("undeclared-heap.source")
 	src.Map("undeclared-heap.node", func(f Frame[int]) int {
-		_, _ = f.Load(heapMissCell)
+		_, _, _ = f.Load(heapMissCell)
 		return f.Value()
 	}, WithErrorHandler(func(e NodeError[int]) { errs <- e })).Drop("undeclared-heap.drop")
 
@@ -760,15 +781,19 @@ func TestHasDistinguishesUnwrittenFromZero(t *testing.T) {
 	type observation struct {
 		hasBefore, hasAfter bool
 		getBefore, getAfter int
+		errBefore, errAfter error
 	}
 	seen := make(chan observation, 1)
 
 	m := New("has")
 	src, ingest := m.Source[int]("has.source")
 	src.Map("has.node", func(f Frame[int]) int {
-		o := observation{hasBefore: f.Has(hasKey), getBefore: f.Get(hasKey)}
+		var o observation
+		o.hasBefore, o.errBefore = f.Has(hasKey)
+		o.getBefore = f.Get(hasKey)
 		f.Set(hasKey, 0)
-		o.hasAfter, o.getAfter = f.Has(hasKey), f.Get(hasKey)
+		o.hasAfter, o.errAfter = f.Has(hasKey)
+		o.getAfter = f.Get(hasKey)
 		seen <- o
 		return f.Value()
 	}, WithReads[int](hasKey), WithWrites[int](hasKey)).Drop("has.drop")
@@ -777,6 +802,9 @@ func TestHasDistinguishesUnwrittenFromZero(t *testing.T) {
 	feed(t, ctx, ingest, 1, 1)
 
 	o := <-seen
+	if o.errBefore != nil || o.errAfter != nil {
+		t.Fatalf("Has reported %v then %v; the in-memory store never fails", o.errBefore, o.errAfter)
+	}
 	if o.hasBefore {
 		t.Fatal("Has reported a never-written key as present")
 	}
@@ -796,16 +824,23 @@ func TestHeapCellRoundTripsThroughFrame(t *testing.T) {
 	defer cancel()
 
 	m := New("heap")
-	m.Host().Save(seedCell, 7)
+	if err := m.Host().Save(ctx, seedCell, 7); err != nil {
+		t.Fatalf("host Save: the in-memory store never fails: %v", err)
+	}
 
 	loaded := make(chan int, 1)
 	src, ingest := m.Source[int]("heap.source")
 	src.Map("heap.node", func(f Frame[int]) int {
-		got, ok := f.Load(seedCell)
+		got, ok, err := f.Load(seedCell)
+		if err != nil {
+			t.Errorf("Load: the in-memory store never fails: %v", err)
+		}
 		if !ok {
 			got = -1
 		}
-		f.Save(seedCell, got*3)
+		if err := f.Save(seedCell, got*3); err != nil {
+			t.Errorf("Save: the in-memory store never fails: %v", err)
+		}
 		loaded <- got
 		return f.Value()
 	}, WithReads[int](seedCell), WithWrites[int](seedCell)).Drop("heap.drop")
@@ -816,7 +851,10 @@ func TestHeapCellRoundTripsThroughFrame(t *testing.T) {
 	if got := <-loaded; got != 7 {
 		t.Fatalf("the node loaded %d through the frame, want the host-seeded 7", got)
 	}
-	host, ok := m.Host().Load(seedCell)
+	host, ok, err := m.Host().Load(ctx, seedCell)
+	if err != nil {
+		t.Fatalf("host Load: the in-memory store never fails: %v", err)
+	}
 	if !ok {
 		t.Fatal("the host reads no value back after the node wrote through the frame")
 	}
@@ -971,7 +1009,9 @@ func TestOptionStoreReplacesHeap(t *testing.T) {
 	written := make(chan struct{}, 1)
 	src, ingest := m.Source[int]("store.source")
 	src.Map("store.node", func(f Frame[int]) int {
-		f.Save(injectedCell, f.Value())
+		if err := f.Save(injectedCell, f.Value()); err != nil {
+			t.Errorf("Save: countingStore never fails: %v", err)
+		}
 		written <- struct{}{}
 		return f.Value()
 	}, WithWrites[int](injectedCell)).Drop("store.drop")
@@ -990,7 +1030,10 @@ func TestOptionStoreReplacesHeap(t *testing.T) {
 	if raw != 11 {
 		t.Fatalf("the injected store holds %v, want 11", raw)
 	}
-	host, hostOK := m.Host().Load(injectedCell)
+	host, hostOK, err := m.Host().Load(ctx, injectedCell)
+	if err != nil {
+		t.Fatalf("host Load: countingStore never fails: %v", err)
+	}
 	if !hostOK || host != 11 {
 		t.Fatalf("Host reads %d (present=%t) and so does not read through the injected store", host, hostOK)
 	}
@@ -1039,7 +1082,9 @@ func TestChainCyclePanicAndState(t *testing.T) {
 	right.Drop("chain.tee.drop")
 
 	out := left.Map("chain.count", func(f Frame[int]) string {
-		f.Update(chainSeenCell, func(n int) int { return n + 1 })
+		if _, err := f.Update(chainSeenCell, func(n int) int { return n + 1 }); err != nil {
+			t.Errorf("Update: the in-memory store never fails: %v", err)
+		}
 		return strconv.Itoa(f.Value())
 	}, WithReads[int](chainSeenCell), WithWrites[int](chainSeenCell)).Output("chain.out")
 
@@ -1055,7 +1100,10 @@ func TestChainCyclePanicAndState(t *testing.T) {
 		}
 	}
 
-	seen, ok := m.Host().Load(chainSeenCell)
+	seen, ok, err := m.Host().Load(ctx, chainSeenCell)
+	if err != nil {
+		t.Fatalf("host Load: the in-memory store never fails: %v", err)
+	}
 	if !ok {
 		t.Fatal("the heap cell holds no value after the traversal")
 	}
@@ -1321,17 +1369,20 @@ func TestAbsentHeapCellReadsAsMissing(t *testing.T) {
 	type observation struct {
 		absentValue, presentValue int
 		absentOK, presentOK       bool
+		absentErr, presentErr     error
 	}
 	seen := make(chan observation, 1)
 
 	m := New("absent-heap")
-	m.Host().Save(presentCell, 5)
+	if err := m.Host().Save(ctx, presentCell, 5); err != nil {
+		t.Fatalf("host Save: the in-memory store never fails: %v", err)
+	}
 
 	src, ingest := m.Source[int]("absent-heap.source")
 	src.Map("absent-heap.node", func(f Frame[int]) int {
 		var o observation
-		o.absentValue, o.absentOK = f.Load(absentCell)
-		o.presentValue, o.presentOK = f.Load(presentCell)
+		o.absentValue, o.absentOK, o.absentErr = f.Load(absentCell)
+		o.presentValue, o.presentOK, o.presentErr = f.Load(presentCell)
 		seen <- o
 		return f.Value()
 	}, WithReads[int](absentCell, presentCell)).Drop("absent-heap.drop")
@@ -1340,6 +1391,10 @@ func TestAbsentHeapCellReadsAsMissing(t *testing.T) {
 	feed(t, ctx, ingest, 1, 1)
 
 	o := await(t, "the node's heap reads", seen)
+	if o.absentErr != nil || o.presentErr != nil {
+		t.Fatalf("Frame.Load reported %v then %v; the in-memory store never fails",
+			o.absentErr, o.presentErr)
+	}
 	// The written cell is the known positive on both accessors: the same call against the
 	// same store reports presence, so each miss below is an absent cell rather than a
 	// read that can only ever report absence.
@@ -1354,17 +1409,110 @@ func TestAbsentHeapCellReadsAsMissing(t *testing.T) {
 		t.Fatalf("Frame.Load returned %d for a never-written heap cell, want the zero value", o.absentValue)
 	}
 
-	hostPresent, hostPresentOK := m.Host().Load(presentCell)
+	hostPresent, hostPresentOK, hostPresentErr := m.Host().Load(ctx, presentCell)
+	if hostPresentErr != nil {
+		t.Fatalf("host Load: the in-memory store never fails: %v", hostPresentErr)
+	}
 	if !hostPresentOK || hostPresent != 5 {
 		t.Fatalf("Host.Load read %d (present=%t) from a written cell, want 5 and present",
 			hostPresent, hostPresentOK)
 	}
-	hostAbsent, hostAbsentOK := m.Host().Load(absentCell)
+	hostAbsent, hostAbsentOK, hostAbsentErr := m.Host().Load(ctx, absentCell)
+	if hostAbsentErr != nil {
+		t.Fatalf("host Load: the in-memory store never fails: %v", hostAbsentErr)
+	}
 	if hostAbsentOK {
 		t.Fatal("Host.Load reported a never-written heap cell as present")
 	}
 	if hostAbsent != 0 {
 		t.Fatalf("Host.Load returned %d for a never-written heap cell, want the zero value", hostAbsent)
+	}
+}
+
+// TestStoreFailureSurfacesThroughEveryGatedHeapAccessor is the behavioral half of the
+// no-swallow invariant: the structural scan cannot see an accessor that returns a nil
+// error it constructed itself, and only driving a store that fails can.
+//
+// Each error is compared with errors.Is rather than ==, so an accessor that WRAPS the
+// store's error still passes and one that substitutes its own does not. The non-error
+// results are asserted too, because an accessor that reports the failure correctly and
+// still hands back a value the store never confirmed is the defect this seam exists to
+// prevent.
+func TestStoreFailureSurfacesThroughEveryGatedHeapAccessor(t *testing.T) {
+	unanswered := errors.New("the store could not answer")
+	frame := testFrame("failing", 0, &failingStore{err: unanswered}, []KeyRef{failCell}, []KeyRef{failCell})
+
+	has, err := frame.Has(failCell)
+	if !errors.Is(err, unanswered) {
+		t.Errorf("Frame.Has returned error %v, want the store's %v", err, unanswered)
+	}
+	if has {
+		t.Error("Frame.Has reported a cell as present through a store that never answered")
+	}
+
+	value, ok, err := frame.Load(failCell)
+	if !errors.Is(err, unanswered) {
+		t.Errorf("Frame.Load returned error %v, want the store's %v", err, unanswered)
+	}
+	if ok {
+		t.Error("Frame.Load reported present beside a failed read; the store never confirmed a value")
+	}
+	if value != 0 {
+		t.Errorf("Frame.Load returned %d beside a failed read, want the zero value", value)
+	}
+
+	if err := frame.Save(failCell, 1); !errors.Is(err, unanswered) {
+		t.Errorf("Frame.Save returned error %v, want the store's %v", err, unanswered)
+	}
+
+	updated, err := frame.Update(failCell, func(n int) int { return n + 1 })
+	if !errors.Is(err, unanswered) {
+		t.Errorf("Frame.Update returned error %v, want the store's %v", err, unanswered)
+	}
+	if updated != 0 {
+		t.Errorf("Frame.Update returned %d beside a failed update, want the zero value", updated)
+	}
+}
+
+// TestStoreFailureSurfacesThroughTheHostView is the host-side half. A host that cannot
+// see a store failure would read a seeded cell back as absent, which is indistinguishable
+// from never having written it.
+func TestStoreFailureSurfacesThroughTheHostView(t *testing.T) {
+	unanswered := errors.New("the store could not answer")
+	m := New("failing-host", OptionStore(&failingStore{err: unanswered}))
+
+	if err := m.Host().Save(t.Context(), failCell, 1); !errors.Is(err, unanswered) {
+		t.Errorf("Host.Save returned error %v, want the store's %v", err, unanswered)
+	}
+
+	value, ok, err := m.Host().Load(t.Context(), failCell)
+	if !errors.Is(err, unanswered) {
+		t.Errorf("Host.Load returned error %v, want the store's %v", err, unanswered)
+	}
+	if ok {
+		t.Error("Host.Load reported present beside a failed read; the store never confirmed a value")
+	}
+	if value != 0 {
+		t.Errorf("Host.Load returned %d beside a failed read, want the zero value", value)
+	}
+}
+
+// TestHasReadsTheStackWithoutReachingTheStore is the DISCRIMINATOR that keeps the Has
+// assertion above from being vacuous. Without it, that assertion is satisfied by a Has
+// that returns the store's error unconditionally — including for stack keys, which it
+// must never consult the store about. Here the store would fail if it were reached, so
+// a nil error is positive evidence the stack answered.
+func TestHasReadsTheStackWithoutReachingTheStore(t *testing.T) {
+	unanswered := errors.New("the store could not answer")
+	frame := testFrame("stack-has", 0, &failingStore{err: unanswered}, []KeyRef{hasKey}, []KeyRef{hasKey})
+	frame.Set(hasKey, 0)
+
+	has, err := frame.Has(hasKey)
+	if err != nil {
+		t.Errorf("Frame.Has returned %v for a written STACK key; it must not reach the store", err)
+	}
+	if !has {
+		t.Error("Frame.Has reported a written stack key as absent")
 	}
 }
 
