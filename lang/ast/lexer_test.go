@@ -104,8 +104,9 @@ func TestLexNoteBlockIsRawAndUnterminatedIsDiagnosed(t *testing.T) {
 }
 
 // TestLexGoSpanTracksBracketDepth covers the second region scan. Depth tracking
-// is what lets a span hold a comma, and the stop condition is the SIX CLAUSE
-// keywords rather than every keyword.
+// is what lets a span hold a comma, and the stop condition is a CLOSED SET OF
+// SEVEN reserved words rather than every keyword: the six clause keywords, plus
+// `else` so that an else arm cannot scan as an ordinary switch arm value.
 func TestLexGoSpanTracksBracketDepth(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -122,6 +123,10 @@ func TestLexGoSpanTracksBracketDepth(t *testing.T) {
 		{"stops at a stop-set token", "Order) -> out\n", []tokenKind{tokRParen}, "Order"},
 		{"a clause keyword inside brackets does not stop", "Wrap(reads, writes)\n", nil, "Wrap(reads, writes)"},
 		{"a keyword prefix is not a keyword", "readsCounter\n", nil, "readsCounter"},
+		{"stops at a reserved else", "else -> other\n", []tokenKind{tokComma, tokArrow}, ""},
+		{"else is only reserved at a word boundary", "elsewhere(in)\n", nil, "elsewhere(in)"},
+		{"else nested in brackets does not stop", "Wrap(else)\n", nil, "Wrap(else)"},
+		{"else stops anywhere at depth zero, not only at the start", "Foo else Bar\n", nil, "Foo"},
 		{"clone ends a var type only when asked", "func(int) error clone Dup\n", []tokenKind{kwClone}, "func(int) error"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

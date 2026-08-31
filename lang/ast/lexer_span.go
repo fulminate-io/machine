@@ -26,20 +26,30 @@ const (
 	spanTrimCutset = " \t\r"
 )
 
-// clauseKeywords are the six keywords that end a Go span at bracket depth zero.
-//
-// The set is the six CLAUSE keywords, NOT "any keyword", and the difference is
-// load bearing: `func` is a keyword, and `var h func(int) error` and
+// spanStopKeywords are the SEVEN reserved words that end a Go span at bracket
+// depth zero. It is a closed set, NOT "any keyword", and that difference is load
+// bearing: `func` is a keyword too, and `var h func(int) error` and
 // `clone func(x T) T` begin their TYPE spellings with it. Adding func here is a
 // one-line change that returns an empty span and parses the declaration as
 // garbage.
-var clauseKeywords = map[string]bool{
+//
+// SIX ARE THE CLAUSE KEYWORDS, which end a span because a clause follows it.
+// `else` is the seventh and earns its place differently: a switch arm begins
+// with a Go span, so without this an else arm would scan as an ordinary arm
+// value and the grammar's trailing `[ Else ]` would order nothing. Stopping here
+// makes an else arm unmatchable as an Arm, which is what makes else-last a rule
+// the notation expresses rather than one only the parser knows. Nothing valid is
+// lost: a Go EXPRESSION never begins with `else`, and `else` inside a func body
+// is untouched because that body is scanned by the brace-balanced func span,
+// which does not consult this table at all.
+var spanStopKeywords = map[string]bool{
 	textReads:      true,
 	textWrites:     true,
 	textOver:       true,
 	textCheckpoint: true,
 	textOn:         true,
 	textNote:       true,
+	textElse:       true,
 }
 
 // scanNoteText scans a raw note body from its opening delimiter to the first
@@ -118,12 +128,13 @@ func (l *lexer) goSpanStep(depth *int, stop []tokenKind) bool {
 }
 
 // goSpanIdentStep consumes a whole identifier, reporting whether it ends the
-// span. Consuming it whole is what keeps a keyword recognizable only at a word
-// boundary: the identifier `myreads` must not end a span at its `reads`.
+// span. Consuming it whole is what keeps a reserved word recognizable only at a
+// word boundary: `myreads` must not end a span at its `reads`, and `elsewhere`
+// must not end one at its `else`.
 func (l *lexer) goSpanIdentStep(depth int, stop []tokenKind) bool {
 	word := l.identAt(l.off)
 	if depth == 0 {
-		if clauseKeywords[word] {
+		if spanStopKeywords[word] {
 			return true
 		}
 		if kind, ok := keywords[word]; ok && slices.Contains(stop, kind) {

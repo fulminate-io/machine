@@ -361,6 +361,13 @@ func TestRecoveryReportsMalformedStatements(t *testing.T) {
 			want: "expected a note body",
 		},
 		{
+			// Newly reachable now that `else` is reserved: the span scanner
+			// stops dead where the second value belongs.
+			name: "a reserved word where an arm value belongs",
+			src:  "flow orders\nsource in Poll\nswitch route from in on in.Kind {\n\t\"card\", else -> x\n}\n",
+			want: "expected a switch arm value",
+		},
+		{
 			name: "a from-list ending in a comma",
 			src:  "flow orders\nsource in Poll\ntransform t Step from in,\n",
 			want: "expected an input name",

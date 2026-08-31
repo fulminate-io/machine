@@ -38,7 +38,7 @@
 //
 // PARSER-ONLY RULES
 //
-// Five rules the parser enforces that this notation cannot express. Each names
+// Four rules the parser enforces that this notation cannot express. Each names
 // the fixture that gates it, and that naming is load bearing rather than tidy:
 // the conformance suite derives its recognizer-versus-parser exemption set by
 // reading these lines, so a rule whose gate is missing reds instead of silently
@@ -46,14 +46,26 @@
 //
 // The completeness of this list is a review duty the checks cannot discharge.
 // They verify that each LISTED rule is annotated; they cannot tell you about a
-// rule nobody has thought of yet. The list has grown three times: from two to
-// three when the headless-statement case was found, from three to four when the
-// arrow case was derived, and from four to five when the conformance recognizer
+// rule nobody has thought of yet. The list grew from two to three when the
+// headless-statement case was found, and from three to four when the arrow case
+// was derived — each time by asking the same question: what does the notation
+// admit that the parser must refuse?
+//
+// IT THEN GREW TO FIVE AND CAME BACK TO FOUR, and that episode is why the Go
+// span's stop set has seven members rather than six. The conformance recognizer
 // proved that the else-last rule this header had claimed the notation expressed
-// is not expressed by it at all. Each growth came from asking the same question
-// — what does the notation admit that the parser must refuse? — and the last one
-// came from a gate rather than from a reading, which is the strongest form of
-// that evidence and the reason the gate is worth its cost.
+// was not expressed by it at all: an Arm begins with the opaque goSpan terminal,
+// and nothing in the notation can constrain what an opaque terminal's scanner
+// consumes. It was annotated as a fifth parser-only rule, which was the honest
+// record of the language as it then stood. `else` was then RESERVED — added to
+// the span scanner's stop set — which makes an else arm unmatchable as an Arm
+// and so makes the trailing option genuinely order the two. The rule moved out
+// of this list and back into the notation, and the annotation was deleted.
+//
+// The episode is kept rather than erased because the fifth rule is the reason
+// the stop set is what it is, and because it is the one growth that came from a
+// GATE rather than from a reading — which is the strongest form of that evidence
+// and the reason the gate is worth its cost.
 //
 //   1. PARSER-ONLY RULE: within one Clauses sequence each alternative may appear
 //      AT MOST ONCE. The repetition below is deliberately permissive because the
@@ -80,14 +92,6 @@
 //      contains no arrow and `-> handler` scans as a perfectly good non-empty
 //      span terminated by the newline. Gated by testdata/invalid/error-edge-arrow.flow.
 //
-//   5. PARSER-ONLY RULE: within a switch body an `else` arm must be LAST, and no
-//      other arm may begin with `else` at all. Placing [ Else ] after the arm
-//      repetition looks like it orders the two, and it does not: Arm begins with
-//      the opaque goSpan terminal, `else` is not in that scanner's stop set, and
-//      so `else -> target` matches Arm exactly as any other arm value does. The
-//      notation cannot constrain the CONTENT of an opaque terminal, so only the
-//      parser refuses a non-last else. Gated by testdata/invalid/else-not-last.flow.
-//
 // Rule 3 and the treatment of `func` point opposite ways on purpose. A FUNC is a
 // DECLARATION: it stands alone, belongs to the file, and is legal anywhere at
 // file level, which is why funcs are declare-anywhere and hoisted. A STATEMENT
@@ -97,15 +101,17 @@
 // loud at the point of the mistake instead.
 //
 // Everything else the parser enforces IS expressed below: at-least-one switch
-// arm by `Arm { Arm }`, checkpoint's zero arity by an operand-free production,
-// continuation-only-before-a-clause-keyword by the `[ newline ]` prefixes, and a
-// func body's self-termination by goFuncSpan's brace balance.
+// arm by `Arm { Arm }`, else-last by the trailing `[ Else ]`, checkpoint's zero
+// arity by an operand-free production, continuation-only-before-a-clause-keyword
+// by the `[ newline ]` prefixes, and a func body's self-termination by
+// goFuncSpan's brace balance.
 //
-// ELSE-LAST WAS ON THAT LIST AND HAS BEEN MOVED OFF IT, which is rule 5 above.
-// The at-least-one-arm rule is genuinely expressed — `Arm { Arm }` is one-or-more
-// and the recognizer rejects an empty switch exactly as the parser does — and the
-// two sat side by side in the same production, which is why the second read as
-// expressed for as long as it did.
+// ELSE-LAST IS ON THAT LIST ONLY BECAUSE `else` IS RESERVED. The trailing option
+// orders nothing on its own: an Arm begins with an opaque terminal, so an else
+// arm would match Arm like any other arm value. It is the span scanner stopping
+// at `else` that makes an else arm unmatchable as an Arm and leaves the trailing
+// option as the only production that can take it. Remove `else` from that stop
+// set and this line becomes false again.
 //
 // EVERY Entry AND FlowEntry ALTERNATIVE ENDS IN `newline`, which makes a
 // trailing newline mandatory in every .flow file. A file whose last line has no

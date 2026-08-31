@@ -62,10 +62,15 @@ const (
 	kwFunc
 )
 
-// The six CLAUSE keyword spellings, named because two tables state them: the
-// keyword inventory below, and the lexer's clause-stop set. The distinction
-// between these six and "any keyword" is load bearing in the Go span scan, so
-// the two tables are kept from drifting by sharing these constants.
+// The RESERVED spellings the Go span scanner stops at, named because two tables
+// state them: the keyword inventory below, and the scanner's stop set.
+//
+// Six of them are the CLAUSE keywords, which end a span because a clause follows
+// it. `else` is the seventh and is there for a different reason: reserving it
+// makes an else arm unmatchable as an ordinary switch arm, which is what lets
+// the grammar's trailing option express that an else must come last. The
+// distinction between these seven and "any keyword" is still load bearing —
+// `func` in particular must NOT join them.
 const (
 	textReads      = "reads"
 	textWrites     = "writes"
@@ -73,6 +78,7 @@ const (
 	textCheckpoint = "checkpoint"
 	textOn         = "on"
 	textNote       = "note"
+	textElse       = "else"
 )
 
 // keywords is THE authoritative keyword inventory. The lexer, the grammar
@@ -107,7 +113,7 @@ var keywords = map[string]tokenKind{
 	textReads:      kwReads,
 	textWrites:     kwWrites,
 	"clone":        kwClone,
-	"else":         kwElse,
+	textElse:       kwElse,
 	textCheckpoint: kwCheckpoint,
 	"func":         kwFunc,
 }
