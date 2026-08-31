@@ -451,6 +451,7 @@ var parserOnlyRules = []struct {
 	{"flow-level on error and note come first", "must appear BEFORE the first statement of the flow body"},
 	{"a statement must follow a flow declaration", "a Statement must follow a FlowDecl"},
 	{"on error takes no arrow", "must be NON-EMPTY and must NOT BEGIN WITH"},
+	{"a switch else must be last", "an `else` arm must be LAST"},
 }
 
 // TestGrammarAnnotatesEveryParserOnlyRule asserts the header carries all four

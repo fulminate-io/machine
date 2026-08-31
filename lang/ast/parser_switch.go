@@ -103,8 +103,14 @@ func (p *parser) parseSwitchArm() (SwitchArm, bool) {
 // parseSwitchElse parses `else -> <target>`.
 //
 // An else is OPTIONAL and, when present, must be LAST: top-down first-match
-// routing makes every arm after it dead. The notation expresses that by placing
-// the option after the arm repetition, so this too needs no annotation.
+// routing makes every arm after it dead.
+//
+// THAT ORDERING IS A PARSER-ONLY RULE, annotated as the fifth in the grammar
+// header. Placing [ Else ] after the arm repetition looks like it expresses the
+// ordering and does not: an Arm begins with the opaque goSpan terminal and
+// `else` is not in that scanner's stop set, so `else -> target` matches Arm like
+// any other arm value. The notation cannot constrain the content of an opaque
+// terminal. The conformance recognizer is what proved it.
 func (p *parser) parseSwitchElse(stmt *SwitchStmt) {
 	at := p.tok.pos
 	p.advance()
