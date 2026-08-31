@@ -1,0 +1,10 @@
+note """analysis check: a use binds the wrong number of names. `screening` declares two outputs and bindings are POSITIONAL in signature order, so binding one name silently drops the second and mis-names nothing that would otherwise be caught."""
+flow screening (Order) -> ok OkResult, bad ErrResult
+import "github.com/acme/fraud"
+import "acme.dev/flows/warehouse"
+branch check fraud.Clean from in -> ok, bad
+
+flow main
+source ingest Poll
+use screen screening from ingest -> clean
+sink store warehouse.Insert from clean

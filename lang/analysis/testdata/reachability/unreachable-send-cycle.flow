@@ -1,0 +1,9 @@
+note """analysis check: dead nodes. The loop label IS targeted by a send, but the send is reachable only through the loop it feeds, so nothing outside the cycle ever enters it. A root rule that treats any targeted loop label as a root calls this whole chain live."""
+flow orders
+import "github.com/acme/billing"
+import "acme.dev/flows/audit"
+source ingest Poll
+sink done audit.Store from ingest
+loop retry
+transform redo billing.Backoff from retry
+send redo -> retry

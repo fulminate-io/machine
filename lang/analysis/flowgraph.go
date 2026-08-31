@@ -78,12 +78,19 @@ type GraphEdge struct {
 // Entry holds the names available before any statement runs. It is empty for an
 // ordinary flow and holds the implicit input for a flow with a signature, whose
 // body consumes a name no statement declares.
+//
+// Declared holds the flow signature's declared output names. They are the mirror
+// of Entry at the other end: a name the flow hands BACK to its caller, consumed
+// outside the flow by whatever `use` statement binds it. An analysis asking
+// "does anything read this name" has to know they exist, or it reports every
+// declared output of every subflow as a dead end.
 type FlowGraph struct {
-	Flow  string
-	Pos   ast.Position
-	Entry []string
-	Nodes []GraphNode
-	Edges []GraphEdge
+	Flow     string
+	Pos      ast.Position
+	Entry    []string
+	Declared []string
+	Nodes    []GraphNode
+	Edges    []GraphEdge
 }
 
 // FileGraphs is one source file's derived graphs.
@@ -146,6 +153,9 @@ func buildGraph(flow *FlowSymbols) FlowGraph {
 	}
 	if flow.HasSignature {
 		graph.Entry = []string{implicitInput}
+		for _, out := range flow.Outputs {
+			graph.Declared = append(graph.Declared, out.Name.Name)
+		}
 	}
 	for i, stmt := range flow.Body {
 		graph.Nodes = append(graph.Nodes, dataflowOf(i, stmt))

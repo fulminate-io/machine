@@ -1,0 +1,9 @@
+note """analysis check: dead nodes. No send targets `stranded`, and a loop carries no from-clause, so nothing can ever enter it and the three statements below it can never execute. This is the shape the canonical toy.flow carried before its repair; no canonical fixture has it any more, which is why it lives here."""
+flow orders
+import "github.com/acme/billing"
+import "acme.dev/flows/audit"
+source ingest Poll
+sink done audit.Store from ingest
+loop stranded
+transform lonely billing.Charge from stranded
+sink out audit.Store from lonely

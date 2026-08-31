@@ -16,4 +16,8 @@ package analysis
 func init() {
 	Register(SymbolsAnalyzer)
 	Register(FlowgraphAnalyzer)
+	Register(ResolveAnalyzer)
+	Register(ReachabilityAnalyzer)
+	Register(CyclesAnalyzer)
+	Register(SignatureAnalyzer)
 }

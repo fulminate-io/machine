@@ -1,0 +1,10 @@
+note """analysis check: NOT a dead node. The send targeting `retry` sits DOWNSTREAM of the label, which is the ordinary shape, so the root rule has to be a fixpoint. A single pass reaches the label while `retry` is still unavailable, marks it dead, and never looks again."""
+flow orders
+import "github.com/acme/billing"
+import "acme.dev/flows/audit"
+source ingest Poll
+branch check billing.Validate from ingest -> good, bad
+loop retry
+transform redo billing.Backoff from good, retry
+send redo -> retry
+sink done audit.Store from bad

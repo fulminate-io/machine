@@ -1,0 +1,8 @@
+note """analysis check: a cycle with no send. `score` and `adjust` each consume the other's output, closing a loop through ordinary forward edges. The language has no way to write that deliberately -- iteration is expressed with loop and send -- so it is either a declare-before-use mistake or a graph-derivation bug."""
+flow orders
+import "github.com/acme/billing"
+import "acme.dev/flows/audit"
+source ingest Poll
+transform score billing.Score from adjust
+transform adjust billing.Adjust from score
+sink done audit.Store from ingest

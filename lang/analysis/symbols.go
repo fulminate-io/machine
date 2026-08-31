@@ -70,7 +70,7 @@ type FlowSymbols struct {
 	State        map[string]ast.StateField
 	Outputs      []ast.FlowOutput
 	HasSignature bool
-	Bad          []ast.Position
+	Bad          []ast.BadStmt
 }
 
 // FileSymbols is one source file's declarations.
@@ -283,7 +283,7 @@ func (c *symbolCollector) visitPlain(i int, stmt ast.Stmt) {
 	case ast.SendStmt:
 		c.send(i, s)
 	case ast.BadStmt:
-		c.flow.Bad = append(c.flow.Bad, s.Start)
+		c.flow.Bad = append(c.flow.Bad, s)
 	default:
 		c.unknownStmt(stmt)
 	}

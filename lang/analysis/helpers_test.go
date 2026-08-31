@@ -150,6 +150,27 @@ func graphsOf(t *testing.T, srcs ...Source) (*GraphSet, []Diagnostic) {
 	return set, diags
 }
 
+// cyclesOf runs the cycles analyzer and returns the components it found.
+func cyclesOf(t *testing.T, srcs ...Source) (*CycleSet, []Diagnostic) {
+	t.Helper()
+
+	got, diags := resultOf(t, CyclesAnalyzer, srcs...)
+	set, ok := got.(*CycleSet)
+	if !ok {
+		t.Fatalf("the cycles analyzer produced %T, want *CycleSet", got)
+	}
+	return set, diags
+}
+
+// allCycles flattens a cycle set.
+func allCycles(set *CycleSet) []Cycle {
+	var out []Cycle
+	for _, file := range set.Files {
+		out = append(out, file.Cycles...)
+	}
+	return out
+}
+
 // checkGolden compares rendered lines against a golden file, rewriting it when
 // -update is set.
 //
@@ -190,6 +211,47 @@ func withCode(diags []Diagnostic, code string) []Diagnostic {
 	out := make([]Diagnostic, 0, len(diags))
 	for _, d := range diags {
 		if d.Code == code {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// sweepCorpus runs one analyzer over every .flow file in a directory and returns
+// the diagnostics it reported, keyed by file name.
+//
+// THE STANDING SWEEP RULE IS PROCEDURE, NOT ADVICE: every rule an analyzer emits
+// runs over all three strawmen before its step freezes, and what fired is
+// recorded. A rule that fires on a canonical program is evidence — either the
+// rule is mis-specified or the program has a defect — and it is escalated rather
+// than exempted.
+func sweepCorpus(t *testing.T, a *Analyzer, dir string) map[string][]Diagnostic {
+	t.Helper()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("cannot read %s: %v", dir, err)
+	}
+
+	out := map[string][]Diagnostic{}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".flow" {
+			continue
+		}
+		src := loadSource(t, filepath.Join(dir, entry.Name()))
+		out[entry.Name()] = withCode(analyze(t, a, src), a.Name)
+	}
+	if len(out) == 0 {
+		t.Fatalf("%s holds no .flow files, so the sweep checked nothing", dir)
+	}
+	return out
+}
+
+// errorsIn keeps only the SeverityError diagnostics.
+func errorsIn(diags []Diagnostic) []Diagnostic {
+	out := make([]Diagnostic, 0, len(diags))
+	for _, d := range diags {
+		if d.Severity == SeverityError {
 			out = append(out, d)
 		}
 	}

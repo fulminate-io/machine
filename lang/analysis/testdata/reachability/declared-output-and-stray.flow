@@ -1,0 +1,6 @@
+note """analysis check: NOT an unconsumed output. `ok` is a DECLARED signature output, consumed by whatever caller binds it, so an analysis looking only inside this flow must not call it a dead end. `stray` is the known positive in the same file: nothing declares it and nothing reads it, so it IS one."""
+flow screening (Order) -> ok OkResult, bad ErrResult
+import "github.com/acme/fraud"
+import "acme.dev/flows/audit"
+branch check fraud.Clean from in -> ok, bad
+transform stray audit.Tag from bad
