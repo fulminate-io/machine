@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"slices"
 	"sync"
 
 	"github.com/hashicorp/raft"
@@ -195,6 +196,11 @@ func (*fsmSnapshot) Release() {}
 // merged the snapshot over the live map would leave two peers restoring the SAME
 // snapshot from different priors in different states, which is the one thing a
 // replicated state machine may never do.
+//
+// It also VALIDATES every kind it installs and CLEARS a poison recorded against the
+// journal it just discarded — see replace, which owns that ordering. A rejoining
+// peer therefore heals through an authoritative snapshot rather than staying
+// read-dead on data that is correct.
 func (f *fsm) Restore(snapshot io.ReadCloser) error {
 	defer func() { _ = snapshot.Close() }()
 
@@ -210,6 +216,17 @@ func (f *fsm) Restore(snapshot io.ReadCloser) error {
 // replace installs the restored journal wholesale and advances through the same
 // tracker every other path uses, so a reader parked on a target below the
 // snapshot's index wakes instead of being stranded by the restore.
+//
+// THE ORDER IS PRESCRIBED: clear the poison, then validate what is being installed,
+// then record a fresh poison only if the RESTORED journal earns one.
+//
+// Clearing first is right because the poison tracks the state this node HOLDS, not
+// what its build knows, and this restore has just discarded the journal that poison
+// described — keeping it would leave a peer refusing correct authoritative data
+// while naming a log index that no longer exists. Validating second is right because
+// a kind arriving by snapshot is no more interpretable than the same kind arriving
+// by log: if Apply poisons on it, so must this, or the fail-loud invariant would
+// invert depending on which path an entry took to get here.
 func (f *fsm) replace(restored fsmSnapshot) {
 	f.mutex.Lock()
 	defer f.mutex.Unlock()
@@ -218,5 +235,28 @@ func (f *fsm) replace(restored fsmSnapshot) {
 	if f.values == nil {
 		f.values = map[string]Entry{}
 	}
+	f.poison = validateRestored(f.values)
 	f.advanceLocked(restored.Applied)
+}
+
+// validateRestored reports the first restored entry whose kind this build cannot
+// interpret, or nil when every kind is declared.
+//
+// Paths are walked in sorted order so the refusal names the same entry on every
+// peer rather than whichever one map iteration happened to reach first.
+func validateRestored(values map[string]Entry) error {
+	paths := make([]string, 0, len(values))
+	for path := range values {
+		paths = append(paths, path)
+	}
+	slices.Sort(paths)
+
+	for _, path := range paths {
+		if entry := values[path]; !entry.Kind.declared() {
+			return fmt.Errorf("ledger: restored entry for %q names kind %d, which this build does not declare: %w",
+				path, uint8(entry.Kind), ErrPoisonedJournal)
+		}
+	}
+
+	return nil
 }

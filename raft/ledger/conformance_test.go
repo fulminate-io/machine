@@ -5,8 +5,72 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/raft"
+
 	machine "github.com/whitaker-io/machine/v4"
 )
+
+// ledgerSurface is the published Ledger shape, written once and used both by the
+// compile-time pin below and by the test that exercises it.
+//
+// The machine.Store pin further down was already here and it caught real drift; a
+// Ledger pin was missing, and that is how Append shipped returning only an error
+// while the phase-4 seam statement published (uint64, error). A lane author reading
+// the overview and one reading the code would have built against different
+// contracts, and nothing would have said so until one of them failed.
+//
+// It is an ANONYMOUS interface deliberately. A named exported interface would become
+// part of the seam and invite implementations; the point is to pin the concrete
+// type's shape, not to offer an abstraction.
+type ledgerSurface = interface {
+	Close() error
+	Store() *Store
+	Raft() *raft.Raft
+	Flow() string
+	Append(context.Context, Entry) (uint64, error)
+	Get(context.Context, string) (Entry, bool, error)
+}
+
+var _ ledgerSurface = (*Ledger)(nil)
+
+func TestLedgerSurfaceMatchesThePublishedSeam(t *testing.T) {
+	l := openTestLedger(t, Config{Flow: "flow-surface", LocalID: "n0", Mux: testMux(t), Bootstrap: true})
+	waitLeadership(t, l)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	// Held through the pinned shape, so the assertion is load-bearing here rather
+	// than a declaration nothing reads.
+	var surface ledgerSurface = l
+
+	if surface.Flow() != "flow-surface" {
+		t.Fatalf("Flow() reported %q, want the configured flow", surface.Flow())
+	}
+	if surface.Raft() == nil {
+		t.Fatal("Raft() returned nil on an open ledger")
+	}
+	if surface.Store() == nil {
+		t.Fatal("Store() returned nil on an open ledger")
+	}
+
+	index, err := surface.Append(ctx, Entry{Kind: KindSet, Path: "heap/alpha", Value: []byte("v")})
+	if err != nil {
+		t.Fatalf("Append through the published surface: %v", err)
+	}
+	if index == 0 {
+		t.Fatal("Append reported journal index 0, which no committed entry occupies")
+	}
+	entry, ok, err := surface.Get(ctx, "heap/alpha")
+	if err != nil || !ok || string(entry.Value) != "v" {
+		t.Fatalf("Get through the published surface gave %+v present=%v err=%v", entry, ok, err)
+	}
+
+	// The reported index is a journal position, not a count of this ledger's calls.
+	if last := l.raft.LastIndex(); index > last {
+		t.Fatalf("Append reported index %d beyond the log's last index %d", index, last)
+	}
+}
 
 // The ledger Store is a machine heap store. This assertion is what makes a drift in
 // that seam a COMPILE failure here rather than a surprise at the first site that

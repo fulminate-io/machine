@@ -3,6 +3,7 @@ package ledger
 import (
 	"bytes"
 	"context"
+	"encoding/gob"
 	"errors"
 	"io"
 	"testing"
@@ -10,6 +11,95 @@ import (
 
 	"github.com/hashicorp/raft"
 )
+
+// snapshotBytes encodes a snapshot envelope exactly as Persist does, so a test can
+// hand Restore a journal no honest Snapshot on this build would produce.
+func snapshotBytes(t *testing.T, snapshot fsmSnapshot) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(&snapshot); err != nil {
+		t.Fatalf("encoding a snapshot envelope: %v", err)
+	}
+
+	return buf.Bytes()
+}
+
+func TestRestoreValidatesTheKindsItInstalls(t *testing.T) {
+	// A kind arriving by SNAPSHOT is no more interpretable than the same kind
+	// arriving by log. If Apply poisons on it, Restore must too — otherwise the
+	// fail-loud invariant inverts on arrival path and the node serves an entry it
+	// cannot interpret.
+	poisoned := newFSM()
+	err := poisoned.Restore(io.NopCloser(bytes.NewReader(snapshotBytes(t, fsmSnapshot{
+		Values:  map[string]Entry{"heap/unknown": {Kind: Kind(200), Path: "heap/unknown"}},
+		Applied: 42,
+	}))))
+	if err != nil {
+		t.Fatalf("Restore reported %v; it installs the snapshot and records a poison rather than refusing the restore outright", err)
+	}
+	if poisoned.poison == nil {
+		t.Fatal("a snapshot carrying kind 200 restored with no poison recorded; the same kind arriving through Apply poisons, so the fail-loud invariant inverted on arrival path")
+	}
+	if !errors.Is(poisoned.poison, ErrPoisonedJournal) {
+		t.Fatalf("the recorded poison %v is not a wrapped ErrPoisonedJournal", poisoned.poison)
+	}
+
+	// The unreadable entry is not served: a read reports the poison.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := poisoned.waitApplied(ctx, 42); !errors.Is(err, ErrPoisonedJournal) {
+		t.Fatalf("a read against the restored journal gave %v, want the poison", err)
+	}
+
+	// CONTROL: a snapshot carrying only declared kinds restores clean through the
+	// same path, so the poison above is about the kind rather than about Restore
+	// poisoning everything it touches.
+	clean := newFSM()
+	if err := clean.Restore(io.NopCloser(bytes.NewReader(snapshotBytes(t, fsmSnapshot{
+		Values:  map[string]Entry{"heap/known": {Kind: KindSet, Path: "heap/known", Value: []byte("v")}},
+		Applied: 7,
+	})))); err != nil {
+		t.Fatalf("CONTROL FAILED: restoring a declared-kind snapshot: %v", err)
+	}
+	if clean.poison != nil {
+		t.Fatalf("CONTROL FAILED: a snapshot of declared kinds recorded the poison %v", clean.poison)
+	}
+}
+
+func TestRestoreClearsAPoisonAgainstTheDiscardedJournal(t *testing.T) {
+	f := newFSM()
+	// Poison this node against a journal it is about to throw away.
+	f.Apply(commandAt(t, 3, Entry{Kind: Kind(200), Path: "heap/bad"}))
+	if f.poison == nil {
+		t.Fatal("CONTROL FAILED: the seeding apply recorded no poison, so there is nothing for the restore to clear")
+	}
+
+	// An authoritative snapshot carrying only declared kinds replaces that journal
+	// entirely. The poison described state this node no longer holds, and it named
+	// a log index the restore discarded.
+	if err := f.Restore(io.NopCloser(bytes.NewReader(snapshotBytes(t, fsmSnapshot{
+		Values:  map[string]Entry{"heap/known": {Kind: KindSet, Path: "heap/known", Value: []byte("authoritative")}},
+		Applied: 90,
+	})))); err != nil {
+		t.Fatalf("restoring an authoritative journal: %v", err)
+	}
+	if f.poison != nil {
+		t.Fatalf("a poison recorded against the discarded journal survived an authoritative clean restore: %v; a rejoining peer would stay read-dead on correct data", f.poison)
+	}
+
+	// CONTROL: the restore actually installed the authoritative journal, so the
+	// cleared poison is not the result of a restore that did nothing.
+	entry, ok := f.get("heap/known")
+	if !ok || string(entry.Value) != "authoritative" {
+		t.Fatalf("CONTROL FAILED: after the restore heap/known reads %+v present=%v", entry, ok)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := f.waitApplied(ctx, 90); err != nil {
+		t.Fatalf("a read against the healed journal gave %v, want it to serve", err)
+	}
+}
 
 // memSink is a raft.SnapshotSink that keeps the snapshot in memory and records
 // which of Close and Cancel raft's contract got.

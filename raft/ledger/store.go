@@ -90,7 +90,13 @@ func (s *Store) Save(ctx context.Context, path string, value any) error {
 		return err
 	}
 
-	return s.ledger.Append(ctx, Entry{Kind: KindSet, Path: path, Value: data})
+	// The journal index Append reports is not part of this seam's vocabulary; a
+	// caller that needs it reaches for Ledger.Append directly.
+	if _, err := s.ledger.Append(ctx, Entry{Kind: KindSet, Path: path, Value: data}); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Update reads through the barrier, computes fn at the caller and replicates the

@@ -75,8 +75,14 @@ func TestOneVoterLocalLedgerServesReadsAndWritesWithNoPeers(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := l.Append(ctx, Entry{Kind: KindSet, Path: "heap/alpha", Value: []byte("written")}); err != nil {
+	index, err := l.Append(ctx, Entry{Kind: KindSet, Path: "heap/alpha", Value: []byte("written")})
+	if err != nil {
 		t.Fatalf("appending to a one-voter ledger: %v", err)
+	}
+	// The append reports the journal position the entry landed at, which is what a
+	// checkpoint references.
+	if index == 0 {
+		t.Fatal("the append reported journal index 0, which no committed entry occupies")
 	}
 
 	entry, ok, err := l.Get(ctx, "heap/alpha")
@@ -152,7 +158,9 @@ func TestDirBackedLedgerSurvivesCloseAndReopen(t *testing.T) {
 }
 
 func l0Append(ctx context.Context, l *Ledger) error {
-	return l.Append(ctx, Entry{Kind: KindSet, Path: "heap/durable", Value: []byte("survives")})
+	_, err := l.Append(ctx, Entry{Kind: KindSet, Path: "heap/durable", Value: []byte("survives")})
+
+	return err
 }
 
 func TestUnopenableDirIsAnErrorNotAnInMemoryFallback(t *testing.T) {

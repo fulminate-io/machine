@@ -50,19 +50,37 @@ var (
 	// ErrNotLeader reports that this node does not lead the flow's group. Every
 	// read and write here is leader-only, so this is the refusal a follower gives
 	// rather than serving a value it cannot prove current.
+	//
+	// THIS REFUSAL IS AN INTERIM AND NOT THE SETTLED CONTRACT. The settled design
+	// forwards a non-leader Save, Update and linearizable Load to the flow group's
+	// leader from the client side, and lane C2 is the successor that replaces it. A
+	// caller treats this as a condition to report, never as a permanent shape to
+	// design around.
+	//
+	// An error carrying it also wraps the underlying raft sentinel, so a non-voter
+	// catching up as a learner stays distinguishable from a plain non-leader
+	// without matching on message text.
 	ErrNotLeader = errors.New("ledger: this node does not lead the flow")
 )
 
 // translateRaftError maps raft's leadership refusals onto this package's own, so a
-// caller matches one sentinel instead of three library errors it did not import.
+// caller matches one sentinel instead of four library errors it did not import.
 // Anything else is passed through unchanged rather than flattened.
+//
+// BOTH ERRORS ARE WRAPPED, not one wrapped and one formatted. The underlying raft
+// sentinel stays reachable through errors.Is, because these refusals are not
+// interchangeable to a caller that cares: a non-voter has been added as a learner
+// and is catching up, which calls for a different response than simply not leading.
+// Formatting the cause with %v would leave that distinction visible only in the
+// message text, and no caller should have to match on a string this package is free
+// to reword.
 func translateRaftError(err error) error {
 	switch {
 	case errors.Is(err, raft.ErrNotLeader),
 		errors.Is(err, raft.ErrLeadershipLost),
 		errors.Is(err, raft.ErrLeadershipTransferInProgress),
 		errors.Is(err, raft.ErrNotVoter):
-		return fmt.Errorf("%w (%v)", ErrNotLeader, err)
+		return fmt.Errorf("%w: %w", ErrNotLeader, err)
 	default:
 		return err
 	}
@@ -441,37 +459,48 @@ func (l *Ledger) Raft() *raft.Raft { return l.raft }
 // Flow reports the flow this ledger replicates.
 func (l *Ledger) Flow() string { return l.cfg.Flow }
 
-// Append replicates one entry and waits for this node's state machine to apply it.
+// Append replicates one entry, waits for this node's state machine to apply it, and
+// returns THE JOURNAL INDEX the entry landed at.
+//
+// The index is part of the contract rather than a convenience: a consumer recording
+// a checkpoint references a journal position, and the index is free here because
+// raft's ApplyFuture embeds IndexFuture — Index() is defined once Error() has
+// returned on the same already-bound future.
 //
 // It holds no lock of this package's across the raft append: concurrent appends are
 // the throughput lever here, and serializing them behind a mutex would cost roughly
 // an order of magnitude.
-func (l *Ledger) Append(ctx context.Context, entry Entry) error {
+func (l *Ledger) Append(ctx context.Context, entry Entry) (uint64, error) {
 	if ctx == nil {
-		return ErrNilContext
+		return 0, ErrNilContext
 	}
 	if l.closed.Load() {
-		return ErrClosed
+		return 0, ErrClosed
 	}
 
 	data, err := EncodeEntry(entry)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	future := l.raft.Apply(data, enqueueTimeout(ctx))
 	if err := future.Error(); err != nil {
-		return fmt.Errorf("ledger: appending to flow %q: %w", l.cfg.Flow, translateRaftError(err))
+		return 0, fmt.Errorf("ledger: appending to flow %q: %w", l.cfg.Flow, translateRaftError(err))
 	}
 	if applied, ok := future.Response().(error); ok && applied != nil {
-		return applied
+		return 0, applied
 	}
 
-	return nil
+	return future.Index(), nil
 }
 
 // Get reads one path linearizably: it proves this node still leads, then waits for
 // its own state machine to catch up with what was committed at the moment of that
 // proof.
+//
+// IT IS LEADER-ONLY, AND THAT IS AN INTERIM. A non-leader is refused with
+// ErrNotLeader rather than served a value it cannot prove current; the settled
+// design forwards the read to the flow group's leader from the client side, and
+// lane C2 is the successor that replaces this refusal.
 func (l *Ledger) Get(ctx context.Context, path string) (Entry, bool, error) {
 	if ctx == nil {
 		return Entry{}, false, ErrNilContext

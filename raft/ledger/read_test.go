@@ -117,3 +117,57 @@ func TestReadFastPathAllocatesNothing(t *testing.T) {
 	}
 	t.Logf("the already-satisfied wait allocates %.0f objects per call", fast)
 }
+
+func TestBarrierDoesNotAllocateADeadlineOnTheFastPath(t *testing.T) {
+	// The tracker-level test above does not reach the code the ordering rule
+	// actually governs: it measures waitApplied, and would stay green against a
+	// WithTimeout moved to the top of l.barrier — the mutant that reopens exactly
+	// the per-read cost this rule exists to avoid. This leg measures the barrier.
+	//
+	// It is a DIFFERENTIAL rather than an absolute count, deliberately. VerifyLeader
+	// allocates on every barrier call whatever we do, so an absolute assertion would
+	// red against correct code. Comparing a ledger WITH a ReadTimeout against one
+	// WITHOUT isolates the deadline context this package controls from raft's own
+	// baseline.
+	unset := openTestLedger(t, Config{Flow: "flow-alloc-unset", LocalID: "n0", Mux: testMux(t), Bootstrap: true})
+	set := openTestLedger(t, Config{
+		Flow: "flow-alloc-set", LocalID: "n0", Mux: testMux(t), Bootstrap: true, ReadTimeout: 30 * time.Second,
+	})
+	waitLeadership(t, unset)
+	waitLeadership(t, set)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// Bring both state machines level with their commit index, so every measured
+	// call takes the already-satisfied path rather than waiting.
+	for _, l := range []*Ledger{unset, set} {
+		if _, err := l.Append(ctx, Entry{Kind: KindSet, Path: "heap/alpha", Value: []byte("v")}); err != nil {
+			t.Fatalf("priming %s: %v", l.Flow(), err)
+		}
+		if err := l.barrier(context.Background()); err != nil {
+			t.Fatalf("priming the barrier on %s: %v", l.Flow(), err)
+		}
+	}
+
+	measure := func(l *Ledger) float64 {
+		return testing.AllocsPerRun(500, func() {
+			if err := l.barrier(context.Background()); err != nil {
+				t.Fatalf("the satisfied barrier on %s failed: %v", l.Flow(), err)
+			}
+		})
+	}
+	withoutTimeout := measure(unset)
+	withTimeout := measure(set)
+
+	t.Logf("barrier fast path: ReadTimeout unset=%.0f set=%.0f objects per call", withoutTimeout, withTimeout)
+
+	// CONTROL: the no-timeout arm must allocate something, or this instrument is
+	// blind and an equal pair below would prove nothing.
+	if withoutTimeout == 0 {
+		t.Fatal("CONTROL FAILED: the barrier with no ReadTimeout measured 0 allocations, so this instrument cannot see raft's own baseline")
+	}
+	if withTimeout > withoutTimeout {
+		t.Fatalf("a configured ReadTimeout added %.0f allocations to an already-satisfied read (%.0f -> %.0f): the deadline is being materialized before the index comparison rather than on the branch that waits",
+			withTimeout-withoutTimeout, withoutTimeout, withTimeout)
+	}
+}

@@ -135,7 +135,7 @@ func TestLinearizableReadFencesAConcurrentlyCommittedWrite(t *testing.T) {
 		defer wg.Done()
 		for i := int64(1); i <= writes; i++ {
 			value := []byte(strconv.FormatInt(i, 10))
-			if err := leader.ledger.Append(ctx, Entry{Kind: KindSet, Path: "heap/fenced", Value: value}); err != nil {
+			if _, err := leader.ledger.Append(ctx, Entry{Kind: KindSet, Path: "heap/fenced", Value: value}); err != nil {
 				t.Errorf("appending %d: %v", i, err)
 
 				return

@@ -19,8 +19,12 @@ func TestCloseIsIdempotentAndAClosedLedgerRefusesWithErrClosed(t *testing.T) {
 	defer cancel()
 	// CONTROL: the ledger serves before the close, so the refusals below are caused
 	// by closing it rather than by it never having worked.
-	if err := l.Append(ctx, Entry{Kind: KindSet, Path: "heap/alpha", Value: []byte("v")}); err != nil {
+	index, err := l.Append(ctx, Entry{Kind: KindSet, Path: "heap/alpha", Value: []byte("v")})
+	if err != nil {
 		t.Fatalf("CONTROL FAILED: appending to an open ledger: %v", err)
+	}
+	if index == 0 {
+		t.Fatal("CONTROL FAILED: the append reported journal index 0, which no committed entry occupies")
 	}
 
 	if err := l.Close(); err != nil {
@@ -42,7 +46,7 @@ func TestCloseIsIdempotentAndAClosedLedgerRefusesWithErrClosed(t *testing.T) {
 func assertRefusesWithErrClosed(t *testing.T, ctx context.Context, l *Ledger) {
 	t.Helper()
 
-	if err := l.Append(ctx, Entry{Kind: KindSet, Path: "heap/alpha"}); !errors.Is(err, ErrClosed) {
+	if _, err := l.Append(ctx, Entry{Kind: KindSet, Path: "heap/alpha"}); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Append on a closed ledger gave %v, want ErrClosed", err)
 	}
 	if _, _, err := l.Get(ctx, "heap/alpha"); !errors.Is(err, ErrClosed) {

@@ -28,7 +28,20 @@
 // An entry whose kind is outside the declared set poisons the ledger loudly rather
 // than being skipped or defaulted, because skipping it would let two peers that
 // disagree about the vocabulary diverge — the one thing a replicated state machine
-// may never do. Adding a journal kind means declaring a Kind constant and an arm
-// in the state machine's apply; it is a coordinated upgrade by design, not an
-// accident of deployment order.
+// may never do. That holds on BOTH arrival paths: a kind reaching a node inside a
+// snapshot is no more interpretable than the same kind reaching it in the log, so a
+// restore validates what it installs exactly as apply does, and a restore that
+// discards a journal also clears the poison recorded against it. Both paths consult
+// ONE declared-kind predicate, so a kind can never be admitted by one and refused by
+// the other. Adding a journal kind therefore means declaring a Kind constant, adding
+// it to that predicate, and giving it an arm in the state machine's apply; it is a
+// coordinated upgrade by design, not an accident of deployment order.
+//
+// EVERY READ AND WRITE IS LEADER-ONLY, AND THAT IS AN INTERIM. raft refuses both an
+// append and a leadership verification on a node that is not the leader, so this
+// package returns ErrNotLeader there rather than serving a value it cannot prove
+// current. That is NOT the settled contract: the settled design forwards a
+// non-leader Save, Update and linearizable Load to the flow group's leader from the
+// client side, and lane C2 is the successor that replaces the refusal. A flow author
+// treats it as a condition to report, never as a permanent shape to design around.
 package ledger

@@ -6,7 +6,45 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/hashicorp/raft"
 )
+
+func TestTranslateRaftErrorPreservesTheUnderlyingSentinel(t *testing.T) {
+	// translateRaftError folds four raft sentinels into this package's ErrNotLeader
+	// so a caller need not know raft's vocabulary. It must not DISCARD them doing
+	// so: a non-voter has been added as a learner and is catching up, which is a
+	// different state from simply not leading, and lane D's membership code must
+	// not have to match on a message string this package is free to reword.
+	translated := translateRaftError(raft.ErrNotVoter)
+
+	if !errors.Is(translated, raft.ErrNotVoter) {
+		t.Fatalf("the translated error %v does not satisfy errors.Is against raft.ErrNotVoter; the cause was formatted away rather than wrapped", translated)
+	}
+	// CONTROL: the ledger's own sentinel is still reachable in the same run, so a
+	// failure above is attributable to the raft sentinel specifically and not to
+	// wrapping being broken in general.
+	if !errors.Is(translated, ErrNotLeader) {
+		t.Fatalf("CONTROL FAILED: the translated error %v no longer satisfies errors.Is against ErrNotLeader", translated)
+	}
+
+	// Every folded sentinel keeps both legs.
+	for _, sentinel := range []error{
+		raft.ErrNotLeader, raft.ErrLeadershipLost, raft.ErrLeadershipTransferInProgress, raft.ErrNotVoter,
+	} {
+		got := translateRaftError(sentinel)
+		if !errors.Is(got, sentinel) || !errors.Is(got, ErrNotLeader) {
+			t.Fatalf("translating %v gave %v, which must satisfy errors.Is against both it and ErrNotLeader", sentinel, got)
+		}
+	}
+
+	// An error that is NOT a leadership refusal passes through untouched rather
+	// than being folded into ErrNotLeader.
+	other := errors.New("some other raft failure")
+	if passed := translateRaftError(other); !errors.Is(passed, other) || errors.Is(passed, ErrNotLeader) {
+		t.Fatalf("a non-leadership error translated to %v, want it passed through and not folded into ErrNotLeader", passed)
+	}
+}
 
 type heapValue struct {
 	Count int

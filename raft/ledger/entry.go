@@ -34,6 +34,16 @@ const (
 	KindEpoch
 )
 
+// declared reports whether this build knows how to interpret a kind.
+//
+// THIS IS THE ONE PLACE THE DECLARED SET IS ENUMERATED. Both arrival paths consult
+// it — DecodeEntry for an entry arriving by log, and the state machine's restore for
+// entries arriving by snapshot — so a kind cannot be admitted on one path while the
+// other refuses it.
+func (k Kind) declared() bool {
+	return k == KindSet || k == KindEpoch
+}
+
 // Entry is one journal record. It is the replicated vocabulary, so every field
 // here is part of the contract between peers.
 //
@@ -69,7 +79,7 @@ func DecodeEntry(data []byte) (Entry, error) {
 		return Entry{}, fmt.Errorf("ledger: decoding a journal entry failed: %w", err)
 	}
 
-	if entry.Kind != KindSet && entry.Kind != KindEpoch {
+	if !entry.Kind.declared() {
 		return Entry{}, fmt.Errorf("ledger: entry for %q names kind %d, which this build does not declare: %w",
 			entry.Path, uint8(entry.Kind), ErrPoisonedJournal)
 	}
