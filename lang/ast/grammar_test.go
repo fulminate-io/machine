@@ -439,10 +439,20 @@ func TestEveryKeywordAppearsAsAGrammarTerminal(t *testing.T) {
 	}
 }
 
-// parserOnlyRules is the locked list: the four rules the parser enforces that
+// parserOnlyRules is the locked list: the five rules the parser enforces that
 // the notation cannot express, each matched on a stable substring.
 //
 // The list, the grammar header and both consuming gates are kept in exact sync.
+// countWords render a small count as the English word the header states it in.
+//
+// The header announces its rule count in PROSE, and prose is exactly what goes
+// stale when the count changes: the commit that added the fifth rule left the
+// declaration reading "Four" and every existing check stayed green, because they
+// all count annotations rather than reading the sentence that announces them.
+var countWords = map[int]string{
+	2: "Two", 3: "Three", 4: "Four", 5: "Five", 6: "Six", 7: "Seven", 8: "Eight",
+}
+
 var parserOnlyRules = []struct {
 	name     string
 	fragment string
@@ -454,8 +464,9 @@ var parserOnlyRules = []struct {
 	{"a switch else must be last", "an `else` arm must be LAST"},
 }
 
-// TestGrammarAnnotatesEveryParserOnlyRule asserts the header carries all four
-// annotations and that each one NAMES ITS GATE.
+// TestGrammarAnnotatesEveryParserOnlyRule asserts the header carries an
+// annotation per locked rule, that each one NAMES ITS GATE, and that the
+// header's own prose numeral agrees with how many there are.
 //
 // The gate naming is not cosmetic: the conformance suite derives its
 // recognizer-versus-parser exemption set by reading these lines for testdata
@@ -483,6 +494,36 @@ func TestGrammarAnnotatesEveryParserOnlyRule(t *testing.T) {
 		if !strings.Contains(annotation, "testdata/") {
 			t.Errorf("parser-only rule annotation %d names no testdata gate: %.120s", i+1, annotation)
 		}
+	}
+
+	assertHeaderNumeralMatches(t, doc.header, len(parserOnlyRules))
+}
+
+// assertHeaderNumeralMatches checks the header's PROSE against the rule count,
+// in the two places the header states it: the sentence that declares how many
+// rules there are, and the growth ledger's final step.
+//
+// Counting annotations proves the list is complete; it proves nothing about the
+// sentence introducing them, and that sentence is what a reader trusts first.
+func assertHeaderNumeralMatches(t *testing.T, header string, rules int) {
+	t.Helper()
+	word, known := countWords[rules]
+	if !known {
+		t.Fatalf("no English numeral is mapped for a list of %d rules; extend countWords", rules)
+	}
+
+	declaration := word + " rules the parser enforces"
+	if !strings.Contains(header, declaration) {
+		t.Errorf("the header does not declare %q; its numeral is stale against the %d annotations it carries",
+			declaration, rules)
+	}
+
+	// The growth ledger records how the list reached its current size, so its
+	// last step has to arrive at that size.
+	growth := "to " + strings.ToLower(word)
+	if !strings.Contains(header, growth) {
+		t.Errorf("the header's growth ledger never reaches %q, so it stops short of the %d rules now listed",
+			growth, rules)
 	}
 }
 

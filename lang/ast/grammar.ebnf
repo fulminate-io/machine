@@ -38,7 +38,7 @@
 //
 // PARSER-ONLY RULES
 //
-// Four rules the parser enforces that this notation cannot express. Each names
+// Five rules the parser enforces that this notation cannot express. Each names
 // the fixture that gates it, and that naming is load bearing rather than tidy:
 // the conformance suite derives its recognizer-versus-parser exemption set by
 // reading these lines, so a rule whose gate is missing reds instead of silently
