@@ -8,6 +8,7 @@ package machine
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 const (
@@ -197,20 +198,24 @@ func (w *worker[I]) bind(f Frame[I]) Frame[I] {
 // not catchable from its parent and would take the process down. A recovered error
 // value is preserved rather than flattened to a string, so a handler can recover a
 // typed error such as *CapabilityError with errors.As.
+//
+// Being the universal per-datum path, it is also the span boundary. The order in the
+// deferred block is load-bearing: dispatch, then the frame state is released, and
+// only then finish, which ends the span — so an ended span orders an outside reader
+// after the reclaim.
 func (w *worker[I]) guard(ctx context.Context, f Frame[I], fn runner[I]) {
-	spanCtx, done := w.record.instruments.observe(ctx, w.name)
-	var failure error
+	spanCtx, span := w.record.instruments.start(ctx)
+	started := time.Now()
 	defer func() {
 		if r := recover(); r != nil {
-			if recovered, ok := r.(error); ok {
-				failure = recovered
-			} else {
+			failure, ok := r.(error)
+			if !ok {
 				failure = fmt.Errorf("machine: node %q panicked: %v", w.name, r)
 			}
-			w.dispatch(NodeError[I]{Node: w.name, Err: failure, Payload: f.Value(), Panic: true})
+			w.dispatch(spanCtx, NodeError[I]{Node: w.name, Err: failure, Payload: f.Value(), Panic: true})
 			f.state.release()
 		}
-		done(failure)
+		w.record.instruments.finish(spanCtx, span, started)
 	}()
 	fn(spanCtx, f)
 }
@@ -218,7 +223,12 @@ func (w *worker[I]) guard(ctx context.Context, f Frame[I], fn runner[I]) {
 // dispatch routes a node failure: the typed per-node handler wins, otherwise the
 // erased global handler, otherwise the default no-op drop. Nothing is retained for
 // redelivery — retry and dead-lettering are composed by the user inside a handler.
-func (w *worker[I]) dispatch(err NodeError[I]) {
+//
+// It is also the single funnel EVERY node failure passes through, so it is where the
+// failure is recorded on the datum's span and counted. Telemetry observes there and
+// decides nothing: the routing below is unchanged by it.
+func (w *worker[I]) dispatch(ctx context.Context, err NodeError[I]) {
+	w.record.instruments.observeError(ctx, err.Err)
 	if w.handler != nil {
 		w.handler(err)
 		return
@@ -232,7 +242,7 @@ func (w *worker[I]) dispatch(err NodeError[I]) {
 
 func (w *worker[I]) emit(ctx context.Context, out *emitter[I], f Frame[I]) {
 	if err := out.send(ctx, f); err != nil {
-		w.dispatch(NodeError[I]{Node: w.name, Err: err, Payload: f.Value()})
+		w.dispatch(ctx, NodeError[I]{Node: w.name, Err: err, Payload: f.Value()})
 	}
 }
 
@@ -245,7 +255,7 @@ func (w *worker[I]) transform[O any](out *emitter[O], fn func(f Frame[I]) O) run
 		w.guard(ctx, w.bind(f), func(spanCtx context.Context, inner Frame[I]) {
 			next := rewrap(inner, fn(inner))
 			if err := out.send(spanCtx, next); err != nil {
-				w.dispatch(NodeError[I]{Node: w.name, Err: err, Payload: inner.Value()})
+				w.dispatch(spanCtx, NodeError[I]{Node: w.name, Err: err, Payload: inner.Value()})
 			}
 		})
 	}

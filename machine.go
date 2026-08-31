@@ -9,38 +9,41 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
-// defaultMetricWindow is the number of durations a node's collector retains.
-const defaultMetricWindow = 10000
-
-// Machine is the supervisor. It owns the node registry, the heap store and the
-// declaration errors, and it brings the declared graph up in Start.
+// Machine is the supervisor. It owns the node registry, the heap store, the
+// telemetry handles and the declaration errors, and it brings the declared graph
+// up in Start.
 //
-// Its exported method set is deliberately CLOSED at Host, Metrics, Name, Source
-// and Start. No exported method hands a node function anything state-shaped: the
-// heap store is private, and a node reaches it only through the capability-gated
-// Frame accessors. Adding a public accessor is a gate failure, not a review miss.
+// Its exported method set is deliberately CLOSED at Host, Name, Source and Start.
+// No exported method hands a node function anything state-shaped: the heap store is
+// private, and a node reaches it only through the capability-gated Frame accessors.
+// Adding a public accessor is a gate failure, not a review miss.
 type Machine struct {
-	name    string
-	cfg     *config
-	mutex   sync.Mutex
-	started bool
-	errs    []error
-	nodes   map[string]*node
-	order   []*node
-	edges   []func(ctx context.Context) error
-	checks  []func() error
+	name      string
+	cfg       *config
+	telemetry *telemetry
+	mutex     sync.Mutex
+	started   bool
+	errs      []error
+	nodes     map[string]*node
+	order     []*node
+	edges     []func(ctx context.Context) error
+	checks    []func() error
 }
 
 // config holds the machine-wide settings an Option writes.
 type config struct {
-	fifo              bool
-	maxConcurrency    int
-	metricsWindowSize uint64
-	store             Store
-	handler           ErrorHandler[any]
+	fifo           bool
+	maxConcurrency int
+	store          Store
+	handler        ErrorHandler[any]
+	tracerProvider trace.TracerProvider
+	meterProvider  metric.MeterProvider
 }
 
 // Option configures a Machine at construction.
@@ -56,11 +59,6 @@ func OptionMaxConcurrency(n int) Option {
 	return func(c *config) { c.maxConcurrency = n }
 }
 
-// OptionMetricWindowSize sets the size of the slice holding duration metrics.
-func OptionMetricWindowSize(size uint64) Option {
-	return func(c *config) { c.metricsWindowSize = size }
-}
-
 // OptionErrorHandler registers the global fallback handler. It is erased because a
 // machine's nodes carry many payload types; a node can register a typed handler of
 // its own with WithErrorHandler, which wins over this one.
@@ -74,28 +72,49 @@ func OptionStore(s Store) Option {
 	return func(c *config) { c.store = s }
 }
 
-// New returns a Machine with the given options applied.
+// WithTracerProvider sets the provider the machine resolves its tracer from. It
+// defaults to otel.GetTracerProvider(). A nil provider is a declaration-time
+// programmer error and panics rather than silently substituting the global.
+func WithTracerProvider(provider trace.TracerProvider) Option {
+	if provider == nil {
+		panic("machine: WithTracerProvider was given a nil provider")
+	}
+	return func(c *config) { c.tracerProvider = provider }
+}
+
+// WithMeterProvider sets the provider the machine resolves its meter from. It
+// defaults to otel.GetMeterProvider(). A nil provider is a declaration-time
+// programmer error and panics rather than silently substituting the global.
+func WithMeterProvider(provider metric.MeterProvider) Option {
+	if provider == nil {
+		panic("machine: WithMeterProvider was given a nil provider")
+	}
+	return func(c *config) { c.meterProvider = provider }
+}
+
+// New returns a Machine with the given options applied. The telemetry providers
+// are seeded from the otel globals BEFORE the options run and resolved ONCE here,
+// so a provider registered globally afterwards cannot reach this machine.
 func New(name string, options ...Option) *Machine {
-	cfg := &config{metricsWindowSize: defaultMetricWindow, store: NewMemStore()}
+	cfg := &config{
+		store:          NewMemStore(),
+		tracerProvider: otel.GetTracerProvider(),
+		meterProvider:  otel.GetMeterProvider(),
+	}
 	for _, option := range options {
 		option(cfg)
 	}
-	return &Machine{name: name, cfg: cfg, nodes: map[string]*node{}}
+	m := &Machine{name: name, cfg: cfg, nodes: map[string]*node{}}
+	instrumentation, err := newTelemetry(cfg)
+	if err != nil {
+		m.errs = append(m.errs, fmt.Errorf("machine: instrument creation failed: %w", err))
+	}
+	m.telemetry = instrumentation
+	return m
 }
 
 // Name returns the machine's name.
 func (m *Machine) Name() string { return m.name }
-
-// Metrics returns the metric collector for a declared node, or nil if no node of
-// that name was declared.
-func (m *Machine) Metrics(node string) *MetricCollector {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-	if declaredNode, ok := m.nodes[node]; ok {
-		return declaredNode.instruments.metrics
-	}
-	return nil
-}
 
 // HostState is the HOST-ONLY view of a machine's heap state. It exists so a program
 // can seed heap cells before Start and inspect them after, from OUTSIDE flow
@@ -135,31 +154,13 @@ type node struct {
 	instruments *instruments
 }
 
-// instruments is the per-node observation slot. observe opens a span for one datum
-// and returns the context to run it under plus the closer that records the outcome.
-type instruments struct {
-	observe func(ctx context.Context, node string) (context.Context, func(err error))
-	metrics *MetricCollector
-}
-
-func defaultInstruments(window uint64) *instruments {
-	collector := newCollector(window)
-	return &instruments{
-		observe: func(ctx context.Context, _ string) (context.Context, func(err error)) {
-			start := time.Now()
-			return ctx, func(err error) { collector.Record(time.Since(start), err) }
-		},
-		metrics: collector,
-	}
-}
-
 // register returns the record for a node. On a duplicate name it records an error
 // and returns a detached record, so declaration continues and Start reports every
 // problem at once rather than the first.
 func (m *Machine) register(name string) *node {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
-	registered := &node{name: name, instruments: defaultInstruments(m.cfg.metricsWindowSize)}
+	registered := &node{name: name, instruments: newInstruments(m.telemetry, m.name, name)}
 	if _, ok := m.nodes[name]; ok {
 		m.errs = append(m.errs, fmt.Errorf("machine: duplicate node name %q", name))
 		return registered

@@ -858,7 +858,8 @@ func TestPanicReclaimsFrameState(t *testing.T) {
 
 	captured := make(chan Frame[int], 1)
 	held := make(chan int, 1)
-	m := New("reclaim")
+	p := newProbe()
+	m := New("reclaim", p.options...)
 	src, ingest := m.Source[int]("reclaim.source")
 	src.Map("reclaim.node", func(f Frame[int]) int {
 		f.Set(reclaimKey, "held")
@@ -883,15 +884,17 @@ func TestPanicReclaimsFrameState(t *testing.T) {
 	if before := <-held; before != 1 {
 		t.Fatalf("the node's frame projected %d values before the panic, want 1", before)
 	}
-	// The instrument closes AFTER the guard reclaims, and the collector's count is
-	// written atomically, so observing the count is what orders this goroutine's read
-	// of the frame after the reclaim.
-	collector := m.Metrics("reclaim.node")
-	if collector == nil {
-		t.Fatal("Metrics returned no collector for the panicking node")
-	}
-	pollUntil(t, "the panicking node closed its instrument", func() bool {
-		return collector.Return().Count >= 1
+	// The span ENDS after the guard reclaims: guard dispatches, then releases the
+	// frame state, and only then finishes, which is what calls span.End(). So
+	// observing an ended span for the node is what orders this goroutine's read of
+	// the frame after the reclaim.
+	pollUntil(t, "the panicking node ended its span", func() bool {
+		for _, name := range spanNames(p.spans.Ended()) {
+			if name == "reclaim.node" {
+				return true
+			}
+		}
+		return false
 	})
 	if got := len(frame.Data().Values); got != 0 {
 		t.Fatalf("the panicking node's frame still projects %d values; the guard dispatched without reclaiming",
@@ -933,32 +936,6 @@ func TestUnconsumedFlowFailsStart(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unconsumed.node") {
 		t.Fatalf("Start returned %v, want an error naming the producing node", err)
-	}
-}
-
-func TestPerNodeMetricsRecorded(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	const data = 5
-	m := New("metrics")
-	src, ingest := m.Source[int]("metrics.source", WithEdge(Channel[int](16)))
-	out := src.Map("metrics.node", func(f Frame[int]) int { return f.Value() },
-		WithEdge(Channel[int](16))).Output("metrics.out", WithEdge(Channel[int](16)))
-
-	startMachine(t, ctx, m)
-	feed(t, ctx, ingest, data, 1)
-	drain(t, out, data)
-
-	collector := m.Metrics("metrics.node")
-	if collector == nil {
-		t.Fatal("Metrics returned no collector for a declared node")
-	}
-	pollUntil(t, "the node collector recorded every datum", func() bool {
-		return collector.Return().Count >= data
-	})
-	if m.Metrics("metrics.never-declared") != nil {
-		t.Fatal("Metrics returned a collector for a node that was never declared")
 	}
 }
 
