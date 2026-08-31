@@ -1,0 +1,222 @@
+// Copyright © 2020 Jonathan Whitaker <github@whitaker.io>.
+//
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file.
+
+package ledger
+
+import (
+	"encoding/gob"
+	"fmt"
+	"io"
+	"maps"
+	"sync"
+
+	"github.com/hashicorp/raft"
+)
+
+// Pin both external interfaces here so a library drift breaks this build rather
+// than one node's behavior at run time.
+var (
+	_ raft.FSM                = (*fsm)(nil)
+	_ raft.ConfigurationStore = (*fsm)(nil)
+)
+
+// fsm is the replicated state machine behind a Ledger: the journal's values, the
+// index of the last entry it applied, and a broadcast channel readers park on
+// while they wait for that index to catch up with a commit.
+type fsm struct {
+	mutex   sync.RWMutex
+	values  map[string]Entry
+	applied uint64
+	wake    chan struct{}
+	poison  error
+}
+
+func newFSM() *fsm {
+	return &fsm{values: map[string]Entry{}, wake: make(chan struct{})}
+}
+
+// Apply commits one journal entry. It advances the tracked index on EVERY path,
+// including the poisoned one: a reader waiting on a poisoned ledger must fail with
+// the poison rather than hang forever on an index that will never arrive.
+func (f *fsm) Apply(log *raft.Log) any {
+	entry, err := DecodeEntry(log.Data)
+	if err != nil {
+		return f.poisonAt(log.Index, fmt.Errorf("ledger: log index %d: %w", log.Index, err))
+	}
+
+	return f.applyEntry(log.Index, entry)
+}
+
+// applyEntry runs the arm for a decoded entry's kind. The default arm catches a
+// kind that was declared but never given an arm here, which DecodeEntry cannot
+// see; it poisons rather than ignoring, on the same reasoning.
+func (f *fsm) applyEntry(index uint64, entry Entry) any {
+	switch entry.Kind {
+	case KindSet:
+		f.set(index, entry)
+
+		return nil
+	case KindEpoch:
+		f.advance(index)
+
+		return nil
+	default:
+		return f.poisonAt(index, fmt.Errorf("ledger: log index %d applies kind %d, which this build declares but does not handle: %w",
+			index, uint8(entry.Kind), ErrPoisonedJournal))
+	}
+}
+
+// StoreConfiguration advances the tracked index for a membership commit and does
+// nothing else.
+//
+// IMPLEMENTING raft.ConfigurationStore IS NOT OPTIONAL HERE, and it is not only
+// about membership. raft's own applySingle returns early for a configuration entry
+// when the state machine does not implement this interface, deliberately not
+// advancing its index either — so without this method a configuration commit
+// would leave a reader parked behind an index the state machine never reaches.
+func (f *fsm) StoreConfiguration(index uint64, _ raft.Configuration) {
+	f.advance(index)
+}
+
+// set stores an entry and advances the index in ONE critical section, so no reader
+// can observe the index without the value it accounts for.
+func (f *fsm) set(index uint64, entry Entry) {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+
+	f.values[entry.Path] = entry
+	f.advanceLocked(index)
+}
+
+// poisonAt records the first poison and advances past the entry that caused it.
+func (f *fsm) poisonAt(index uint64, err error) error {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+
+	if f.poison == nil {
+		f.poison = err
+	}
+	f.advanceLocked(index)
+
+	return err
+}
+
+// advance moves the tracked applied index and wakes everything parked below it.
+func (f *fsm) advance(index uint64) {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+
+	f.advanceLocked(index)
+}
+
+// advanceLocked closes the current wake channel and installs a fresh one, which is
+// what lets a waiter select on progress AND a context at the same time. A
+// sync.Cond cannot be selected on, so a broadcast channel is the shape here.
+func (f *fsm) advanceLocked(index uint64) {
+	if index <= f.applied {
+		return
+	}
+
+	f.applied = index
+	close(f.wake)
+	f.wake = make(chan struct{})
+}
+
+// appliedIndex reports the index of the last entry this state machine applied.
+func (f *fsm) appliedIndex() uint64 {
+	f.mutex.RLock()
+	defer f.mutex.RUnlock()
+
+	return f.applied
+}
+
+// get reads one journaled value.
+func (f *fsm) get(path string) (Entry, bool) {
+	f.mutex.RLock()
+	defer f.mutex.RUnlock()
+
+	entry, ok := f.values[path]
+
+	return entry, ok
+}
+
+// fsmSnapshot is the point-in-time copy Persist serializes. Its fields are
+// exported because gob is what writes them to the snapshot sink.
+type fsmSnapshot struct {
+	Values  map[string]Entry
+	Applied uint64
+}
+
+var _ raft.FSMSnapshot = (*fsmSnapshot)(nil)
+
+// Snapshot copies the journal under the read lock and returns immediately.
+//
+// It COPIES rather than aliasing the live map for two reasons that point the same
+// way: raft states that Apply runs CONCURRENTLY with Persist, and an encoder
+// reading a map another goroutine is writing is a concurrent read-write panic. This
+// is the cataloged snapshot-map-before-serializing shape, and the copy is therefore
+// not an optimization for a later reader to notice Persist "only reads" and remove.
+//
+// No I/O happens here. Apply cannot run while Snapshot does, so anything expensive
+// belongs in Persist.
+func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
+	f.mutex.RLock()
+	defer f.mutex.RUnlock()
+
+	values := make(map[string]Entry, len(f.values))
+	maps.Copy(values, f.values)
+
+	return &fsmSnapshot{Values: values, Applied: f.applied}, nil
+}
+
+// Persist writes the copied journal to the sink, canceling the sink on failure so
+// raft never keeps a half-written snapshot.
+func (s *fsmSnapshot) Persist(sink raft.SnapshotSink) error {
+	if err := gob.NewEncoder(sink).Encode(s); err != nil {
+		_ = sink.Cancel()
+
+		return fmt.Errorf("ledger: persisting a snapshot at applied index %d failed: %w", s.Applied, err)
+	}
+
+	return sink.Close()
+}
+
+// Release is called by raft unconditionally, including when Persist never ran, so
+// it must be safe on a snapshot that was never persisted. This one holds only
+// memory and has nothing to release.
+func (*fsmSnapshot) Release() {}
+
+// Restore replaces this state machine's entire contents with a snapshot's.
+//
+// It DISCARDS ALL PREVIOUS STATE before restoring, which raft's contract requires
+// and which matters more here than the contract makes it sound: a Restore that
+// merged the snapshot over the live map would leave two peers restoring the SAME
+// snapshot from different priors in different states, which is the one thing a
+// replicated state machine may never do.
+func (f *fsm) Restore(snapshot io.ReadCloser) error {
+	defer func() { _ = snapshot.Close() }()
+
+	var restored fsmSnapshot
+	if err := gob.NewDecoder(snapshot).Decode(&restored); err != nil {
+		return fmt.Errorf("ledger: restoring a snapshot failed: %w", err)
+	}
+	f.replace(restored)
+
+	return nil
+}
+
+// replace installs the restored journal wholesale and advances through the same
+// tracker every other path uses, so a reader parked on a target below the
+// snapshot's index wakes instead of being stranded by the restore.
+func (f *fsm) replace(restored fsmSnapshot) {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+
+	f.values = restored.Values
+	if f.values == nil {
+		f.values = map[string]Entry{}
+	}
+	f.advanceLocked(restored.Applied)
+}
