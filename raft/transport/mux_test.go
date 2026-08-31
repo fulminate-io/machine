@@ -178,6 +178,32 @@ func TestBindRejectsDuplicatesAndBadIDs(t *testing.T) {
 	if _, err := m.bindStream("dup"); err != nil {
 		t.Fatalf("rebind after Close: %v", err)
 	}
+
+	// The same three rules driven through the EXPORTED Bind, which is the call
+	// lane C makes. Bind delegates to bindStream, but a delegate is not the
+	// seam a consumer touches, so the seam gets its own assertions.
+	g, err := m.Bind("exported")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Bind("exported"); !errors.Is(err, ErrGroupBound) {
+		t.Fatalf("duplicate Bind: err = %v, want ErrGroupBound", err)
+	}
+	if _, err := m.Bind(""); !errors.Is(err, ErrGroupIDRange) {
+		t.Fatalf("empty id Bind: err = %v, want ErrGroupIDRange", err)
+	}
+	if _, err := m.Bind(long); !errors.Is(err, ErrGroupIDRange) {
+		t.Fatalf("over-long id Bind: err = %v, want ErrGroupIDRange", err)
+	}
+	if g.ID() != "exported" {
+		t.Fatalf("Bind returned a group with ID %q, want exported", g.ID())
+	}
+	if err := g.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Bind("exported"); err != nil {
+		t.Fatalf("rebind after Group.Close: %v", err)
+	}
 }
 
 func TestUnspecifiedBindAddressWithoutAdvertiseIsRefused(t *testing.T) {
