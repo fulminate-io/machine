@@ -24,7 +24,10 @@ func (p *parser) parseSwitch() Stmt {
 	p.expect(kwOn, "\"on\"")
 	stmt.Subject = p.goSpan(tokLBrace)
 	p.parseClauses(&stmt.Clauses)
-	p.parseSwitchBody(&stmt)
+	if !p.parseSwitchBody(&stmt) {
+		stmt.Stop = p.tok.pos
+		return stmt
+	}
 	stmt.Stop = p.endOfLine("a switch statement")
 	return stmt
 }
@@ -34,16 +37,17 @@ func (p *parser) parseSwitch() Stmt {
 // AT LEAST ONE ARM IS REQUIRED. The notation says so directly — the production
 // is one-or-more rather than zero-or-more — so this rule needs no annotation and
 // the conformance recognizer rejects an empty switch exactly as the parser does.
-func (p *parser) parseSwitchBody(stmt *SwitchStmt) {
+func (p *parser) parseSwitchBody(stmt *SwitchStmt) bool {
+	open := p.tok.pos
 	if !p.expect(tokLBrace, "\"{\"") {
-		return
+		return false
 	}
 	p.expect(tokNewline, "a newline after the opening brace")
 	p.parseSwitchArms(stmt)
 	if len(stmt.Arms) == 0 {
 		p.diagHeref("a switch needs at least one arm")
 	}
-	p.expect(tokRBrace, "\"}\"")
+	return p.closeBracedRegion(open, "the switch body")
 }
 
 // parseSwitchArms reads arms until the closing brace.

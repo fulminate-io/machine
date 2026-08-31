@@ -1,0 +1,3 @@
+decls=3 stmts=1
+6:29: unterminated func body: no closing brace before end of file
+8:1: a func declaration is not terminated by a newline; every .flow file ends with one

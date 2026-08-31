@@ -1,0 +1,3 @@
+decls=1 stmts=0
+2:6: unterminated note: no closing """ before end of file
+5:1: a note is not terminated by a newline; every .flow file ends with one

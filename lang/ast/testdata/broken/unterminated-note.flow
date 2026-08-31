@@ -1,0 +1,4 @@
+flow payments
+note """
+the rate limiter is per merchant, not per card
+source ingest Poll

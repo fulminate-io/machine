@@ -1,0 +1,5 @@
+decls=1 stmts=0
+1:15: expected ")", found end of file
+1:15: expected "->", found end of file
+1:15: expected an output name, found end of file
+1:15: a flow declaration is not terminated by a newline; every .flow file ends with one

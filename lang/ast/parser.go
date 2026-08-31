@@ -6,8 +6,18 @@ package ast
 
 import (
 	"cmp"
+	"fmt"
 	"slices"
 )
+
+// maxDiagnostics caps what one parse records.
+//
+// The parse is bounded by the file, but a caller rendering diagnostics is not,
+// and adversarial input can drive the count arbitrarily high. A SILENT
+// truncation would tell an editor's user the file has exactly this many
+// problems, which is false — so the cap is recorded as the final diagnostic and
+// it names how many it suppressed.
+const maxDiagnostics = 100
 
 // parser holds exactly ONE token of lookahead.
 //
@@ -26,6 +36,16 @@ type parser struct {
 	// the current lookahead token was scanned, so a rewind can retract the ones
 	// that read belongs to.
 	lexDiagsBeforeTok int
+
+	// suppressed counts the diagnostics the cap refused to record.
+	suppressed int
+
+	// skippedFrom, skippedTo and didSkip carry the span recovery discarded
+	// while parsing the current statement, so the tree can carry a BadStmt
+	// covering exactly that text.
+	skippedFrom Position
+	skippedTo   Position
+	didSkip     bool
 }
 
 // Parse parses one .flow source file into a syntax tree.
@@ -57,9 +77,19 @@ func Parse(src []byte) (*File, error) {
 // caller through the same channel as syntax errors. Without this, a file whose
 // only problem is an unterminated note returns a nil error.
 func (p *parser) drainLexerDiagnostics() {
-	p.diags = append(p.diags, p.lex.diags...)
+	for _, d := range p.lex.diags {
+		p.record(d)
+	}
 	slices.SortStableFunc(p.diags, func(a, b Diagnostic) int {
 		return cmp.Compare(a.Pos.Offset, b.Pos.Offset)
+	})
+	if p.suppressed == 0 {
+		return
+	}
+	at := p.diags[len(p.diags)-1].End
+	p.diags = append(p.diags, Diagnostic{
+		Pos: at, End: at,
+		Message: fmt.Sprintf("%d further problems in this file were not reported", p.suppressed),
 	})
 }
 
@@ -150,14 +180,19 @@ func (p *parser) diagStatementOutsideFlow(sawFlow bool) {
 	p.diagHeref("%q must follow a flow declaration; there is no flow to belong to", p.tok.text)
 }
 
-// parseStatement dispatches one flow-body statement.
+// parseStatement dispatches one flow-body statement, returning nil when the line
+// opened with something that is not a statement keyword at all.
+//
+// That nil is not a dropped statement: the skip it performs is recorded, and the
+// caller turns it into a positioned BadStmt. This is the path that catches every
+// rejected shape spelling with a position on it.
 func (p *parser) parseStatement() Stmt {
+	p.didSkip = false
 	parse, ok := stmtParsers[p.tok.kind]
 	if !ok {
-		start := p.tok.pos
 		p.diagHeref("expected a statement, found %s", describe(p.tok))
-		stop := p.skipToStatementBoundary()
-		return BadStmt{Start: start, Stop: stop}
+		p.skipToStatementBoundary()
+		return nil
 	}
 	return parse(p)
 }

@@ -1,0 +1,4 @@
+flow payments
+state {
+	seen map[string]bool
+	tally int

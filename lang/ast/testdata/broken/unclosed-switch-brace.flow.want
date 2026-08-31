@@ -1,0 +1,2 @@
+decls=1 stmts=2
+3:41: the switch body is never closed: no "}" before end of file

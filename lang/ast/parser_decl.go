@@ -165,7 +165,12 @@ func (p *parser) parseFlowEntry(decl *FlowDecl) {
 	case kwOn:
 		p.flowOnError(decl)
 	default:
-		decl.Body = append(decl.Body, p.parseStatement())
+		if stmt := p.parseStatement(); stmt != nil {
+			decl.Body = append(decl.Body, stmt)
+		}
+		if bad, skipped := p.takeSkipped(); skipped {
+			decl.Body = append(decl.Body, bad)
+		}
 	}
 }
 
@@ -213,6 +218,7 @@ func (p *parser) parseState() Decl {
 	decl := StateDecl{Start: p.tok.pos}
 	p.advance()
 
+	open := p.tok.pos
 	p.expect(tokLBrace, "\"{\"")
 	p.expect(tokNewline, "a newline after the opening brace")
 	for !p.at(tokEOF) && !p.at(tokRBrace) {
@@ -225,7 +231,10 @@ func (p *parser) parseState() Decl {
 		}
 		decl.Fields = append(decl.Fields, field)
 	}
-	p.expect(tokRBrace, "\"}\"")
+	if !p.closeBracedRegion(open, "the state block") {
+		decl.Stop = p.tok.pos
+		return decl
+	}
 	decl.Stop = p.endOfLine("a state block")
 	return decl
 }

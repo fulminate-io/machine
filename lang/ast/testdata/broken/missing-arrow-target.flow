@@ -1,0 +1,4 @@
+flow payments
+source ingest Poll
+branch split Valid from ingest ->
+sink out Write from ingest

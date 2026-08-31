@@ -1,0 +1,6 @@
+flow payments
+source ingest Poll
+node charge billing.Charge from ingest
+	reads seen
+	writes tally
+sink out Write from ingest

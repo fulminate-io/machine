@@ -142,9 +142,12 @@ func (p *parser) parseFrom() []Ident {
 // so the caller's own line-terminator handling still runs and the mistake is
 // reported once rather than twice.
 func (p *parser) skipToEndOfLine() {
+	from, last := p.tok.pos, p.tok.pos
 	for !p.at(tokNewline) && !p.at(tokEOF) && !entryKeywords[p.tok.kind] {
+		last = p.end
 		p.advance()
 	}
+	p.noteSkip(from, last)
 }
 
 // cursor is a restorable parser position: the lexer's byte cursor, the token the
@@ -224,7 +227,63 @@ func (p *parser) acceptErrorTerminal() {
 
 // diagAtf records one positioned problem.
 func (p *parser) diagAtf(start, end Position, format string, args ...any) {
-	p.diags = append(p.diags, Diagnostic{Pos: start, End: end, Message: fmt.Sprintf(format, args...)})
+	p.record(Diagnostic{Pos: start, End: end, Message: fmt.Sprintf(format, args...)})
+}
+
+// record is the ONE place a diagnostic enters the parser's list, and so the one
+// place the cap is applied. The lexer's own findings are drained through it too,
+// rather than appended raw, so there is a single mechanism to get wrong instead
+// of two that mask each other.
+func (p *parser) record(d Diagnostic) {
+	if len(p.diags) >= maxDiagnostics {
+		p.suppressed++
+		return
+	}
+	p.diags = append(p.diags, d)
+}
+
+// noteSkip records the span recovery discarded, coalescing consecutive skips
+// within one statement into a single range.
+func (p *parser) noteSkip(from, to Position) {
+	if to.Offset <= from.Offset {
+		return
+	}
+	if !p.didSkip {
+		p.skippedFrom, p.didSkip = from, true
+	}
+	p.skippedTo = to
+}
+
+// takeSkipped returns a BadStmt covering whatever recovery discarded since the
+// last call, and reports whether there was any.
+//
+// EVERY BadStmt IS POSITIONED AND IN TREE ORDER, so a consumer walking the tree
+// sees an unbroken sequence of spans covering the file. That is what makes a
+// partial tree usable rather than merely non-nil.
+func (p *parser) takeSkipped() (BadStmt, bool) {
+	if !p.didSkip {
+		return BadStmt{}, false
+	}
+	p.didSkip = false
+	return BadStmt{Start: p.skippedFrom, Stop: p.skippedTo}, true
+}
+
+// closeBracedRegion consumes a braced region's closing brace, reporting ONE
+// diagnostic positioned at the OPENING brace when the region ran to end of file.
+//
+// The position is the point: at end of file the missing brace is everywhere and
+// nowhere, and the only place a reader can act on is the brace that opened the
+// region and was never closed. Reports whether the region closed.
+func (p *parser) closeBracedRegion(open Position, what string) bool {
+	if p.accept(tokRBrace) {
+		return true
+	}
+	if p.at(tokEOF) {
+		p.diagAtf(open, open, "%s is never closed: no \"}\" before end of file", what)
+		return false
+	}
+	p.diagHeref("expected \"}\" to close %s, found %s", what, describe(p.tok))
+	return false
 }
 
 // diagHeref records a problem covering the lookahead token.
@@ -232,24 +291,40 @@ func (p *parser) diagHeref(format string, args ...any) {
 	p.diagAtf(p.tok.pos, p.end, format, args...)
 }
 
-// skipToStatementBoundary discards tokens up to the end of the current line or
-// to the next entry keyword, and returns the position it stopped at.
+// skipToStatementBoundary discards the rest of a broken statement and returns
+// the position it stopped at.
 //
-// It always consumes at least one token when it is not already at end of file,
-// so a caller looping on a malformed entry cannot spin.
+// THE BOUNDARY IS THE CONTINUATION RULE READ IN REVERSE: a newline ends the
+// statement only when the line after it does NOT open with a clause keyword.
+// Stopping at the first newline instead would strand a broken statement's own
+// clause lines as garbage statements, each producing its own spurious
+// diagnostic — one mistake reported five times.
+//
+// A closing brace also ends the skip, so a broken statement inside a switch body
+// or a state block does not swallow the brace that closes the region.
 func (p *parser) skipToStatementBoundary() Position {
-	last := p.end
-	for !p.at(tokEOF) && !p.at(tokNewline) {
-		last = p.end
-		p.advance()
-		if entryKeywords[p.tok.kind] {
-			return last
+	from, last := p.tok.pos, p.end
+	consumed := false
+	for !p.at(tokEOF) && !p.at(tokRBrace) {
+		if p.at(tokNewline) {
+			if p.atClause() {
+				continue
+			}
+			last, consumed = p.end, true
+			p.advance()
+			break
 		}
+		last, consumed = p.end, true
+		p.advance()
 	}
-	if p.at(tokNewline) {
+	if !consumed && !p.at(tokEOF) {
+		// The skip is also the parser's guarantee of forward progress. A stray
+		// closing brace outside a braced region stops the loop immediately, and
+		// a caller looping on a malformed entry would then spin on it forever.
 		last = p.end
 		p.advance()
 	}
+	p.noteSkip(from, last)
 	return last
 }
 

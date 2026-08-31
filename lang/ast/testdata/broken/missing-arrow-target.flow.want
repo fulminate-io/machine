@@ -1,0 +1,4 @@
+decls=1 stmts=3
+3:34: expected the true target, found end of line
+3:34: expected ",", found end of line
+3:34: expected the false target, found end of line

@@ -1,0 +1,5 @@
+flow payments
+source ingest Poll
+switch route from ingest on ingest.Kind {
+	"card" -> charge
+	"cash" -> settle

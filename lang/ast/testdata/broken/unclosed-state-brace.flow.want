@@ -1,0 +1,2 @@
+decls=1 stmts=0
+2:7: the state block is never closed: no "}" before end of file

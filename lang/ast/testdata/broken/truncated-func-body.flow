@@ -1,0 +1,7 @@
+import billing "example.com/billing"
+
+flow payments
+source ingest Poll
+
+func Charge(in Order) error {
+	if in.Total > 0 {
