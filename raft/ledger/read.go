@@ -20,6 +20,45 @@ var (
 	ErrReadTimeout = errors.New("ledger: timed out waiting for the applied index to reach a committed read")
 )
 
+// barrier is the linearizable read this package BUILDS, because hashicorp/raft
+// v1.7.3 exposes no ReadIndex to borrow one from.
+//
+// Two steps, and both are necessary. VerifyLeader proves against a quorum that this
+// node still holds its term, so the value about to be read is not a deposed
+// leader's. The commit index observed AFTER that proof is then waited for on this
+// node's OWN state machine, because raft's commit index counts entries this state
+// machine may not have applied yet — reading at the commit index alone returns a
+// value that is stale by exactly those entries.
+//
+// It never acquires raft's Barrier: that is a full replicated write, and a read
+// path must not append to the log to answer a question.
+func (l *Ledger) barrier(ctx context.Context) error {
+	if err := l.raft.VerifyLeader().Error(); err != nil {
+		return fmt.Errorf("ledger: verifying leadership for flow %q: %w", l.cfg.Flow, translateRaftError(err))
+	}
+	target := l.raft.CommitIndex()
+
+	if l.cfg.ReadTimeout <= 0 {
+		return l.fsm.waitApplied(ctx, target)
+	}
+
+	// The ReadTimeout is materialized ONLY on the branch that actually waits. A
+	// read whose state machine is already caught up is the common case, and giving
+	// it a per-call deadline context would allocate on every one of them.
+	applied, _, poison := l.fsm.observe()
+	switch {
+	case poison != nil:
+		return poison
+	case applied >= target:
+		return nil
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, l.cfg.ReadTimeout)
+	defer cancel()
+
+	return l.fsm.waitApplied(waitCtx, target)
+}
+
 // waitApplied blocks until the state machine has applied everything up to target,
 // the ledger is poisoned, or ctx expires.
 //
