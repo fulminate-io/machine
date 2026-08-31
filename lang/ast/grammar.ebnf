@@ -1,0 +1,131 @@
+// grammar.ebnf — the flow language, in the notation the Go specification uses.
+//
+// Name = Expression .   production, terminated by a period
+// |                     alternation
+// ( )                   grouping
+// [ ]                   option, zero or one
+// { }                   repetition, zero or more
+// "..."                 terminal
+//
+// THIS FILE IS THE SOURCE OF TRUTH FOR THE LANGUAGE'S SHAPE. The parser in this
+// package implements it by recursive descent, and the test suite drives a
+// recognizer straight off these productions and requires it to agree with the
+// parser in both directions across the corpora. A form that is not written here
+// is not in the language.
+//
+// START SYMBOL
+//
+//   File
+//
+// LEXICAL TERMINALS
+//
+// These seven are produced by the lexer and are opaque to the notation: the
+// grammar names them but never spells them out, because their shape is a
+// scanning rule rather than a production.
+//
+//   ident        a name: a letter, an underscore or any non-ASCII byte, followed by more of the same or digits
+//   string       a double-quoted literal, backslash escapes honored, may not cross a line break
+//   number       a decimal literal with an optional fractional part
+//   newline      a line break; a run of blank lines collapses to one, and horizontal whitespace is never a token
+//   noteText     a raw note body, opened and closed by a triple double-quote, verbatim, with no escapes at all
+//   goSpan       opaque Go text, bracket-depth tracked, ending at a depth-zero stop token, a clause keyword or a newline
+//   goFuncSpan   a func declaration's parameters, results and body as one span, brace balanced, skipping Go's literals and comments
+//
+// `number` IS REFERENCED BY NO PRODUCTION BELOW, and that is not an omission.
+// The lexer produces number tokens, but every position where a numeric literal
+// can appear — a const value, a param default, a switch arm, a Go type's array
+// bound — sits inside an opaque goSpan, so the notation never sees one.
+//
+// PARSER-ONLY RULES
+//
+// Four rules the parser enforces that this notation cannot express. Each names
+// the fixture that gates it, and that naming is load bearing rather than tidy:
+// the conformance suite derives its recognizer-versus-parser exemption set by
+// reading these lines, so a rule whose gate is missing reds instead of silently
+// widening the exemption.
+//
+// The completeness of this list is a review duty the checks cannot discharge.
+// They verify that each LISTED rule is annotated; they cannot tell you about a
+// rule nobody has thought of yet. The list has grown twice, from two to three
+// when the headless-statement case was found and from three to four when the
+// arrow case was derived, which is the evidence that the duty is a live one.
+//
+//   1. PARSER-ONLY RULE: within one Clauses sequence each alternative may appear
+//      AT MOST ONCE. The repetition below is deliberately permissive because the
+//      clauses are order-free, and an optional-each restructure would impose an
+//      order the parser does not. Gated by testdata/invalid/duplicate-clause.flow.
+//
+//   2. PARSER-ONLY RULE: a flow-level `on error` or `note` must appear BEFORE the
+//      first statement of the flow body. After any statement, a line beginning
+//      with `on` or `note` is always that statement's clause. FlowEntry admits
+//      both anywhere, so the ordering constraint cannot live in the notation.
+//      Gated by testdata/valid/node-on-error-continuation.flow and by
+//      TestParseClauseContinuationAcrossNewlines.
+//
+//   3. PARSER-ONLY RULE: a Statement must follow a FlowDecl. Entry admits
+//      FlowEntry directly, so the notation cannot express the containment — File
+//      derives Entry derives FlowEntry derives Statement with no FlowDecl in the
+//      chain — but a statement before any flow declaration has no flow to belong
+//      to and is a diagnostic. Gated by testdata/invalid/headless-statement.flow.
+//
+//   4. PARSER-ONLY RULE: the goSpan following `on error` must be NON-EMPTY and
+//      must NOT BEGIN WITH `->`. Error handling is a declaration, never an edge.
+//      The notation cannot express this: tokArrow appears in neither
+//      FIRST(Clauses) nor FOLLOW(Clauses), so the stop set for that goSpan
+//      contains no arrow and `-> handler` scans as a perfectly good non-empty
+//      span terminated by the newline. Gated by testdata/invalid/error-edge-arrow.flow.
+//
+// Rule 3 and the treatment of `func` point opposite ways on purpose. A FUNC is a
+// DECLARATION: it stands alone, belongs to the file, and is legal anywhere at
+// file level, which is why funcs are declare-anywhere and hoisted. A STATEMENT
+// is a FLOW-BODY MEMBER: it names inputs and produces an output inside a
+// traversal, and outside a flow it means nothing. Accepting a headless statement
+// would report success for a structure no consumer can interpret, so it fails
+// loud at the point of the mistake instead.
+//
+// Everything else the parser enforces IS expressed below: at-least-one switch
+// arm by `Arm { Arm }`, else-last by the trailing `[ Else ]`, checkpoint's zero
+// arity by an operand-free production, continuation-only-before-a-clause-keyword
+// by the `[ newline ]` prefixes, and a func body's self-termination by
+// goFuncSpan's brace balance.
+//
+// EVERY Entry AND FlowEntry ALTERNATIVE ENDS IN `newline`, which makes a
+// trailing newline mandatory in every .flow file. A file whose last line has no
+// terminating newline does not derive at all.
+
+File       = { newline } { Entry } .
+Entry      = Import | ConstDecl | ParamDecl | FuncDecl | FlowDecl | FlowEntry .
+Import     = "import" [ ident ] string newline .
+ConstDecl  = "const" ident [ goSpan ] "=" goSpan newline .
+ParamDecl  = "param" ident goSpan "=" goSpan newline .
+FuncDecl   = "func" ident goFuncSpan newline .
+FlowDecl   = "flow" ident [ Signature ] newline .
+Signature  = "(" goSpan ")" "->" Output { "," Output } .
+Output     = ident goSpan .
+FlowEntry  = Note | StateDecl | VarDecl | OnError | Statement | newline .
+Note       = "note" noteText newline .
+StateDecl  = "state" "{" newline { ident goSpan newline } "}" newline .
+VarDecl    = "var" ident goSpan [ "clone" goSpan ] newline .
+OnError    = "on" "error" goSpan newline .
+Statement  = Source | Transform | Branch | Switch | Tee | Sink | Drop | Loop | Send | Use .
+Source     = "source" ident goSpan Clauses newline .
+Transform  = "transform" ident goSpan From Clauses newline .
+Branch     = "branch" ident goSpan From "->" ident "," ident Clauses newline .
+Sink       = "sink" ident goSpan From Clauses newline .
+Tee        = "tee" ident From "->" ident { "," ident } Clauses newline .
+Drop       = "drop" ident newline .
+Loop       = "loop" ident newline .
+Send       = "send" ident "->" ident newline .
+Use        = "use" ident FlowRef From "->" ident { "," ident } Clauses newline .
+Switch     = "switch" ident From "on" goSpan Clauses "{" newline Arm { Arm } [ Else ] "}" newline .
+Arm        = goSpan { "," goSpan } "->" ident newline .
+Else       = "else" "->" ident newline .
+From       = "from" ident { "," ident } .
+FlowRef    = ident { "." ident } .
+Clauses    = { Reads | Writes | Over | Checkpoint | NodeError | NodeNote } .
+Reads      = [ newline ] "reads" ident { "," ident } .
+Writes     = [ newline ] "writes" ident { "," ident } .
+Over       = [ newline ] "over" goSpan .
+Checkpoint = [ newline ] "checkpoint" .
+NodeError  = [ newline ] "on" "error" goSpan .
+NodeNote   = [ newline ] "note" noteText .

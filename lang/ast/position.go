@@ -4,6 +4,8 @@
 // license that can be found in the LICENSE file.
 package ast
 
+import "strconv"
+
 // Position is a byte-addressed point in a source file.
 //
 // Offset is the 0-based byte index. Line and Col are 1-based, and Col counts
@@ -13,6 +15,12 @@ type Position struct {
 	Offset int
 	Line   int
 	Col    int
+}
+
+// String renders the position as `line:col`, the form an editor and a command
+// line both read without further formatting.
+func (p Position) String() string {
+	return strconv.Itoa(p.Line) + ":" + strconv.Itoa(p.Col)
 }
 
 // Diagnostic is one positioned problem found in a source file.

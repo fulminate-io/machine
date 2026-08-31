@@ -4,8 +4,6 @@
 // license that can be found in the LICENSE file.
 package ast
 
-import "fmt"
-
 // arrowOp is the edge operator. It is an operator rather than a keyword, so it
 // carries its own token kind.
 const arrowOp = "->"
@@ -224,7 +222,11 @@ func (l *lexer) scanOperator() token {
 	if kind, ok := singleByteTokens[c]; ok {
 		return token{kind: kind, text: string(c), pos: p}
 	}
-	l.diag(p, l.pos(), fmt.Sprintf("unexpected character %q", rune(c)))
+	// An unrecognized byte is reported by the PARSER, not here. The lexer records
+	// only what only IT can see — an unterminated note, an unterminated func
+	// body. A byte that is no flow-language token is routinely a perfectly good
+	// first byte of an opaque Go span, and the parser is the only layer that
+	// knows which of the two it is looking at.
 	return token{kind: tokIllegal, text: string(c), pos: p}
 }
 
