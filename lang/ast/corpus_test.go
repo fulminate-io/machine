@@ -275,7 +275,7 @@ func TestCorpusFilesEndWithATrailingNewline(t *testing.T) {
 var strawmanShape = map[string]struct {
 	decls, stmts, funcs int
 }{
-	"toy.flow":        {decls: 3, stmts: 9, funcs: 0},
+	"toy.flow":        {decls: 3, stmts: 11, funcs: 0},
 	"payments.flow":   {decls: 6, stmts: 12, funcs: 0},
 	"enrichment.flow": {decls: 6, stmts: 7, funcs: 2},
 }

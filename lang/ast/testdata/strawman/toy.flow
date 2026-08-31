@@ -1,6 +1,6 @@
 flow orders
 note """
-Order intake: validate, charge billables, archive rejects.
+Order intake: validate, charge billables, retry flaky charges, archive rejects.
 """
 import "github.com/acme/billing"
 import "acme.dev/flows/audit"
@@ -16,9 +16,12 @@ transform charge billing.Charge from billable
   over pubsub.Topic("charges")
   on error billing.Refund
   note """idempotent: broker may redeliver during failover"""
-tee split from charge -> ledger, mirror
+branch settle billing.Settled from charge -> settled, flaky
+tee split from settled -> ledger, mirror
 transform archive audit.Store from rejected, mirror
 drop ledger
 loop retry
+send flaky -> retry
 transform redo billing.Backoff from retry
+  reads attempt  writes attempt
 send redo -> charge
