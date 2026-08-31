@@ -48,4 +48,17 @@ func assertRefusesWithErrClosed(t *testing.T, ctx context.Context, l *Ledger) {
 	if _, _, err := l.Get(ctx, "heap/alpha"); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Get on a closed ledger gave %v, want ErrClosed", err)
 	}
+
+	// The seam a caller actually holds refuses too, with the same named error
+	// rather than a raft-internal one it cannot interpret.
+	store := l.Store()
+	if value, ok, err := store.Load(ctx, "heap/alpha"); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Store.Load on a closed ledger gave %v present=%v err=%v, want ErrClosed", value, ok, err)
+	}
+	if err := store.Save(ctx, "heap/alpha", "unreachable"); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Store.Save on a closed ledger gave %v, want ErrClosed", err)
+	}
+	if _, err := store.Update(ctx, "heap/alpha", func(v any) any { return v }); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Store.Update on a closed ledger gave %v, want ErrClosed", err)
+	}
 }
