@@ -1,0 +1,65 @@
+enrichment.flow enrichment nodes 7 edges 7 entry []
+enrichment.flow enrichment node 0 source orders in [] out [orders]
+enrichment.flow enrichment node 1 loop retry in [] out [retry]
+enrichment.flow enrichment node 2 transform enrich in [orders retry] out [enrich]
+enrichment.flow enrichment node 3 branch settle in [enrich] out [done flaky]
+enrichment.flow enrichment node 4 transform backoff in [flaky] out [backoff]
+enrichment.flow enrichment node 5 send backoff in [backoff] out [retry]
+enrichment.flow enrichment node 6 sink store in [done] out []
+enrichment.flow enrichment edge 0->2 orders forward
+enrichment.flow enrichment edge 1->2 retry forward
+enrichment.flow enrichment edge 5->2 retry backward
+enrichment.flow enrichment edge 2->3 enrich forward
+enrichment.flow enrichment edge 3->4 flaky forward
+enrichment.flow enrichment edge 4->5 backoff forward
+enrichment.flow enrichment edge 3->6 done forward
+payments.flow payments nodes 12 edges 13 entry []
+payments.flow payments node 0 source events in [] out [events]
+payments.flow payments node 1 branch classify in [events] out [payments other]
+payments.flow payments node 2 branch screen in [payments] out [clean suspect]
+payments.flow payments node 3 loop retry in [] out [retry]
+payments.flow payments node 4 transform try in [clean retry] out [try]
+payments.flow payments node 5 branch settle in [try] out [enriched flaky]
+payments.flow payments node 6 transform backoff in [flaky] out [backoff]
+payments.flow payments node 7 send backoff in [backoff] out [retry]
+payments.flow payments node 8 tee record in [enriched] out [wh live]
+payments.flow payments node 9 sink store in [wh] out []
+payments.flow payments node 10 sink push in [live] out []
+payments.flow payments node 11 sink hold in [suspect other] out []
+payments.flow payments edge 0->1 events forward
+payments.flow payments edge 1->2 payments forward
+payments.flow payments edge 2->4 clean forward
+payments.flow payments edge 3->4 retry forward
+payments.flow payments edge 7->4 retry backward
+payments.flow payments edge 4->5 try forward
+payments.flow payments edge 5->6 flaky forward
+payments.flow payments edge 6->7 backoff forward
+payments.flow payments edge 5->8 enriched forward
+payments.flow payments edge 8->9 wh forward
+payments.flow payments edge 8->10 live forward
+payments.flow payments edge 2->11 suspect forward
+payments.flow payments edge 1->11 other forward
+toy.flow orders nodes 11 edges 12 entry []
+toy.flow orders node 0 source ingest in [] out [ingest]
+toy.flow orders node 1 branch validate in [ingest] out [billable rejected]
+toy.flow orders node 2 transform charge in [billable] out [charge]
+toy.flow orders node 3 branch settle in [charge] out [settled flaky]
+toy.flow orders node 4 tee split in [settled] out [ledger mirror]
+toy.flow orders node 5 transform archive in [rejected mirror] out [archive]
+toy.flow orders node 6 drop ledger in [ledger] out []
+toy.flow orders node 7 loop retry in [] out [retry]
+toy.flow orders node 8 send flaky in [flaky] out [retry]
+toy.flow orders node 9 transform redo in [retry] out [redo]
+toy.flow orders node 10 send redo in [redo] out [charge]
+toy.flow orders edge 0->1 ingest forward
+toy.flow orders edge 1->2 billable forward
+toy.flow orders edge 2->3 charge forward
+toy.flow orders edge 10->3 charge backward
+toy.flow orders edge 3->4 settled forward
+toy.flow orders edge 1->5 rejected forward
+toy.flow orders edge 4->5 mirror forward
+toy.flow orders edge 4->6 ledger forward
+toy.flow orders edge 3->8 flaky forward
+toy.flow orders edge 7->9 retry forward
+toy.flow orders edge 8->9 retry backward
+toy.flow orders edge 9->10 redo forward
