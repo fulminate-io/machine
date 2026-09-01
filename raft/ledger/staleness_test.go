@@ -244,6 +244,9 @@ func TestRestoredFollowerBecomingLeaderReadsWithoutAnInterveningWrite(t *testing
 	// epoch that carries the state machine past whatever the install left behind.
 	nodes := newCluster(t, "flow-follower-restore", 3)
 	leader := waitClusterLeader(t, nodes)
+	// raft refuses a restore until the leader has APPLIED the configuration entry its
+	// election committed, and winning the election is the earlier of those two events.
+	awaitConfigurationApplied(t, leader)
 	if err := leader.ledger.Restore(meta, reader, 60*time.Second); err != nil {
 		t.Fatalf("delivering the snapshot to the leader: %v", err)
 	}

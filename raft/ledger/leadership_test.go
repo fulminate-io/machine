@@ -89,6 +89,42 @@ func waitClusterLeader(t *testing.T, nodes []*clusterNode) *clusterNode {
 	return nil
 }
 
+// awaitConfigurationApplied blocks until a freshly elected leader has APPLIED the
+// configuration entry its election committed.
+//
+// WINNING AN ELECTION IS NOT THE SAME EVENT AS APPLYING THE CONFIGURATION, and
+// waitClusterLeader returns on the first of them. raft refuses raft.Restore in the
+// gap between the two with "cannot restore snapshot now, wait until the
+// configuration entry at 1 has been applied (have applied 0)" — a genuine refusal
+// from raft rather than anything wrong in this package, and one that surfaces only
+// when the leader's apply loop is starved by the rest of the suite running beside
+// it. MEASURED: once in ten full-suite runs of raft/ledger, and never in forty runs
+// of the affected test on its own, which is what a load-dependent window looks like.
+//
+// A BARRIER READ IS THE WAIT, rather than a sleep or a poll of raft's internals,
+// because it is the production path and it settles exactly the condition raft is
+// refusing on: it proves the term against a quorum and then carries the state
+// machine to the commit index observed after that proof. The single-node restore
+// test gets this for free from its own CONTROL read; a cluster has no equivalent, so
+// it is stated here instead of being left to timing.
+func awaitConfigurationApplied(t *testing.T, node *clusterNode) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	deadline := time.Now().Add(30 * time.Second)
+
+	var last error
+	for time.Now().Before(deadline) {
+		if _, _, last = node.ledger.Get(ctx, fencedPath); last == nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("the leader had not applied its configuration entry within 30s; the last barrier read reported %v", last)
+}
+
 // fencedPath and fencedValue are committed on the FIRST term of the tests below and
 // read back on every later one.
 const (

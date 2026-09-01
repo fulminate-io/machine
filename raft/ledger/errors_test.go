@@ -93,6 +93,18 @@ func TestSaveRefusesAValueGobCannotEncode(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
+	// SETTLE THE TERM BEFORE SAMPLING THE INDEX. waitLeadership returns when the node
+	// wins the election, and the leadership epilogue's own per-term entry lands after
+	// that — so an index sampled here and re-read below can straddle an append this
+	// test never made, and the assertion blames the refused Save for raft's own
+	// record. A barrier read is the wait, because it returns only once the state
+	// machine has been carried past that entry. MEASURED under a concurrently running
+	// suite, which is the load that opens the window: 2 failures in 60 runs before
+	// this line, 0 in 60 after, with the failure always reporting exactly 1 entry.
+	if _, _, err := l.Get(ctx, "heap/settle"); err != nil {
+		t.Fatalf("settling the term before sampling the journal index: %v", err)
+	}
+
 	// A map inside an interface is not one of gob's built-ins and was never
 	// registered, so the WRITER fails loudly here rather than putting a value into
 	// the journal that no reader could decode.
