@@ -136,11 +136,35 @@ func (d *Detector) Claim(ctx context.Context, flow, datum, owner string) (bool, 
 }
 
 // Retire drops a completed datum's checkpoint and its claim together.
+//
+// IT NAMES BOTH PATHS. The journal's retire arm deletes Entry.Path from the
+// checkpoints and Entry.Value from the claims, because the two spaces are disjoint
+// and the ledger cannot derive one from the other without importing this module's
+// path vocabulary back through a cycle.
+// Sending only the checkpoint path retires no claim at all.
 func (d *Detector) Retire(ctx context.Context, flow, datum string) error {
 	if _, err := d.ledger.Append(ctx, ledger.Entry{
 		Kind: ledger.KindRetire, Path: checkpoint.Path(datum),
+		Value: []byte(checkpoint.ClaimPath(datum)),
 	}); err != nil {
 		return fmt.Errorf("recovery: retiring datum %q on flow %q: %w", datum, flow, err)
+	}
+
+	return nil
+}
+
+// retireStrandedClaim drops the claim of a holder that has left the flow.
+//
+// NOBODY STEALS; THE LEADER RETIRES. Permitting a survivor to take a claim from its
+// holder would contradict the first-writer-wins arm that makes single-writer-per-datum
+// safe. Instead the leader — the one node with the authoritative membership view, and
+// the only node this runs on — appends a retire-claim entry, and the survivor then
+// claims through the ordinary compare-and-claim path against no incumbent.
+func (d *Detector) retireStrandedClaim(ctx context.Context, flow, datum string) error {
+	if _, err := d.ledger.Append(ctx, ledger.Entry{
+		Kind: ledger.KindRetireClaim, Path: checkpoint.ClaimPath(datum),
+	}); err != nil {
+		return fmt.Errorf("recovery: retiring the stranded claim on datum %q of flow %q: %w", datum, flow, err)
 	}
 
 	return nil
@@ -211,20 +235,11 @@ func (d *Detector) scan(
 		record.Flow = flow
 		record.Datum = datum
 
-		claimant, held, claimErr := d.ledger.Claimant(ctx, checkpoint.ClaimPath(datum))
-		if claimErr != nil {
-			return nil, fmt.Errorf("recovery: reading claim state for datum %q on flow %q: %w",
-				datum, flow, claimErr)
+		withheld, err := d.claimWithholds(ctx, flow, datum, alive)
+		if err != nil {
+			return nil, err
 		}
-		// The claim read goes through the CLAIM ACCESSOR, which is the only thing
-		// that can see a held claim at all: written against the value read it
-		// observes nothing and drops nothing, which is the inertness the audit
-		// reproduced.
-		// A CLAIM HELD BY A LIVE MEMBER is work a survivor has already taken, so it
-		// is not offered again. A claim held by a member that has LEFT is not a
-		// reason to withhold anything: it is a dead worker's own claim, and the datum
-		// under it is exactly what recovery is for.
-		if _, up := alive[claimant]; up && held {
+		if withheld {
 			continue
 		}
 		// THE WRITER decides orphanhood. A checkpoint whose writer is still in the
@@ -236,6 +251,41 @@ func (d *Detector) scan(
 	}
 
 	return out, nil
+}
+
+// claimWithholds reports whether a datum's claim keeps it out of this round, and
+// retires the claim when its holder has left the flow.
+//
+// It is a method rather than an inline branch in scan only because scan measures past
+// the package's per-function statement limit with it inlined; the decision it makes is
+// scan's own and the ordering below is load bearing.
+func (d *Detector) claimWithholds(
+	ctx context.Context, flow, datum string, alive map[string]struct{},
+) (bool, error) {
+	// The claim read goes through the CLAIM ACCESSOR, which is the only thing that can
+	// see a held claim at all: written against the value read it observes nothing and
+	// drops nothing, which is the inertness the audit reproduced.
+	claimant, held, err := d.ledger.Claimant(ctx, checkpoint.ClaimPath(datum))
+	if err != nil {
+		return false, fmt.Errorf("recovery: reading claim state for datum %q on flow %q: %w",
+			datum, flow, err)
+	}
+	if !held {
+		return false, nil
+	}
+	// A CLAIM HELD BY A LIVE MEMBER is work a survivor has already taken, so it is not
+	// offered again.
+	if _, up := alive[claimant]; up {
+		return true, nil
+	}
+
+	// A claim held by a member that has LEFT is not a reason to withhold anything: it is
+	// a dead worker's own claim, and the datum under it is exactly what recovery is for.
+	// THE HOLDER IS GONE, so the claim is STRANDED: first-writer-wins would refuse every
+	// survivor forever. Retire it HERE, before the datum is offered — a datum offered
+	// while its dead holder's claim still stands is a datum every survivor loses the
+	// race for.
+	return false, d.retireStrandedClaim(ctx, flow, datum)
 }
 
 // await parks until the flow's membership moves.

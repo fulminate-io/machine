@@ -72,26 +72,39 @@ func TestAFollowersRetireForwardsAndLandsOnTheLeader(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if _, err := leader.ledger.Append(ctx, Entry{Kind: KindSet, Path: "datum/7", Value: []byte("progress")}); err != nil {
-		t.Fatalf("checkpointing datum/7: %v", err)
+	// THE TWO HALVES GO INTO THE TWO PRODUCTION SPACES. Keying both at one string
+	// would collapse them, and a retire that deleted no claim at all would still
+	// satisfy the claim assertion below.
+	if _, err := leader.ledger.Append(ctx,
+		Entry{Kind: KindSet, Path: ckPath("datum-7"), Value: []byte("progress")}); err != nil {
+		t.Fatalf("checkpointing datum-7: %v", err)
 	}
-	if _, err := leader.ledger.Append(ctx, Entry{Kind: KindClaim, Path: "datum/7", Value: []byte("worker-a")}); err != nil {
-		t.Fatalf("claiming datum/7: %v", err)
+	if _, err := leader.ledger.Append(ctx,
+		Entry{Kind: KindClaim, Path: clPath("datum-7"), Value: []byte("worker-a")}); err != nil {
+		t.Fatalf("claiming datum-7: %v", err)
 	}
 	// CONTROL: both halves are live on the leader before the follower's retire.
-	if _, present, err := leader.ledger.Get(ctx, "datum/7"); err != nil || !present {
-		t.Fatalf("CONTROL FAILED: datum/7 is not checkpointed before the retire (present=%v, err %v)", present, err)
+	if _, present, err := leader.ledger.Get(ctx, ckPath("datum-7")); err != nil || !present {
+		t.Fatalf("CONTROL FAILED: datum-7 is not checkpointed before the retire (present=%v, err %v)", present, err)
+	}
+	if held := leader.ledger.fsm.claimant(clPath("datum-7")); held != "worker-a" {
+		t.Fatalf("CONTROL FAILED: datum-7 is held by %q before the retire, want worker-a", held)
 	}
 
-	if _, err := follower.ledger.Append(ctx, Entry{Kind: KindRetire, Path: "datum/7"}); err != nil {
-		t.Fatalf("a follower's retire of datum/7: %v", err)
+	// THE ENTRY NAMES BOTH KEYS AND BOTH MUST SURVIVE THE WIRE. A forwarding path
+	// that carried Path and dropped Value would land a retire that deletes no claim.
+	if _, err := follower.ledger.Append(ctx, Entry{
+		Kind: KindRetire, Path: ckPath("datum-7"), Value: []byte(clPath("datum-7")),
+	}); err != nil {
+		t.Fatalf("a follower's retire of datum-7: %v", err)
 	}
 
-	if _, present, err := leader.ledger.Get(ctx, "datum/7"); err != nil || present {
-		t.Fatalf("after a follower's retire datum/7 is still checkpointed on the leader (present=%v, err %v)", present, err)
+	if _, present, err := leader.ledger.Get(ctx, ckPath("datum-7")); err != nil || present {
+		t.Fatalf("after a follower's retire datum-7 is still checkpointed on the leader (present=%v, err %v)", present, err)
 	}
-	if held := leader.ledger.fsm.claimant("datum/7"); held != "" {
-		t.Fatalf("after a follower's retire datum/7 is still held by %q on the leader", held)
+	if held := leader.ledger.fsm.claimant(clPath("datum-7")); held != "" {
+		t.Fatalf("after a follower's retire datum-7 is still held by %q on the leader; the companion claim key "+
+			"did not survive the forwarding wire", held)
 	}
 }
 

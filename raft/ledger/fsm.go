@@ -84,6 +84,10 @@ func (f *fsm) applyEntry(index uint64, entry Entry) any {
 		f.retire(index, entry)
 
 		return nil
+	case KindRetireClaim:
+		f.retireClaim(index, entry)
+
+		return nil
 	default:
 		return f.poisonAt(index, fmt.Errorf(
 			"ledger: log index %d applies kind %d, which this build declares but does not handle: %w",
@@ -181,6 +185,14 @@ func (f *fsm) claim(index uint64, entry Entry) error {
 // Under one hold neither intermediate state is observable, because there is no
 // moment at which one exists.
 //
+// THE ENTRY NAMES BOTH KEYS BECAUSE THIS ARM CANNOT DERIVE ONE FROM THE OTHER.
+// Entry.Path is the datum's CHECKPOINT path and Entry.Value carries its CLAIM path.
+// The two live in disjoint spaces owned by raft/checkpoint, which imports this
+// package — so deriving the claim key here would mean duplicating another package's
+// path literals inside the replicated arm, and a state machine that parsed paths
+// would be reading a vocabulary it does not own. Carrying the companion key on the
+// entry keeps BOTH deletes in ONE critical section, which two entries could not.
+//
 // Retiring a datum that was never checkpointed is a deliberate no-op rather than a
 // swallowed failure: deleting an absent key changes nothing and nothing was lost.
 func (f *fsm) retire(index uint64, entry Entry) {
@@ -188,6 +200,25 @@ func (f *fsm) retire(index uint64, entry Entry) {
 	defer f.mutex.Unlock()
 
 	delete(f.values, entry.Path)
+	delete(f.claims, string(entry.Value))
+	f.advanceLocked(index)
+}
+
+// retireClaim drops a stranded claim and LEAVES THE CHECKPOINT ALONE, which is the
+// whole difference from retire: the datum is not finished, it is unowned. Deleting the
+// checkpoint here would destroy the progress a survivor is about to resume from, and
+// leaving the claim is what makes the datum permanently unclaimable.
+//
+// Entry.Path is a CLAIM path, so this deletes from claims and never touches values —
+// the two spaces are disjoint by construction at the writer.
+//
+// Retiring a claim nobody holds is a deliberate no-op rather than a refusal: deleting
+// an absent key changes nothing, and the leader re-observes a departure whenever its
+// membership cursor rebuilds, so a repeat must reach the same post-state.
+func (f *fsm) retireClaim(index uint64, entry Entry) {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+
 	delete(f.claims, entry.Path)
 	f.advanceLocked(index)
 }

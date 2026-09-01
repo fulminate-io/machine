@@ -41,11 +41,27 @@ const (
 	// refused with ErrClaimHeld, which is what makes recovery ownership settle
 	// through log order rather than through last-write-wins.
 	KindClaim
-	// KindRetire drops Entry.Path's checkpoint AND its claim together. It carries no
-	// value. Retiring a datum that was never checkpointed is not an error: the
+	// KindRetire drops Entry.Path's checkpoint AND its claim together. IT NAMES BOTH
+	// KEYS: Entry.Path is the datum's checkpoint path and Entry.Value carries its
+	// claim path, because the two live in disjoint spaces this package cannot derive
+	// between — the path vocabulary belongs to raft/checkpoint, which imports this
+	// one. An entry naming only the checkpoint path deletes NO claim, which is a
+	// claim that outlives every datum it was ever taken for.
+	// Retiring a datum that was never checkpointed is not an error: the
 	// retirement is driven by node completion, which fires whether or not a flow
 	// declared a checkpoint, and the post-state is identical either way.
 	KindRetire
+	// KindRetireClaim drops Entry.Path's CLAIM and leaves every checkpoint alone. It
+	// carries no value. It exists because a worker that dies while HOLDING a recovery
+	// claim strands the datum: first-writer-wins refuses every later claimant, and the
+	// state machine has no liveness view with which to judge that the holder is gone.
+	// The flow's LEADER appends it on observing the holder depart, so the claim is
+	// RETIRED rather than stolen and first-writer-wins is untouched.
+	//
+	// Retiring a claim nobody holds is a deliberate no-op, on the same reasoning
+	// KindRetire's doc gives: the leader re-observes a departure across a rebuilt
+	// membership cursor, so a repeat must reach the same post-state rather than fail.
+	KindRetireClaim
 )
 
 // declared reports whether this build knows how to interpret a kind.
@@ -55,7 +71,8 @@ const (
 // entries arriving by snapshot — so a kind cannot be admitted on one path while the
 // other refuses it.
 func (k Kind) declared() bool {
-	return k == KindSet || k == KindEpoch || k == KindClaim || k == KindRetire
+	return k == KindSet || k == KindEpoch || k == KindClaim || k == KindRetire ||
+		k == KindRetireClaim
 }
 
 // forwards reports whether Append sends this kind to the leader rather than
@@ -67,9 +84,13 @@ func (k Kind) declared() bool {
 // decision in a named place — and a kind that fails to forward refuses on every
 // follower silently, with no gate that would notice.
 //
-// KindEpoch is excluded because it is LEADER-INTERNAL: appendEpoch applies it
-// through raft directly and it never reaches Append. The other three are operations
-// a non-leader worker genuinely originates.
+// TWO KINDS ARE EXCLUDED AND EACH FOR ITS OWN REASON. KindEpoch is LEADER-INTERNAL:
+// appendEpoch applies it through raft directly and it never reaches Append.
+// KindRetireClaim is LEADER-ORIGINATED: only the node holding the flow's authoritative
+// membership may judge that a claim holder departed, so a non-leader append of it is
+// refused with ErrNotLeader rather than forwarded — which is what stops a DEMOTED
+// leader from retiring a live worker's claim off a membership view that has gone
+// stale. The remaining three are operations a non-leader worker genuinely originates.
 func (k Kind) forwards() bool {
 	return k == KindSet || k == KindClaim || k == KindRetire
 }

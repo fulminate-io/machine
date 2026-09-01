@@ -46,6 +46,15 @@
 // recovery will claim and re-run it. That is the same at-least-once semantic arriving
 // at the last checkpoint rather than at an intermediate one.
 //
+// A DEPARTED HOLDER'S CLAIM IS RETIRED BY THE LEADER, NOT STOLEN BY A SURVIVOR. A
+// worker that dies while HOLDING a claim would otherwise strand its datum forever: the
+// journal refuses every later claimant, and the state machine has no liveness view with
+// which to judge that the holder is gone. The leader observes the departure through the
+// membership signals it already reads, appends a retire-claim entry that drops the claim
+// and leaves the checkpoint, and re-offers the datum; a live worker then claims it
+// through the ordinary path. First-writer-wins is untouched, and the datum re-enters the
+// duplicate window above rather than a third one of its own.
+//
 // # Streams
 //
 // EVERY STREAM THIS PACKAGE OPENS CARRIES A READ DEADLINE. It opens none of its own
