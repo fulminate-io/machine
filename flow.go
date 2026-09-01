@@ -22,10 +22,13 @@ const (
 // makes that parameter the node's INPUT type. A node therefore owns its INBOUND
 // edge, which is what WithEdge selects.
 type nodeConfig[T any] struct {
-	factory EdgeFactory[T]
-	handler ErrorHandler[T]
-	reads   []KeyRef
-	writes  []KeyRef
+	factory    EdgeFactory[T]
+	handler    ErrorHandler[T]
+	reads      []KeyRef
+	writes     []KeyRef
+	codec      Codec[T]
+	checkpoint bool
+	idempotent bool
 }
 
 // NodeOption configures a node at declaration time.
@@ -60,6 +63,124 @@ func WithWrites[T any](refs ...KeyRef) NodeOption[T] {
 	return func(c *nodeConfig[T]) { c.writes = append(c.writes, refs...) }
 }
 
+// WithCheckpoint declares that this node journals its datum's progress, marshaling
+// the packet with the given codec.
+//
+// THE CODEC IS REQUIRED AND NEVER DEFAULTED. A nil codec is refused at declaration
+// time rather than silently substituting the gob codec: bad input errors here, and a
+// machine that quietly picked an encoding would journal bytes the reading build may
+// not decode.
+//
+// WHICH SIDE of the node function the record is written on is decided by
+// WithIdempotent rather than here; see that option for the two anchors.
+//
+// The declaration is recorded SEPARATELY from the codec, because those are two
+// different facts: WithCheckpoint(nil) is a declaration with a missing codec and must
+// be refused, while a node that never declared a checkpoint must not be.
+func WithCheckpoint[T any](codec Codec[T]) NodeOption[T] {
+	return func(c *nodeConfig[T]) { c.checkpoint = true; c.codec = codec }
+}
+
+// WithIdempotent marks the node safe to run again on the same datum, which SELECTS
+// THE CHECKPOINT ANCHOR.
+//
+// A MARKED node anchors on ARRIVAL: the input packet is journaled BEFORE the node
+// function runs, and recovery hands that record back to this same node, which runs
+// again — safe precisely because the author declared it so.
+//
+// An UNMARKED node anchors on COMPLETION, and completion is the DEFAULT: the output
+// is journaled AFTER the node function returns, and resume re-injects it into the
+// node's SUCCESSORS without re-running the node, which is what keeps a
+// non-idempotent node's side effects from happening twice.
+//
+// It takes no argument, mirroring the grammar's bare clause.
+func WithIdempotent[T any]() NodeOption[T] {
+	return func(c *nodeConfig[T]) { c.idempotent = true }
+}
+
+// journalArrival writes the ARRIVAL record: the packet the edge delivered, BEFORE
+// the node function runs. It is uniform across every runner kind, because every kind
+// receives a packet whatever it goes on to do with it.
+//
+// A JOURNAL FAILURE IS NOT SWALLOWED. It routes through dispatch, the single funnel
+// every node failure already passes, so it reaches the node's typed handler or the
+// machine's global one and is counted on the datum's span. The datum still proceeds:
+// refusing to process it would convert a durability failure into a liveness failure,
+// and that trade belongs to the caller's handler rather than to this runtime.
+func (w *worker[I]) journalArrival(ctx context.Context, p Packet[I]) {
+	if !w.checkpoint || !w.idempotent || w.codec == nil {
+		return
+	}
+
+	data, err := w.codec.Marshal(p)
+	if err != nil {
+		w.dispatch(ctx, NodeError[I]{Node: w.name, Payload: p.Value(),
+			Err: fmt.Errorf("machine: marshaling the arrival checkpoint for node %q: %w", w.name, err)})
+
+		return
+	}
+	w.write(ctx, AnchorArrival, p.ID(), data, p.Value())
+}
+
+// write hands one record to the machine's journal and routes a failure.
+func (w *worker[I]) write(ctx context.Context, anchor, datum string, data []byte, payload I) {
+	record := CheckpointRecord{
+		Flow: w.machine.name, Datum: datum, Node: w.name, Anchor: anchor, Data: data,
+	}
+	if err := w.machine.cfg.journal.Checkpoint(ctx, record); err != nil {
+		w.dispatch(ctx, NodeError[I]{Node: w.name, Payload: payload,
+			Err: fmt.Errorf("machine: journaling the %s checkpoint for node %q: %w", anchor, w.name, err)})
+	}
+}
+
+// journalCompletion writes the COMPLETION record: what the node PRODUCED, after its
+// function returned and before the value is sent onward.
+//
+// IT IS A FUNCTION RATHER THAN A METHOD because it spans two type parameters. The
+// node's input type is the worker's; the produced value's type is the emitter's, and
+// on a Map those differ — which is the whole reason the codec is read off the
+// emitter rather than off the worker.
+func journalCompletion[I, O any](ctx context.Context, w *worker[I], out *emitter[O], f Frame[O], payload I) {
+	if !w.checkpoint || w.idempotent || out.codec == nil {
+		return
+	}
+
+	packet := packetOf(f)
+	data, err := out.codec.Marshal(packet)
+	if err != nil {
+		w.dispatch(ctx, NodeError[I]{Node: w.name, Payload: payload,
+			Err: fmt.Errorf("machine: marshaling the completion checkpoint for node %q: %w", w.name, err)})
+
+		return
+	}
+	w.write(ctx, AnchorCompletion, packet.ID(), data, payload)
+}
+
+// requireCompletionCodec refuses AT START when a completion-anchored checkpoint node
+// has no codec to marshal what it produces.
+//
+// It rides the same addCheck hook newEmitter already uses for the never-consumed
+// flow, so the refusal arrives with every other declaration error rather than as a
+// runtime surprise. It names the node, the successor and the fix, because an author
+// told only that something is wrong cannot act on it. An ARRIVAL-anchored node is
+// never refused here: it marshals its own input with its own codec and needs no
+// successor codec at all.
+func requireCompletionCodec[I, O any](w *worker[I], out *emitter[O]) {
+	if !w.checkpoint || w.idempotent {
+		return
+	}
+	w.machine.addCheck(func() error {
+		if out.codec != nil {
+			return nil
+		}
+
+		return fmt.Errorf("machine: node %q checkpoints on completion but its successor %q declares no codec; "+
+			"declare WithCheckpoint on %q so its codec can marshal what %q produces, "+
+			"or mark %q idempotent to checkpoint on arrival instead",
+			w.name, out.consumer, out.consumer, w.name, w.name)
+	})
+}
+
 // runner processes one datum for a node. It takes the PACKET the edge delivered; the
 // frame is minted inside the node's own bind, so the capability view a node sees is
 // always the one it declared.
@@ -68,11 +189,19 @@ type runner[I any] func(ctx context.Context, p Packet[I])
 // emitter is a node's outbound hook. Because a node owns its inbound edge, an
 // emitter is bound only once the downstream node is declared, which is why the
 // graph is declared lazily and Start does real work.
+// THE CODEC IS THE CONSUMER'S, and that is what makes a completion checkpoint
+// possible at all. A completion record holds what the producing node OUTPUT, which
+// is exactly this emitter's payload type and therefore its consumer's INPUT type, so
+// the consumer's codec is the type-correct one. The producer's own codec cannot
+// serve: a node's options carry its INPUT type, so a Map from U to V holds a
+// Codec[U] while the record it must journal is a V. It is nil until the downstream
+// node is declared, for the reason stated above this type.
 type emitter[T any] struct {
 	machine  *Machine
 	producer string
 	edge     Edge[T]
 	consumer string
+	codec    Codec[T]
 }
 
 func newEmitter[T any](m *Machine, producer string) *emitter[T] {
@@ -86,7 +215,7 @@ func newEmitter[T any](m *Machine, producer string) *emitter[T] {
 	return hook
 }
 
-func (e *emitter[T]) bind(consumer string, edge Edge[T]) {
+func (e *emitter[T]) bind(consumer string, edge Edge[T], codec Codec[T]) {
 	if e.edge != nil {
 		e.machine.fail(fmt.Errorf("machine: the flow produced by %q is consumed by both %q and %q",
 			e.producer, e.consumer, consumer))
@@ -94,6 +223,7 @@ func (e *emitter[T]) bind(consumer string, edge Edge[T]) {
 	}
 	e.edge = edge
 	e.consumer = consumer
+	e.codec = codec
 }
 
 // send is the frame boundary on the way out: it converts to a packet, which carries no
@@ -111,6 +241,16 @@ type worker[I any] struct {
 	handler ErrorHandler[I]
 	caps    *capabilities
 	record  *node
+	// codec marshals this node's own INPUT, which is what the arrival anchor
+	// journals. The completion anchor journals what the node PRODUCED and reaches
+	// its codec through the outbound emitter instead.
+	codec Codec[I]
+	// checkpoint records that WithCheckpoint was declared, which is not the same
+	// fact as codec being non-nil: WithCheckpoint(nil) must be refused, and a node
+	// that never declared a checkpoint must not be.
+	checkpoint bool
+	// idempotent selects the ARRIVAL anchor. Unmarked is completion, the default.
+	idempotent bool
 }
 
 func newWorker[I any](m *Machine, name string, opts ...NodeOption[I]) *worker[I] {
@@ -118,7 +258,18 @@ func newWorker[I any](m *Machine, name string, opts ...NodeOption[I]) *worker[I]
 	for _, opt := range opts {
 		opt(cfg)
 	}
-	w := &worker[I]{machine: m, name: name, handler: cfg.handler, caps: newCapabilities(name, cfg)}
+	w := &worker[I]{
+		machine: m, name: name, handler: cfg.handler, caps: newCapabilities(name, cfg),
+		codec: cfg.codec, checkpoint: cfg.checkpoint, idempotent: cfg.idempotent,
+	}
+	if cfg.checkpoint && cfg.codec == nil {
+		m.fail(fmt.Errorf("machine: node %q declares a checkpoint with a nil codec; "+
+			"pass the codec that marshals its payload, as WithCheckpoint(machine.GobCodec[T]{})", name))
+	}
+	if cfg.checkpoint && m.cfg.journal == nil {
+		m.fail(fmt.Errorf("machine: node %q declares a checkpoint but the machine has no journal; "+
+			"wire one with machine.OptionJournal", name))
+	}
 	w.record = m.register(name)
 	edge, err := cfg.factory(name, w.report)
 	if err != nil {
@@ -176,6 +327,12 @@ func (w *worker[I]) readLoop(ctx context.Context, run runner[I]) {
 // and as a bare goroutine when unbounded, which is the default and the prior
 // behavior.
 func (w *worker[I]) step(ctx context.Context, sem chan struct{}, run runner[I], p Packet[I]) {
+	// THE ARRIVAL ANCHOR SITS HERE, before the datum is handed to any runner, which
+	// is what makes "journaled BEFORE the node function ran" true on every dispatch
+	// path — inline under FIFO, through the semaphore when bounded, and as a bare
+	// goroutine when unbounded.
+	w.journalArrival(ctx, p)
+
 	if w.machine.cfg.fifo {
 		run(ctx, p)
 		return
@@ -277,6 +434,9 @@ func (w *worker[I]) transform[O any](out *emitter[O], fn func(f Frame[I]) O) run
 	return func(ctx context.Context, p Packet[I]) {
 		w.guard(ctx, w.bind(p), func(spanCtx context.Context, inner Frame[I]) {
 			next := rewrap(inner, fn(inner))
+			// COMPLETION: the produced value, journaled through the SUCCESSOR's
+			// codec, before it is sent onward.
+			journalCompletion(spanCtx, w, out, next, inner.Value())
 			if err := out.send(spanCtx, next); err != nil {
 				w.dispatch(spanCtx, NodeError[I]{Node: w.name, Err: err, Payload: inner.Value()})
 			}
@@ -291,6 +451,12 @@ func (w *worker[I]) route(onTrue, onFalse *emitter[I], fn Filter[I]) runner[I] {
 			if fn(inner) {
 				out = onTrue
 			}
+			// COMPLETION on a node that FORWARDS rather than produces. The payload
+			// equals the one received, so the anchor is the moment rather than the
+			// value: at this point the branch is already chosen, and re-injecting
+			// this record into the chosen successor is exactly what "never re-run
+			// the node" means for a node whose work IS the choice.
+			journalCompletion(spanCtx, w, out, inner, inner.Value())
 			w.emit(spanCtx, out, inner)
 		})
 	}
@@ -300,8 +466,15 @@ func (w *worker[I]) split(onLeft, onRight *emitter[I], fn Duplicator[I]) runner[
 	return func(ctx context.Context, p Packet[I]) {
 		w.guard(ctx, w.bind(p), func(spanCtx context.Context, inner Frame[I]) {
 			left, right := fn(inner.Value())
-			w.emit(spanCtx, onLeft, Frame[I]{payload: left, state: inner.state.clone()})
-			w.emit(spanCtx, onRight, Frame[I]{payload: right, state: inner.state.clone()})
+			leftFrame := Frame[I]{payload: left, state: inner.state.clone()}
+			rightFrame := Frame[I]{payload: right, state: inner.state.clone()}
+			// COMPLETION on a split is TWO records, one per branch. clone() mints a
+			// fresh identity for each, so they are two datums; journaling one would
+			// leave the other branch unrecoverable.
+			journalCompletion(spanCtx, w, onLeft, leftFrame, inner.Value())
+			journalCompletion(spanCtx, w, onRight, rightFrame, inner.Value())
+			w.emit(spanCtx, onLeft, leftFrame)
+			w.emit(spanCtx, onRight, rightFrame)
 		})
 	}
 }
@@ -364,8 +537,9 @@ func (m *Machine) Source[T any](name string, opts ...NodeOption[T]) (Flow[T, T],
 // datum, and a heap Cell memoizes across data.
 func (f Flow[T, U]) Map[V any](name string, fn Transformation[U, V], opts ...NodeOption[U]) Flow[T, V] {
 	w := newWorker[U](f.machine, name, opts...)
-	f.out.bind(name, w.edge)
+	f.out.bind(name, w.edge, w.codec)
 	out := newEmitter[V](f.machine, name)
+	requireCompletionCodec(w, out)
 	w.record.run = func(ctx context.Context) {
 		go w.readLoop(ctx, w.transform(out, fn))
 	}
@@ -378,9 +552,11 @@ func (f Flow[T, U]) Map[V any](name string, fn Transformation[U, V], opts ...Nod
 // identifies which side was left dangling.
 func (f Flow[T, U]) If(name string, fn Filter[U], opts ...NodeOption[U]) (left, right Flow[T, U]) {
 	w := newWorker[U](f.machine, name, opts...)
-	f.out.bind(name, w.edge)
+	f.out.bind(name, w.edge, w.codec)
 	onTrue := newEmitter[U](f.machine, name+leftSuffix)
 	onFalse := newEmitter[U](f.machine, name+rightSuffix)
+	requireCompletionCodec(w, onTrue)
+	requireCompletionCodec(w, onFalse)
 	w.record.run = func(ctx context.Context) {
 		go w.readLoop(ctx, w.route(onTrue, onFalse, fn))
 	}
@@ -393,9 +569,11 @@ func (f Flow[T, U]) If(name string, fn Filter[U], opts ...NodeOption[U]) (left, 
 // identities and both report the upstream frame as their parent.
 func (f Flow[T, U]) Tee(name string, fn Duplicator[U], opts ...NodeOption[U]) (left, right Flow[T, U]) {
 	w := newWorker[U](f.machine, name, opts...)
-	f.out.bind(name, w.edge)
+	f.out.bind(name, w.edge, w.codec)
 	onLeft := newEmitter[U](f.machine, name+leftSuffix)
 	onRight := newEmitter[U](f.machine, name+rightSuffix)
+	requireCompletionCodec(w, onLeft)
+	requireCompletionCodec(w, onRight)
 	w.record.run = func(ctx context.Context) {
 		go w.readLoop(ctx, w.split(onLeft, onRight, fn))
 	}
@@ -415,14 +593,14 @@ func (f Flow[T, U]) Send(target Flow[T, U]) {
 			"declare the node being re-entered before closing the loop", target.out.producer))
 		return
 	}
-	f.out.bind(target.out.consumer, target.out.edge)
+	f.out.bind(target.out.consumer, target.out.edge, target.out.codec)
 }
 
 // Drop terminates the flow, discarding each frame and reclaiming its stack state at
 // traversal end.
 func (f Flow[T, U]) Drop(name string, opts ...NodeOption[U]) {
 	w := newWorker[U](f.machine, name, opts...)
-	f.out.bind(name, w.edge)
+	f.out.bind(name, w.edge, w.codec)
 	w.record.run = func(ctx context.Context) {
 		go w.readLoop(ctx, w.drain())
 	}
@@ -440,7 +618,7 @@ func (f Flow[T, U]) Drop(name string, opts ...NodeOption[U]) {
 // now fails to compile instead.
 func (f Flow[T, U]) Output(name string, opts ...NodeOption[U]) <-chan Packet[U] {
 	w := newWorker[U](f.machine, name, opts...)
-	f.out.bind(name, w.edge)
+	f.out.bind(name, w.edge, w.codec)
 	if w.edge == nil {
 		return nil
 	}
