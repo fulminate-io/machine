@@ -68,8 +68,20 @@ type forwardOp uint8
 const (
 	// opLoad reads one path through the leader's own barrier.
 	opLoad forwardOp = iota + 1
-	// opSave appends one KindSet entry through the leader's own journal.
+	// opSave appends one entry of a forwarding kind through the leader's own journal.
 	opSave
+	// opList enumerates every entry under a path prefix through the leader's own
+	// barrier.
+	//
+	// IT IS THE THIRD OPERATION, and it is one the derivation below genuinely did not
+	// cover. Update decomposes into a Load, the caller's function and a Save, so it
+	// needed no operation of its own; an ENUMERATION decomposes into nothing — it is
+	// not expressible as a Load, because the caller does not know the keys it is
+	// asking for. Recovery reads it to decide whether a datum is orphaned, and a
+	// stale answer there means either claiming live work or leaving dead work
+	// unclaimed, so it FORWARDS and is linearizable on every node rather than reading
+	// this node's own replicated state.
+	opList
 )
 
 // declared reports whether this build knows how to serve an operation.
@@ -82,18 +94,30 @@ const (
 // refusal by asking this rather than by a switch default — which is what keeps the
 // enumeration load-bearing instead of decorative.
 func (o forwardOp) declared() bool {
-	return o == opLoad || o == opSave
+	return o == opLoad || o == opSave || o == opList
 }
 
 // forwardRequest is one operation on the wire.
 //
-// THE WIRE CARRIES TWO OPERATIONS, NOT THREE, and that is derived rather than
-// chosen. Store.Update is already a Load, then the caller's function, then a Save,
-// so once Load and Save forward, Update forwards with NO CLOSURE CROSSING THE WIRE.
-// That is what keeps the ruled model intact: the datum's own worker computes the
-// update and the leader only orders it. A closure on the wire would invert it.
+// TWO OF ITS THREE OPERATIONS ARE DERIVED RATHER THAN CHOSEN. Store.Update is
+// already a Load, then the caller's function, then a Save, so once Load and Save
+// forward, Update forwards with NO CLOSURE CROSSING THE WIRE. That is what keeps the
+// ruled model intact: the datum's own worker computes the update and the leader only
+// orders it. A closure on the wire would invert it.
+//
+// THAT DERIVATION DOES NOT EXTEND TO THE THIRD. It covers operations decomposable
+// into Load and Save; an enumeration is not one, because the caller does not know
+// the keys it is asking for. opList is therefore an operation genuinely added rather
+// than a shape the two already expressed — see its own comment for why it forwards.
+//
+// THE WIRE CARRIES THE ENTRY'S KIND, and that is what keeps a new kind from being
+// leader-local. A kind with no representation here refuses on every follower,
+// silently, with nothing to notice it. Kind rides beside the operation rather than
+// being reconstructed on the leader, because rewriting one kind into another there
+// would be a coercion of bad input.
 type forwardRequest struct {
 	Op    forwardOp
+	Kind  Kind
 	Path  string
 	Value []byte
 }
@@ -103,8 +127,13 @@ type forwardRequest struct {
 // Value stays OPAQUE BYTES for the reason the entry vocabulary gives: decoding at
 // the READING node makes an unregistered type fail one reader loudly instead of
 // poisoning replicated state across peers.
+// Entries carries an enumeration's answer. It is a separate field from Value rather
+// than a packing of it because the two are different shapes, and a reply that
+// smuggled a list through the single-value field would decode as a value on any peer
+// that read it as one.
 type forwardReply struct {
 	Value   []byte
+	Entries []Entry
 	Present bool
 	Index   uint64
 	Code    errCode
@@ -127,6 +156,12 @@ const (
 	codePoisonedJournal
 	codeReadTimeout
 	codeClosed
+	// codeClaimHeld reports that this operation LOST a claim race. Without its own
+	// identity a lost claim takes codeOther, which behaves correctly — codeOther is
+	// already non-retryable — but arrives as a bare message, leaving a caller unable
+	// to tell "you lost the race" from "something unclassified went wrong". That is
+	// the distinction the whole recovery loop turns on.
+	codeClaimHeld
 	// codeOther carries an error the leader could not classify. It rebuilds to a
 	// plain error and is promoted to no sentinel at all.
 	codeOther
@@ -144,9 +179,10 @@ const (
 //
 // codeClosed is deliberately NOT retryable: a closed ledger never reopens, so
 // retrying it would spin to the bound against a condition no retry can repair.
-// codePoisonedJournal and codeReadTimeout are the leader's answers ABOUT THIS
-// OPERATION rather than statements about who leads, and codeOther is unclassified —
-// retrying any of them would be a guess.
+// codePoisonedJournal, codeReadTimeout and codeClaimHeld are the leader's answers
+// ABOUT THIS OPERATION rather than statements about who leads, and codeOther is
+// unclassified — retrying any of them would be a guess. A lost claim in particular
+// is settled: no retry repairs it, and retrying would spin to the bound.
 func (c errCode) retryable() bool {
 	return c == codeNotLeader || c == codeUnavailable
 }
@@ -165,6 +201,8 @@ func (c errCode) sentinel() error {
 		return ErrReadTimeout
 	case codeClosed:
 		return ErrClosed
+	case codeClaimHeld:
+		return ErrClaimHeld
 	case codeNone, codeOther:
 		return nil
 	default:
@@ -196,6 +234,8 @@ func classify(err error) (errCode, string) {
 		return codeReadTimeout, err.Error()
 	case errors.Is(err, ErrClosed):
 		return codeClosed, err.Error()
+	case errors.Is(err, ErrClaimHeld):
+		return codeClaimHeld, err.Error()
 	default:
 		return codeOther, err.Error()
 	}
@@ -322,9 +362,30 @@ func (l *Ledger) serveOne(ctx context.Context, req forwardRequest) forwardReply 
 		return forwardReply{Value: entry.Value, Present: present, Code: code, Message: message}
 	}
 
-	// opSave. declared() admits exactly two operations and opLoad is handled above,
-	// so this arm needs no default beside it.
-	index, err := l.appendLocal(ctx, Entry{Kind: KindSet, Path: req.Path, Value: req.Value})
+	if req.Op == opList {
+		entries, err := l.listLocal(ctx, req.Path)
+		code, message := classify(err)
+
+		return forwardReply{Entries: entries, Code: code, Message: message}
+	}
+
+	// opSave. declared() admits exactly three operations and the other two are handled
+	// above, so this arm needs no default beside it.
+	//
+	// THE KIND IS GUARDED HERE AND NEVER COERCED, the same way declared() guards the
+	// operation. The zero Kind is deliberately not a member, so a request decoded
+	// from zeroed or truncated bytes names no kind and is refused rather than
+	// silently becoming a KindSet assignment. The guard sits in this arm because
+	// this is the arm that consumes the field: opLoad carries no kind.
+	if !req.Kind.declared() {
+		code, message := classify(fmt.Errorf(
+			"ledger: forwarded save for %q names kind %d, which this build does not declare: %w",
+			req.Path, uint8(req.Kind), ErrPoisonedJournal))
+
+		return forwardReply{Code: code, Message: message}
+	}
+
+	index, err := l.appendLocal(ctx, Entry{Kind: req.Kind, Path: req.Path, Value: req.Value})
 	code, message := classify(err)
 
 	return forwardReply{Index: index, Code: code, Message: message}

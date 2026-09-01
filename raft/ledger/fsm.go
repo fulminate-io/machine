@@ -11,6 +11,7 @@ import (
 	"io"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/hashicorp/raft"
@@ -32,6 +33,13 @@ type fsm struct {
 	applied uint64
 	wake    chan struct{}
 	poison  error
+	// claims records which worker owns each datum under recovery. It is SEPARATE
+	// from values rather than a kind stored beside them, because Ledger.Get
+	// synthesizes its reply as a KindSet entry on the strength of the journal
+	// holding nothing else; a claim in values would make Get report a claim as an
+	// assignment. The cost of the separation is that claims are unreadable through
+	// Get, which is why Claimant exists.
+	claims map[string]string
 	// configuration and configurationIndex track the last membership this state
 	// machine applied. They live under the SAME mutex and are woken by the SAME
 	// broadcast channel as the applied index, which is what lets a membership
@@ -42,7 +50,7 @@ type fsm struct {
 }
 
 func newFSM() *fsm {
-	return &fsm{values: map[string]Entry{}, wake: make(chan struct{})}
+	return &fsm{values: map[string]Entry{}, claims: map[string]string{}, wake: make(chan struct{})}
 }
 
 // Apply commits one journal entry. It advances the tracked index on EVERY path,
@@ -68,6 +76,12 @@ func (f *fsm) applyEntry(index uint64, entry Entry) any {
 		return nil
 	case KindEpoch:
 		f.advance(index)
+
+		return nil
+	case KindClaim:
+		return f.claim(index, entry)
+	case KindRetire:
+		f.retire(index, entry)
 
 		return nil
 	default:
@@ -130,6 +144,54 @@ func (f *fsm) set(index uint64, entry Entry) {
 	f.advanceLocked(index)
 }
 
+// claim records the FIRST claimant of a datum and refuses every later one, which is
+// what a recovery race settles on. Entry.Value carries the claimant's identity.
+//
+// IT ADVANCES THE INDEX ON THE REFUSED PATH TOO, for the reason Apply's own doc
+// gives: a reader waiting on a refused claim must learn its fate rather than hang
+// forever on an index that will never arrive. The deferred advance is registered
+// after the deferred unlock so it runs FIRST, still holding the lock.
+//
+// RE-CLAIMING BY THE SAME OWNER RETURNS nil, and that is not a courtesy. The
+// forwarding loop retries an operation across a leadership change, so a claim that
+// refused its own winner on a retry would deny a worker the datum it already owns.
+func (f *fsm) claim(index uint64, entry Entry) error {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+	defer f.advanceLocked(index)
+
+	owner := string(entry.Value)
+	if held, ok := f.claims[entry.Path]; ok && held != owner {
+		return fmt.Errorf("ledger: %q is held by %q so %q cannot claim it: %w",
+			entry.Path, held, owner, ErrClaimHeld)
+	}
+	f.claims[entry.Path] = owner
+
+	return nil
+}
+
+// retire drops a completed datum's checkpoint AND its claim in ONE critical
+// section, which is what bounds both maps by the datums IN FLIGHT rather than by
+// every datum ever processed.
+//
+// DOING BOTH UNDER ONE LOCK IS THE WHOLE POINT, because each half alone is silently
+// wrong in its own direction: a claim retired while its checkpoint survives makes a
+// COMPLETED datum re-claimable, and a checkpoint retired while its claim survives
+// leaves a CLAIM NAMING NOTHING that the already-claimed filter honors forever.
+// Under one hold neither intermediate state is observable, because there is no
+// moment at which one exists.
+//
+// Retiring a datum that was never checkpointed is a deliberate no-op rather than a
+// swallowed failure: deleting an absent key changes nothing and nothing was lost.
+func (f *fsm) retire(index uint64, entry Entry) {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+
+	delete(f.values, entry.Path)
+	delete(f.claims, entry.Path)
+	f.advanceLocked(index)
+}
+
 // poisonAt records the first poison and advances past the entry that caused it.
 func (f *fsm) poisonAt(index uint64, err error) error {
 	f.mutex.Lock()
@@ -187,10 +249,56 @@ func (f *fsm) get(path string) (Entry, bool) {
 	return entry, ok
 }
 
+// list reports every journaled entry whose path carries the prefix, in sorted path
+// order so two nodes answering the same enumeration answer it identically.
+//
+// IT READS values AND NOT claims, which is the whole discrimination. A claim is not
+// a journaled value: enumeration exists so recovery can find CHECKPOINTS, and a
+// claim appearing among them would be read as a datum's own progress. Claim state
+// has its own reader.
+//
+// The result is allocated once with a length hint and filled under the read lock.
+// The walk is O(map) per call, bounded by retirement to the datums IN FLIGHT rather
+// than by every datum ever processed.
+func (f *fsm) list(prefix string) []Entry {
+	f.mutex.RLock()
+	defer f.mutex.RUnlock()
+
+	paths := make([]string, 0, len(f.values))
+	for path := range f.values {
+		if strings.HasPrefix(path, prefix) {
+			paths = append(paths, path)
+		}
+	}
+	slices.Sort(paths)
+
+	entries := make([]Entry, 0, len(paths))
+	for _, path := range paths {
+		entries = append(entries, f.values[path])
+	}
+
+	return entries
+}
+
+// claimOwner reports which worker holds a datum, and whether it is claimed at all.
+//
+// THE SECOND RETURN IS NOT REDUNDANT WITH AN EMPTY OWNER. A claim naming the empty
+// string is still a claim, and collapsing the two would make the already-claimed
+// filter read it as unclaimed and hand the datum to a second worker.
+func (f *fsm) claimOwner(datum string) (string, bool) {
+	f.mutex.RLock()
+	defer f.mutex.RUnlock()
+
+	owner, ok := f.claims[datum]
+
+	return owner, ok
+}
+
 // fsmSnapshot is the point-in-time copy Persist serializes. Its fields are
 // exported because gob is what writes them to the snapshot sink.
 type fsmSnapshot struct {
 	Values  map[string]Entry
+	Claims  map[string]string
 	Applied uint64
 }
 
@@ -206,14 +314,22 @@ var _ raft.FSMSnapshot = (*fsmSnapshot)(nil)
 //
 // No I/O happens here. Apply cannot run while Snapshot does, so anything expensive
 // belongs in Persist.
+//
+// IT NEEDS NO RETIREMENT LOGIC OF ITS OWN, and that is worth stating rather than
+// leaving to be inferred by a later reader who goes looking for it. Retirement
+// DELETES from the live maps, so copying them carries the post-retirement state
+// forward and a retired datum is simply absent. A second mechanism here could only
+// disagree with the first.
 func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
 	f.mutex.RLock()
 	defer f.mutex.RUnlock()
 
 	values := make(map[string]Entry, len(f.values))
 	maps.Copy(values, f.values)
+	claims := make(map[string]string, len(f.claims))
+	maps.Copy(claims, f.claims)
 
-	return &fsmSnapshot{Values: values, Applied: f.applied}, nil
+	return &fsmSnapshot{Values: values, Claims: claims, Applied: f.applied}, nil
 }
 
 // Persist writes the copied journal to the sink, canceling the sink on failure so
@@ -278,6 +394,14 @@ func (f *fsm) replace(restored fsmSnapshot) {
 	f.values = restored.Values
 	if f.values == nil {
 		f.values = map[string]Entry{}
+	}
+	// A claim that vanished at a snapshot boundary would let two workers own one
+	// datum, so claims are installed on the same terms as values — empty rather than
+	// nil when the snapshot carried none, since a nil map refuses the writes the
+	// claim arm makes.
+	f.claims = restored.Claims
+	if f.claims == nil {
+		f.claims = map[string]string{}
 	}
 	f.poison = validateRestored(f.values)
 	f.advanceLocked(restored.Applied)

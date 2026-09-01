@@ -18,6 +18,10 @@ var (
 	// returned rather than skipped: a peer that ignored an entry it did not
 	// understand would apply a different sequence than its neighbors and diverge.
 	ErrPoisonedJournal = errors.New("ledger: journal entry carries an unknown kind")
+	// ErrClaimHeld reports a datum another worker already claimed. It is the answer
+	// to THIS operation rather than a transient condition, so a caller that receives
+	// it has lost the race and must not retry: no retry repairs it.
+	ErrClaimHeld = errors.New("ledger: the datum is already claimed by another worker")
 )
 
 // Kind tags what a journal entry asks the state machine to do. The zero value is
@@ -32,6 +36,16 @@ const (
 	// the state machine applies, which is what lets the first read of that term
 	// converge; see the package comment.
 	KindEpoch
+	// KindClaim names Entry.Path's claimant in Entry.Value. It is NOT an assignment:
+	// the FIRST claim of a datum wins and every later one by a different owner is
+	// refused with ErrClaimHeld, which is what makes recovery ownership settle
+	// through log order rather than through last-write-wins.
+	KindClaim
+	// KindRetire drops Entry.Path's checkpoint AND its claim together. It carries no
+	// value. Retiring a datum that was never checkpointed is not an error: the
+	// retirement is driven by node completion, which fires whether or not a flow
+	// declared a checkpoint, and the post-state is identical either way.
+	KindRetire
 )
 
 // declared reports whether this build knows how to interpret a kind.
@@ -41,7 +55,23 @@ const (
 // entries arriving by snapshot — so a kind cannot be admitted on one path while the
 // other refuses it.
 func (k Kind) declared() bool {
-	return k == KindSet || k == KindEpoch
+	return k == KindSet || k == KindEpoch || k == KindClaim || k == KindRetire
+}
+
+// forwards reports whether Append sends this kind to the leader rather than
+// appending it locally.
+//
+// THIS IS THE ONE PLACE THE FORWARDING SET IS ENUMERATED, for the reason
+// errCode.retryable() gives about its own set: written inline at the call site, a
+// new kind becomes an invisible consequence of a comparison rather than a one-line
+// decision in a named place — and a kind that fails to forward refuses on every
+// follower silently, with no gate that would notice.
+//
+// KindEpoch is excluded because it is LEADER-INTERNAL: appendEpoch applies it
+// through raft directly and it never reaches Append. The other three are operations
+// a non-leader worker genuinely originates.
+func (k Kind) forwards() bool {
+	return k == KindSet || k == KindClaim || k == KindRetire
 }
 
 // Entry is one journal record. It is the replicated vocabulary, so every field

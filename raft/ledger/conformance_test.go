@@ -30,6 +30,12 @@ import (
 // LocalID is pinned on the same terms: a caller that carries its own copy of this
 // node's identity reads this one to check the two agree, and a caller that cannot
 // read it can only assume they do.
+// List and Claimant are pinned on those same terms, and for a sharper reason: the
+// recovery path is REQUIRED to use both. Enumeration is how an orphan is found at
+// all, and Claimant is the only way to observe a held claim — Get reports one
+// ABSENT, so an already-claimed filter reading through Get is inert and hands every
+// claimed datum out a second time. A method whose absence makes a filter silently
+// pass everything is exactly the kind that must not drift.
 type ledgerSurface = interface {
 	Close() error
 	Store() *Store
@@ -38,6 +44,8 @@ type ledgerSurface = interface {
 	LocalID() string
 	Append(context.Context, Entry) (uint64, error)
 	Get(context.Context, string) (Entry, bool, error)
+	List(context.Context, string) ([]Entry, error)
+	Claimant(context.Context, string) (string, bool, error)
 	Restore(*raft.SnapshotMeta, io.Reader, time.Duration) error
 }
 

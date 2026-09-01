@@ -91,7 +91,7 @@ func TestUndeclaredForwardOpIsRefused(t *testing.T) {
 	// CONTROL: a DECLARED operation on the same path over the same stream IS served,
 	// so the refusals above are about the operation rather than about a dead stream.
 	reply := forwardRoundTrip(t, l, mux.Addr().String(),
-		forwardRequest{Op: opSave, Path: path, Value: []byte("landed")})
+		forwardRequest{Op: opSave, Kind: KindSet, Path: path, Value: []byte("landed")})
 	if err := reply.rebuild(); err != nil {
 		t.Fatalf("CONTROL FAILED: a declared save over the same stream: %v", err)
 	}
@@ -210,13 +210,13 @@ func TestAForwardedOpOnANonLeaderIsRefusedNotRelayed(t *testing.T) {
 	// CONTROL FIRST: the same dial from the same node to the LEADER is served, so a
 	// refusal below is about the receiver rather than about a broken stream.
 	control := forwardRoundTrip(t, follower.ledger, leader.mux.Addr().String(),
-		forwardRequest{Op: opSave, Path: "heap/norelay-control", Value: []byte("v")})
+		forwardRequest{Op: opSave, Kind: KindSet, Path: "heap/norelay-control", Value: []byte("v")})
 	if control.Code != codeNone {
 		t.Fatalf("CONTROL FAILED: a forwarded save to the leader replied with code %d (%v)", control.Code, control.rebuild())
 	}
 
 	reply := forwardRoundTrip(t, follower.ledger, follower.mux.Addr().String(),
-		forwardRequest{Op: opSave, Path: "heap/norelay", Value: []byte("v")})
+		forwardRequest{Op: opSave, Kind: KindSet, Path: "heap/norelay", Value: []byte("v")})
 	if reply.Code != codeNotLeader {
 		t.Fatalf("a forwarded op on a non-leader replied with code %d, want codeNotLeader; it was relayed onward rather than refused", reply.Code)
 	}
@@ -559,7 +559,7 @@ func TestSelfResolutionArmIsBoundedAndDoesNotHotLoop(t *testing.T) {
 	start := time.Now()
 
 	go func() {
-		_, err := l.forward(ctx, forwardRequest{Op: opSave, Path: "heap/self", Value: []byte("v")}, local)
+		_, err := l.forward(ctx, forwardRequest{Op: opSave, Kind: KindSet, Path: "heap/self", Value: []byte("v")}, local)
 		done <- err
 	}()
 

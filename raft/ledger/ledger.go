@@ -802,9 +802,9 @@ func (l *Ledger) getLocal(ctx context.Context, path string) (Entry, bool, error)
 	return entry, ok, nil
 }
 
-// Append replicates one KindSet entry through the flow group's leader and returns THE
-// JOURNAL INDEX it landed at, whether or not this node leads. An entry of any other
-// kind is appended locally and still refuses on a follower; see below.
+// Append replicates one KindSet, KindClaim or KindRetire entry through the flow group's
+// leader and returns THE JOURNAL INDEX it landed at, whether or not this node leads. An
+// entry of any other kind is appended locally and still refuses on a follower; see below.
 //
 // IT TRIES LOCALLY FIRST AND FORWARDS ONLY WHEN THIS NODE IS NOT THE LEADER, so a
 // leader appending its own entries takes no detour and opens no connection. When the
@@ -812,25 +812,33 @@ func (l *Ledger) getLocal(ctx context.Context, path string) (Entry, bool, error)
 // Config.ForwardTimeout elapses, at which point it fails with ErrForwardBoundExceeded
 // naming the flow, the attempts made, the bound and the last condition observed.
 //
-// IT FORWARDS A KindSet ENTRY AND ONLY A KindSet ENTRY. The wire carries a path and an
-// opaque value under one save operation, which the leader applies as a KindSet
-// assignment; no other kind has a representation on it. An entry of any other kind is
-// appended locally instead, and so still refuses on a follower. Rewriting one kind into
-// another on the leader would be a coercion of bad input, and carrying a kind the
-// leader's build may not declare would poison the journal it lands in. KindEpoch is
-// leader-internal in any case — appendEpoch applies it through raft directly and never
-// arrives here.
+// IT FORWARDS THREE KINDS: KindSet, KindClaim and KindRetire. All three are operations
+// a non-leader worker genuinely originates — it checkpoints its own datum, claims its
+// own recovery and retires its own completed work — so a kind that stayed leader-local
+// would refuse on every follower, silently. The wire carries the KIND beside the path
+// and the opaque value, and the leader applies the kind it was given: rewriting one kind
+// into another there would be a coercion of bad input, so an undeclared kind is REFUSED
+// on arrival rather than read as the first arm. An entry of any other kind is appended
+// locally instead, and so still refuses on a follower. KindEpoch is leader-internal in
+// any case — appendEpoch applies it through raft directly and never arrives here.
 //
-// THE RETRY IS SAFE BECAUSE THE OPERATION IS IDEMPOTENT: a KindSet entry assigns one
-// value to one path, so replaying it produces the same state. That holds under the
-// single-writer-per-datum premise this package already documents; under two writers to
-// one path a retry would be a lost-update race, which is the same premise the
-// non-atomic Store.Update already rests on rather than a new one introduced here.
+// THE RETRY IS SAFE BECAUSE EVERY FORWARDED OPERATION IS IDEMPOTENT, and each for its
+// own reason. A KindSet entry assigns one value to one path, so replaying it produces
+// the same state; that holds under the single-writer-per-datum premise this package
+// already documents, and under two writers to one path a retry would be a lost-update
+// race, which is the same premise the non-atomic Store.Update already rests on rather
+// than a new one introduced here. A KindRetire deletes, and deleting an already-retired
+// datum reaches the same post-state. A KindClaim is idempotent FOR ITS OWN WINNER by
+// construction — the claim arm returns nil when the held owner is the one re-claiming —
+// which is what makes a retry across a leadership change safe rather than a way for a
+// worker to lose the datum it already owns. A claim LOST to another worker is not
+// retried at all: it rebuilds to ErrClaimHeld, which is deliberately outside the
+// retryable set.
 func (l *Ledger) Append(ctx context.Context, entry Entry) (uint64, error) {
 	if ctx == nil {
 		return 0, ErrNilContext
 	}
-	if entry.Kind != KindSet {
+	if !entry.Kind.forwards() {
 		return l.appendLocal(ctx, entry)
 	}
 
@@ -840,7 +848,8 @@ func (l *Ledger) Append(ctx context.Context, entry Entry) (uint64, error) {
 
 		return forwardReply{Index: index, Code: code, Message: message}
 	}
-	reply, err := l.forward(ctx, forwardRequest{Op: opSave, Path: entry.Path, Value: entry.Value}, local)
+	reply, err := l.forward(ctx,
+		forwardRequest{Op: opSave, Kind: entry.Kind, Path: entry.Path, Value: entry.Value}, local)
 	if err != nil {
 		return 0, err
 	}
@@ -889,6 +898,89 @@ func (l *Ledger) Get(ctx context.Context, path string) (Entry, bool, error) {
 	// The journal only ever stores KindSet entries keyed by their own path, so this
 	// is the entry the state machine holds rather than an approximation of it.
 	return Entry{Kind: KindSet, Path: path, Value: reply.Value}, true, nil
+}
+
+// listLocal enumerates under a prefix on THIS node, through the same barrier every
+// other leader-local read uses. It is what the forwarding handler serves.
+func (l *Ledger) listLocal(ctx context.Context, prefix string) ([]Entry, error) {
+	if ctx == nil {
+		return nil, ErrNilContext
+	}
+	if l.closed.Load() {
+		return nil, ErrClosed
+	}
+
+	if err := l.barrier(ctx); err != nil {
+		return nil, err
+	}
+
+	return l.fsm.list(prefix), nil
+}
+
+// List returns every journaled entry whose path carries the prefix, in sorted path
+// order. It FORWARDS to the flow group's leader when this node does not lead, so a
+// follower's enumeration agrees with the leader's rather than reporting whatever this
+// node happens to have applied.
+//
+// THE LINEARIZABILITY IS THE POINT AND NOT A DEFAULT INHERITED FROM Get. Recovery
+// reads this to decide whether a datum is ORPHANED. A stale answer means one of two
+// concrete harms: claiming a datum whose worker is alive and still writing it, or
+// leaving a dead worker's datum unclaimed forever. A documented non-linearizable local
+// read would be cheaper and is deliberately NOT what this does.
+//
+// IT ENUMERATES CHECKPOINTS AND NEVER CLAIMS. The two live in disjoint state on the
+// state machine, and a claim surfacing here would be read as a datum's own progress.
+// Claim state is read through Claimant.
+//
+// Like Get it is bounded by Config.ForwardTimeout and tries locally first, so a
+// leader's own enumeration opens no connection.
+func (l *Ledger) List(ctx context.Context, prefix string) ([]Entry, error) {
+	if ctx == nil {
+		return nil, ErrNilContext
+	}
+
+	local := func() forwardReply {
+		entries, err := l.listLocal(ctx, prefix)
+		code, message := classify(err)
+
+		return forwardReply{Entries: entries, Code: code, Message: message}
+	}
+	reply, err := l.forward(ctx, forwardRequest{Op: opList, Path: prefix}, local)
+	if err != nil {
+		return nil, err
+	}
+	if err := reply.rebuild(); err != nil {
+		return nil, err
+	}
+
+	return reply.Entries, nil
+}
+
+// Claimant reports which worker holds a datum and whether it is claimed at all.
+//
+// IT IS THE ONLY WAY TO OBSERVE CLAIM STATE. Claims are kept apart from journaled
+// values so that Get's reply stays a truthful KindSet entry, and the cost of that
+// separation is exactly this: a held claim is INVISIBLE through Get, which reports it
+// absent. An already-claimed filter built on Get is therefore inert, and this
+// accessor is what makes it real.
+//
+// IT READS THROUGH THE SAME BARRIER Get DOES, so its consistency guarantee is Get's
+// rather than a weaker one: the term is proved against a quorum and the state machine
+// carried to the commit index observed after that proof.
+func (l *Ledger) Claimant(ctx context.Context, datum string) (string, bool, error) {
+	if ctx == nil {
+		return "", false, ErrNilContext
+	}
+	if l.closed.Load() {
+		return "", false, ErrClosed
+	}
+
+	if err := l.barrier(ctx); err != nil {
+		return "", false, err
+	}
+	owner, held := l.fsm.claimOwner(datum)
+
+	return owner, held, nil
 }
 
 // enqueueTimeout turns the caller's deadline into the bound raft's Apply takes on

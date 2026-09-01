@@ -20,7 +20,7 @@ import (
 var contractDocs = map[string][]string{
 	"package ledger":            {"forwards", "bounded", "ErrForwardBoundExceeded"},
 	"ErrNotLeader":              {"leader-local", "forward"},
-	"Ledger.Append":             {"forwards", "KindSet"},
+	"Ledger.Append":             {"forwards", "KindSet", "KindClaim", "KindRetire"},
 	"Ledger.Get":                {"forwards", "ForwardTimeout", "ErrForwardBoundExceeded"},
 	"Ledger.getLocal":           {"leader-local", "refuse"},
 	"Store":                     {"not atomic", "single-writer-per-datum", "computes at the caller", "ErrForwardBoundExceeded"},
@@ -37,10 +37,13 @@ var contractDocs = map[string][]string{
 // still satisfy revive's exported rule — a registry that omitted them would pass green
 // while neither exported doc mentioned forwarding, the bound, or its sentinel.
 //
-// APPEND'S SECOND TOKEN IS NOT DECORATIVE EITHER. It forwards a KindSet entry and ONLY
-// a KindSet entry; with only "forwards" required, a doc reading "replicates one entry
+// APPEND'S KIND TOKENS ARE NOT DECORATIVE EITHER. It forwards THREE kinds and only
+// those three; with only "forwards" required, a doc reading "replicates one entry
 // ... whether or not this node leads" satisfies the gate while being FALSE for every
-// other kind, leaving the restriction in a body comment godoc never renders.
+// other kind, leaving the restriction in a body comment godoc never renders. Each
+// kind is named separately because a doc that listed two of the three would satisfy
+// a single combined token while leaving the third undocumented — and an undocumented
+// forwarding kind is exactly the half that refuses on a follower in silence.
 
 // retiredInterimPhrases are claims no production doc comment may still make.
 //
