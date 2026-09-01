@@ -12,6 +12,7 @@ var clauseBits = map[tokenKind]uint8{
 	kwWrites:     1 << 1,
 	kwOver:       1 << 2,
 	kwCheckpoint: 1 << 3,
+	kwIdempotent: 1 << 6,
 	kwOn:         1 << 4,
 	kwNote:       1 << 5,
 }
@@ -22,6 +23,7 @@ var clauseParsers = map[tokenKind]func(*parser, *Clauses){
 	kwWrites:     (*parser).clauseWrites,
 	kwOver:       (*parser).clauseOver,
 	kwCheckpoint: (*parser).clauseCheckpoint,
+	kwIdempotent: (*parser).clauseIdempotent,
 	kwOn:         (*parser).clauseOnError,
 	kwNote:       (*parser).clauseNote,
 }
@@ -114,6 +116,28 @@ func (p *parser) clauseCheckpoint(cl *Clauses) {
 		return
 	}
 	p.diagHeref("\"checkpoint\" takes no operand, but %s follows it", describe(p.tok))
+	p.skipToEndOfLine()
+}
+
+// clauseIdempotent parses the bare `idempotent` clause, which marks the node SAFE
+// TO RUN AGAIN on the same datum and thereby selects the checkpoint anchor.
+//
+// ITS ZERO ARITY IS THE SAME PARSE RULE clauseCheckpoint states, for the same
+// reason: the parser records only its position, and a clause loop that simply
+// continued after a bare keyword would read an operand as the start of the next
+// clause and report nothing at all.
+func (p *parser) clauseIdempotent(cl *Clauses) {
+	at := p.tok.pos
+	p.advance()
+	cl.Idempotent = &at
+
+	// What may legally follow is FIRST(Clauses) — another clause — or
+	// FOLLOW(Clauses), a newline from the statement productions and an opening
+	// brace from the switch production.
+	if p.at(tokNewline) || p.at(tokEOF) || p.at(tokLBrace) || clauseStarters[p.tok.kind] {
+		return
+	}
+	p.diagHeref("\"idempotent\" takes no operand, but %s follows it", describe(p.tok))
 	p.skipToEndOfLine()
 }
 

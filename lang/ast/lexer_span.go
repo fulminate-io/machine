@@ -47,6 +47,7 @@ var spanStopKeywords = map[string]bool{
 	textWrites:     true,
 	textOver:       true,
 	textCheckpoint: true,
+	textIdempotent: true,
 	textOn:         true,
 	textNote:       true,
 	textElse:       true,

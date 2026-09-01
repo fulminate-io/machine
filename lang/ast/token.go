@@ -59,23 +59,25 @@ const (
 	kwClone
 	kwElse
 	kwCheckpoint
+	kwIdempotent
 	kwFunc
 )
 
 // The RESERVED spellings the Go span scanner stops at, named because two tables
 // state them: the keyword inventory below, and the scanner's stop set.
 //
-// Six of them are the CLAUSE keywords, which end a span because a clause follows
-// it. `else` is the seventh and is there for a different reason: reserving it
+// Seven of them are the CLAUSE keywords, which end a span because a clause follows
+// it. `else` is the eighth and is there for a different reason: reserving it
 // makes an else arm unmatchable as an ordinary switch arm, which is what lets
 // the grammar's trailing option express that an else must come last. The
-// distinction between these seven and "any keyword" is still load bearing —
+// distinction between these eight and "any keyword" is still load bearing —
 // `func` in particular must NOT join them.
 const (
 	textReads      = "reads"
 	textWrites     = "writes"
 	textOver       = "over"
 	textCheckpoint = "checkpoint"
+	textIdempotent = "idempotent"
 	textOn         = "on"
 	textNote       = "note"
 	textElse       = "else"
@@ -115,6 +117,7 @@ var keywords = map[string]tokenKind{
 	"clone":        kwClone,
 	textElse:       kwElse,
 	textCheckpoint: kwCheckpoint,
+	textIdempotent: kwIdempotent,
 	"func":         kwFunc,
 }
 

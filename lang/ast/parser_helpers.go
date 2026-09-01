@@ -46,11 +46,11 @@ var entryKeywords = map[tokenKind]bool{
 	kwTee: true, kwSink: true, kwDrop: true, kwLoop: true, kwSend: true, kwUse: true,
 }
 
-// clauseStarters are the six keywords that may open a trailing clause, and so
-// the six that let a statement continue onto the next line.
+// clauseStarters are the seven keywords that may open a trailing clause, and so
+// the seven that let a statement continue onto the next line.
 var clauseStarters = map[tokenKind]bool{
 	kwReads: true, kwWrites: true, kwOver: true,
-	kwCheckpoint: true, kwOn: true, kwNote: true,
+	kwCheckpoint: true, kwIdempotent: true, kwOn: true, kwNote: true,
 }
 
 // advance fetches the next token together with the position just past it.

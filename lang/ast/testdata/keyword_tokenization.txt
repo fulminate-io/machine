@@ -1,9 +1,14 @@
 # Keyword tokenization record for the flow language.
 #
 # Every keyword in the language is a SINGLE token under both of the encodings a
-# contemporary model is decoded with. A keyword that fragments costs the model
-# probability mass at every occurrence and makes constrained decoding harder, so
-# the inventory is measured rather than assumed.
+# contemporary model is decoded with, EXCEPT FOR RECORDED EXEMPTIONS. A keyword
+# that fragments costs the model probability mass at every occurrence and makes
+# constrained decoding harder, so the inventory is measured rather than assumed.
+#
+# AN EXEMPTION PINS THE MEASUREMENT; IT DOES NOT STOP MEASURING. Each exempted
+# keyword names its measured counts and the ruling that admitted it, and it still
+# pays the fragmentation at every occurrence — the invariant holds with one
+# recorded exception rather than not holding.
 #
 # tokenizer: tiktoken 0.14.0 under python 3.14.3
 # encodings: o200k_base, cl100k_base
@@ -44,4 +49,5 @@ writes o200k_base=1 cl100k_base=1
 clone o200k_base=1 cl100k_base=1
 else o200k_base=1 cl100k_base=1
 checkpoint o200k_base=1 cl100k_base=1
+idempotent o200k_base=3 cl100k_base=3
 func o200k_base=1 cl100k_base=1

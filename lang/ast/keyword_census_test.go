@@ -21,11 +21,11 @@ func TestKeywordInventoryIsExactlyTheRuledSet(t *testing.T) {
 		"flow", "note", "import", "state", "var", "const", "param",
 		"on", "source", "transform", "branch", "switch", "tee", "sink",
 		"drop", "loop", "send", "use", "from", "over", "reads", "writes",
-		"clone", "else", "checkpoint", "func",
+		"clone", "else", "checkpoint", "idempotent", "func",
 	}
 
-	if len(ruledInventory) != 26 {
-		t.Fatalf("the ruled inventory is 26 spellings; this test states %d", len(ruledInventory))
+	if len(ruledInventory) != 27 {
+		t.Fatalf("the ruled inventory is 27 spellings; this test states %d", len(ruledInventory))
 	}
 
 	table := make([]string, 0, len(keywords))

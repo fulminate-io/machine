@@ -6,6 +6,7 @@ package ast
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -212,6 +213,53 @@ func TestParseCheckpointIsBare(t *testing.T) {
 	}
 
 	diags := diagnosticsFor(t, "flow c\nsource ingest Poll\ntransform t Foo from ingest checkpoint enriched\n")
+	requireDiagnostic(t, diags, "takes no operand")
+}
+
+// TestParseIdempotentIsBare covers the marker that SELECTS THE CHECKPOINT ANCHOR,
+// in the three positions that can each fail on their own.
+//
+// THE AFTER-A-GO-SPAN ARM IS THE ONE THAT EARNS ITS PLACE. Two tables state the
+// reserved spellings — the keyword inventory and the Go span scanner's stop set —
+// and a keyword present in the first but missing from the second is swallowed into
+// the preceding span with NO diagnostic at all. The clause is dropped in silence
+// and the node falls back to the unmarked completion default, which is the opposite
+// of what the author declared. No landed census exercises that position, and
+// whether the corpus fixture happens to is decided by where an implementer puts the
+// token, so it is pinned here instead of left to chance.
+func TestParseIdempotentIsBare(t *testing.T) {
+	file := mustParse(t, "flow c\nsource ingest Poll\ntransform t Foo from ingest idempotent\n")
+	stmt := flowAt(t, file, 0).Body[1].(TransformStmt)
+	if stmt.Idempotent == nil {
+		t.Fatalf("the bare idempotent clause was not recorded")
+	}
+	if stmt.Idempotent.Line != 3 {
+		t.Errorf("idempotent recorded at %s, want line 3", stmt.Idempotent)
+	}
+
+	// AFTER A GO SPAN: the span must STOP at the marker rather than swallowing it.
+	spanned := mustParse(t,
+		"flow c\nsource ingest Poll\ntransform t Foo from ingest over ratelimit.New(10) idempotent\n")
+	spannedStmt := flowAt(t, spanned, 0).Body[1].(TransformStmt)
+	if spannedStmt.Idempotent == nil {
+		t.Fatal("idempotent following a Go span was not recorded: the span scanner swallowed the marker, " +
+			"so the clause is dropped in silence and the node falls back to the unmarked default")
+	}
+	// CONTROL: the span itself survives and ends at the expression, so the stop did
+	// not eat the Go code it was scanning.
+	if spannedStmt.Over == nil {
+		t.Fatal("CONTROL FAILED: the over clause was lost entirely, so this arm is not measuring the stop set")
+	}
+	if !strings.Contains(spannedStmt.Over.Text, "ratelimit.New(10)") {
+		t.Errorf("the Go span reads %q, want it to end at the expression", spannedStmt.Over.Text)
+	}
+	if strings.Contains(spannedStmt.Over.Text, textIdempotent) {
+		t.Errorf("the Go span swallowed the marker: %q", spannedStmt.Over.Text)
+	}
+	t.Logf("the marker after a Go span is recorded and the span ends at %q", spannedStmt.Over.Text)
+
+	// AN OPERAND IS A DIAGNOSTIC, on the same zero-arity rule checkpoint states.
+	diags := diagnosticsFor(t, "flow c\nsource ingest Poll\ntransform t Foo from ingest idempotent twice\n")
 	requireDiagnostic(t, diags, "takes no operand")
 }
 

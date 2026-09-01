@@ -389,7 +389,7 @@ func (c *symbolCollector) armTargets(i int, s ast.SwitchStmt) {
 }
 
 // clauses tables the three name-bearing clauses every clause-bearing shape
-// carries. Over, Checkpoint, OnError and Note name no flow-level names.
+// carries. Over, Checkpoint, Idempotent, OnError and Note name no flow-level names.
 func (c *symbolCollector) clauses(i int, cl ast.Clauses) {
 	c.consumeEach(i, cl.From)
 	refEach(c.flow.Reads, i, cl.Reads)

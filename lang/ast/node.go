@@ -80,10 +80,16 @@ func (GoSpan) isNode() {}
 // Checkpoint is a position rather than a bool because the clause takes no
 // arguments in v1, so its presence is the whole payload — but a bool would throw
 // away the one thing an editor and the analysis engine need, which is where the
-// clause sits. Nil means absent. What the clause MEANS, which the parser does
-// not act on: the recovery ledger records the node's completion with the datum's
-// envelope, and implicit checkpoints at flow ingress and remote-edge boundaries
-// exist regardless.
+// clause sits. Nil means absent. Idempotent is a position for the same reason and
+// on the same terms.
+//
+// What the clauses MEAN, which the parser does not act on: Idempotent SELECTS THE
+// ANCHOR. The recovery ledger records an UNMARKED node's COMPLETION with the
+// datum's envelope, after its function returns, and resume re-injects that record
+// into the successors WITHOUT re-running the node. A MARKED node is recorded at its
+// ARRIVAL instead, before its function runs, and resume re-runs the node — which is
+// safe precisely because the marker declares it so. Implicit checkpoints at flow
+// ingress and remote-edge boundaries exist regardless.
 //
 // There is deliberately NO Clone field here. `clone` is a VAR-DECLARATION
 // clause, not a statement clause: cloning is a per-traversal concern, and a var
@@ -94,6 +100,7 @@ type Clauses struct {
 	Writes     []Ident
 	Over       *GoSpan
 	Checkpoint *Position
+	Idempotent *Position
 	OnError    *GoSpan
 	Note       *NoteBlock
 }

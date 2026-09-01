@@ -943,7 +943,7 @@ func parserOnlyExemptions(t *testing.T) []string {
 // TestGrammarFirstAndFollowSets pins the two sets the goSpan stop-set derivation
 // turns on, both computed by fixpoint rather than read off a production.
 //
-// FIRST(Clauses) IS SEVEN MEMBERS, NOT SIX. The six clause keywords are the
+// FIRST(Clauses) IS EIGHT MEMBERS, NOT SEVEN. The seven clause keywords are the
 // obvious part; `newline` is contributed by the `[ newline ]` prefix that every
 // Clauses alternative carries, which is what makes a clause able to continue
 // onto the next line. Counting only the keywords is the natural mistake.
@@ -952,7 +952,7 @@ func TestGrammarFirstAndFollowSets(t *testing.T) {
 
 	wantFirst := kindSet{
 		kwReads: true, kwWrites: true, kwOver: true,
-		kwCheckpoint: true, kwOn: true, kwNote: true,
+		kwCheckpoint: true, kwIdempotent: true, kwOn: true, kwNote: true,
 		tokNewline: true,
 	}
 	gotFirst := sets.first["Clauses"]
