@@ -42,6 +42,7 @@ type config struct {
 	fifo           bool
 	maxConcurrency int
 	store          Store
+	journal        Journal
 	handler        ErrorHandler[any]
 	tracerProvider trace.TracerProvider
 	meterProvider  metric.MeterProvider
