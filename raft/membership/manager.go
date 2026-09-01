@@ -43,6 +43,22 @@ var (
 	// ErrNotStaged reports a join whose node never appeared in the leader's
 	// committed configuration.
 	ErrNotStaged = errors.New("membership: the joiner is absent from the committed configuration")
+	// ErrIdentityDiverged refuses a ledger whose raft server id is not this
+	// manager's node id, naming both values.
+	//
+	// IT CANNOT BE A validate REFUSAL, and that is why it is declared here rather
+	// than beside ErrConfigMissing's use: at validate time there is no LocalID to
+	// compare against, because Config.Open has not run and this package reaches a
+	// ledger's configuration through nothing else.
+	//
+	// TWO AUTHORITIES STAMP ONE IDENTITY. Config.Node stamps every signal this
+	// package publishes; the ledger's LocalID stamps the raft server id and
+	// therefore every entry in the configuration. Diverged, this node bootstraps a
+	// group under one and evaluates its own membership under the other — so the
+	// self-exclusion in noteHealth never matches and the leader publishes peer
+	// signals naming itself, and the placement rule fails later with a message
+	// that points at suffrage rather than at the identity.
+	ErrIdentityDiverged = errors.New("membership: the ledger's raft server id is not this manager's node id")
 )
 
 const (
@@ -72,6 +88,11 @@ type Config struct {
 	// EPHEMERAL BY CONSTRUCTION: under a plain Deployment no per-replica value
 	// survives a restart, so a restarted instance is a NEW member and the old one
 	// is reconciled by eviction rather than resumed.
+	//
+	// IT MUST EQUAL THE LocalID OF EVERY LEDGER Open RETURNS. The two are supplied
+	// separately and stamp different things — this one stamps the signals this
+	// package publishes, the ledger's stamps the raft configuration — so a
+	// disagreement is refused with ErrIdentityDiverged rather than run.
 	Node string
 	// Advertise is what peers dial — the pod IP, because only a StatefulSet has
 	// per-pod DNS and the design must work under a plain Deployment.
@@ -94,7 +115,8 @@ type Config struct {
 	// state where a node cannot tell "nobody hosts this flow yet" from "I have
 	// not heard from everyone yet".
 	Expect int
-	// Open opens one flow's ledger. Required whenever Flows is non-empty.
+	// Open opens one flow's ledger. Required whenever Flows is non-empty, and the
+	// ledger it returns must report Node as its raft server id.
 	Open OpenFunc
 	// Autopilot overrides the promotion thresholds and the reconcile cadence.
 	Autopilot AutopilotTuning

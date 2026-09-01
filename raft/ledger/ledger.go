@@ -681,6 +681,15 @@ func (l *Ledger) Restore(meta *raft.SnapshotMeta, reader io.Reader, timeout time
 // Flow reports the flow this ledger replicates.
 func (l *Ledger) Flow() string { return l.cfg.Flow }
 
+// LocalID reports the raft server id this ledger runs under.
+//
+// IT EXISTS BECAUSE A CALLER THAT ALSO CARRIES AN IDENTITY HAS TO BE ABLE TO
+// CHECK THE TWO AGREE. This id stamps every entry in the configuration, so a
+// caller holding a second copy of "who this node is" and no way to read this one
+// can only assume the two match — and a caller that assumes it runs wrong rather
+// than refusing.
+func (l *Ledger) LocalID() string { return l.cfg.LocalID }
+
 // Configuration reports the membership this node's state machine has applied and
 // the index it landed at.
 //

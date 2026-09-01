@@ -257,6 +257,200 @@ func TestAFlowNeitherBootstrappedNorReachableIsAnError(t *testing.T) {
 	}
 }
 
+// newIdentityNode builds a worker whose MANAGER node id and whose LEDGER raft
+// server id are supplied SEPARATELY, which is exactly how a caller supplies them
+// today: membership reaches a ledger only through Config.Open, which builds the
+// ledger.Config out of this package's sight. Passing the same string twice is the
+// agreed shape; passing two different ones is the divergence the guard refuses.
+func newIdentityNode(t *testing.T, node, ledgerID string, flows []string) *clusterNode {
+	t.Helper()
+	mux, err := transport.New(transport.Config{
+		BindAddr:         "127.0.0.1:0",
+		HandshakeTimeout: 2 * time.Second,
+		RPCTimeout:       2 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("transport.New: %v", err)
+	}
+	addr := mux.Addr().String()
+	mgr, err := New(Config{
+		Node: node, Advertise: addr, Mux: mux, Logger: hclog.NewNullLogger(), Flows: flows,
+		Open: func(flow string) (*ledger.Ledger, error) {
+			return ledger.Open(ledger.Config{Flow: flow, LocalID: ledgerID, Mux: mux})
+		},
+	})
+	if err != nil {
+		_ = mux.Close()
+		t.Fatalf("membership.New(%s): %v", node, err)
+	}
+	t.Cleanup(func() {
+		_ = mgr.Close()
+		_ = mux.Close()
+	})
+	return &clusterNode{mgr: mgr, mux: mux, id: node, addr: addr}
+}
+
+// TestALedgerWhoseIdentityDisagreesWithTheManagerIsRefused gates the first of the
+// two open sites. Config.Node stamps every signal this package publishes and the
+// ledger's LocalID stamps every entry in the configuration; supplied separately
+// and left to agree by luck, a node bootstraps a group under one identity and
+// evaluates its own membership under the other.
+func TestALedgerWhoseIdentityDisagreesWithTheManagerIsRefused(t *testing.T) {
+	node := newIdentityNode(t, "a-node", "someone-else", []string{"alpha"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	err := node.mgr.Start(ctx)
+	if err == nil {
+		t.Fatal("Start accepted a ledger running under a raft server id this manager does not use: the node " +
+			"would bootstrap under one identity and evaluate its own membership under the other")
+	}
+	if !errors.Is(err, ErrIdentityDiverged) {
+		t.Fatalf("err = %v, want ErrIdentityDiverged", err)
+	}
+	// BOTH VALUES, because an operator supplied them as two separate fields and a
+	// refusal naming neither is one they cannot act on.
+	if !strings.Contains(err.Error(), "someone-else") || !strings.Contains(err.Error(), "a-node") {
+		t.Fatalf("the refusal %q names fewer than both values: the operator supplied ledger.Config.LocalID "+
+			"and membership Config.Node separately and has to be told which two disagree", err)
+	}
+	if _, adopted := node.mgr.Ledger("alpha"); adopted {
+		t.Fatal("the refused flow was adopted anyway: a refusal that still hosts the flow refuses nothing")
+	}
+	// THE REFUSED LEDGER WAS CLOSED. An open one holds the flow's group id bound on
+	// the mux, so if the guard leaked it this second open fails with a bind refusal
+	// naming an unrelated cause — which is what an operator would then chase.
+	second, openErr := ledger.Open(ledger.Config{Flow: "alpha", LocalID: "a-node", Mux: node.mux})
+	if openErr != nil {
+		t.Fatalf("re-opening the flow after the refusal: %v — the refused ledger was left holding the "+
+			"flow's group id on the mux", openErr)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+
+	t.Logf("Start refused a diverged identity naming both values, and released the flow's group id: %v", err)
+}
+
+// TestAgreedIdentitiesStartWithoutTheRefusalFiring is the CONTROL that keeps the
+// two refusal arms from being satisfied by a manager that refuses every ledger it
+// ever opens. The agreed shape has to still start, reach leadership, and report a
+// ledger whose raft server id is this manager's node id.
+func TestAgreedIdentitiesStartWithoutTheRefusalFiring(t *testing.T) {
+	node := newIdentityNode(t, "a-node", "a-node", []string{"alpha"})
+	node.start(t)
+	node.awaitLeader(t, "alpha")
+
+	l, ok := node.mgr.Ledger("alpha")
+	if !ok {
+		t.Fatal("the agreed shape did not adopt its flow")
+	}
+	if l.LocalID() != node.mgr.cfg.Node {
+		t.Fatalf("the ledger reports %q and Config.Node is %q on the shape that is supposed to agree",
+			l.LocalID(), node.mgr.cfg.Node)
+	}
+
+	t.Logf("agreed identities start cleanly and the guard does not fire: flow %q reached leadership with "+
+		"the ledger reporting %q and Config.Node %q", "alpha", l.LocalID(), node.mgr.cfg.Node)
+}
+
+// TestJoiningAFlowAlsoRefusesADivergedIdentity gates the SECOND open site. Start
+// and joinFlow open on the same terms through one helper, and the moment they
+// stop doing so is the drift this package's flow-set half is written to avoid —
+// so the two sites are gated separately rather than one argued to cover the other.
+func TestJoiningAFlowAlsoRefusesADivergedIdentity(t *testing.T) {
+	node := newIdentityNode(t, "a-node", "someone-else", nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Starts with no flows, so the divergence is never seen by Start: the flow is
+	// taken on afterwards, which is the path SetFlows drives.
+	if err := node.mgr.Start(ctx); err != nil {
+		t.Fatalf("Start with no flows: %v", err)
+	}
+
+	err := node.mgr.SetFlows(ctx, []string{"beta"})
+	if err == nil {
+		t.Fatal("a flow taken on after start adopted a ledger running under a raft server id this manager " +
+			"does not use, which Start refuses")
+	}
+	if !errors.Is(err, ErrIdentityDiverged) {
+		t.Fatalf("err = %v, want ErrIdentityDiverged", err)
+	}
+	if !strings.Contains(err.Error(), "someone-else") || !strings.Contains(err.Error(), "a-node") ||
+		!strings.Contains(err.Error(), "beta") {
+		t.Fatalf("the refusal %q names fewer than the flow and both identities", err)
+	}
+	if _, adopted := node.mgr.Ledger("beta"); adopted {
+		t.Fatal("the refused flow was adopted anyway")
+	}
+
+	t.Logf("the second open site refuses a diverged identity too: %v", err)
+}
+
+// TestADivergedIdentityWouldMakeTheSelfExclusionFailOpen is A RECORD OF WHY THE
+// GUARD IS LOAD-BEARING, NOT A GATE ON IT, and it is written that way on purpose.
+//
+// It drives noteHealth DIRECTLY, below the guard, because the guard is what makes
+// this state unreachable through Start — so it passes with the guard present and
+// without it. Its value is that the consequence is demonstrated by execution
+// rather than argued in prose: the self-exclusion compares a raft ServerID out of
+// autopilot's state against Config.Node, so under divergence it never matches and
+// the leader publishes a peer-unreachable signal naming its own raft identity. If
+// the exclusion is ever rewritten in a way that changes this, the change is
+// visible here.
+func TestADivergedIdentityWouldMakeTheSelfExclusionFailOpen(t *testing.T) {
+	mgr, mux := testNode(t, "a-node")
+	l, err := ledger.Open(ledger.Config{Flow: "alpha", LocalID: "someone-else", Mux: mux})
+	if err != nil {
+		t.Fatalf("opening a ledger under a divergent raft server id: %v", err)
+	}
+	mgr.addFlow("alpha", l)
+	if l.LocalID() == mgr.cfg.Node {
+		t.Fatal("CONTROL FAILED: the fixture is not diverged, so nothing below observes what divergence does")
+	}
+
+	// Autopilot's FIRST published state, in which nothing has been stable for
+	// ServerStabilizationTime yet and every member reads unhealthy — the node
+	// running this loop included, under the raft id it actually runs under.
+	pilot := &flowPilot{mgr: mgr, flow: "alpha", done: make(chan struct{}), healthy: map[raft.ServerID]bool{}}
+	pilot.noteHealth(&autopilotState{health: map[raft.ServerID]bool{
+		raft.ServerID(l.LocalID()): false,
+		"b-peer":                   false,
+	}})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	batch, _, err := mgr.Watch(ctx, 0)
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	peerSignals, namedSelf := 0, false
+	for _, sig := range batch {
+		switch sig.Kind {
+		case SignalPeerUnreachable, SignalPeerReturned, SignalPeerEvicted:
+			peerSignals++
+			if sig.Node == l.LocalID() {
+				namedSelf = true
+			}
+		case SignalMembershipChanged:
+			// Carries this node's own id BY DESIGN — the every-node half of the seam.
+		}
+	}
+	if peerSignals == 0 {
+		t.Fatal("CONTROL FAILED: no peer-kind signal was published, so the observation below would be vacuous")
+	}
+	if !namedSelf {
+		t.Fatalf("the diverged node published %d peer signals and none named its own raft identity %q: the "+
+			"recorded consequence no longer reproduces, so either the exclusion or the identity plumbing "+
+			"changed and this record needs re-reading", peerSignals, l.LocalID())
+	}
+
+	t.Logf("the self-exclusion fails open and the node names itself: with Config.Node %q and the raft server "+
+		"id %q this node actually runs under, a peer-unreachable signal named %q — a consumer reads that to "+
+		"decide a peer's datums may be orphaned", mgr.cfg.Node, l.LocalID(), l.LocalID())
+}
+
 // TestARedirectWithNoKnownLeaderIsRefusedByName pins the arm a node reaches when
 // it hosts a flow and knows of no leader for it: it refuses by name rather than
 // inventing an address. This is the path a freshly staged nonvoter occupies

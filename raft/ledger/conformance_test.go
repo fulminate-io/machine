@@ -27,11 +27,15 @@ import (
 // consumer is REQUIRED to use: a snapshot delivered through Raft().Restore skips the
 // epoch epilogue and leaves every read on that node timing out. A method the seam
 // tells callers they must use is exactly the kind that must not drift silently.
+// LocalID is pinned on the same terms: a caller that carries its own copy of this
+// node's identity reads this one to check the two agree, and a caller that cannot
+// read it can only assume they do.
 type ledgerSurface = interface {
 	Close() error
 	Store() *Store
 	Raft() *raft.Raft
 	Flow() string
+	LocalID() string
 	Append(context.Context, Entry) (uint64, error)
 	Get(context.Context, string) (Entry, bool, error)
 	Restore(*raft.SnapshotMeta, io.Reader, time.Duration) error
@@ -52,6 +56,9 @@ func TestLedgerSurfaceMatchesThePublishedSeam(t *testing.T) {
 
 	if surface.Flow() != "flow-surface" {
 		t.Fatalf("Flow() reported %q, want the configured flow", surface.Flow())
+	}
+	if surface.LocalID() != "n0" {
+		t.Fatalf("LocalID() reported %q, want the configured raft server id", surface.LocalID())
 	}
 	if surface.Raft() == nil {
 		t.Fatal("Raft() returned nil on an open ledger")

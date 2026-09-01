@@ -84,11 +84,13 @@ func (m *Manager) hostedFlows() []string {
 }
 
 // joinFlow opens a flow's ledger and settles it against the cluster, on exactly
-// the terms Start uses for the flows it starts with.
+// the terms Start uses for the flows it starts with — through openFlow, which is
+// what makes "exactly the terms" a shared call rather than a claim in prose that
+// the next edit to either site can quietly falsify.
 func (m *Manager) joinFlow(ctx context.Context, flow string) error {
-	l, err := m.cfg.Open(flow)
+	l, err := m.openFlow(flow)
 	if err != nil {
-		return fmt.Errorf("membership: opening the ledger for flow %q failed: %w", flow, err)
+		return err
 	}
 	m.addFlow(flow, l)
 	if err := m.placeFlow(ctx, flow); err != nil {

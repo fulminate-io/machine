@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/hashicorp/raft"
+
+	"github.com/whitaker-io/machine/raft/ledger"
 )
 
 const (
@@ -32,9 +34,9 @@ const (
 // cannot receive replication, which is the worse of the two intermediate states.
 func (m *Manager) Start(ctx context.Context) error {
 	for _, flow := range m.cfg.Flows {
-		l, err := m.cfg.Open(flow)
+		l, err := m.openFlow(flow)
 		if err != nil {
-			return fmt.Errorf("membership: opening the ledger for flow %q failed: %w", flow, err)
+			return err
 		}
 		m.addFlow(flow, l)
 	}
@@ -48,6 +50,39 @@ func (m *Manager) Start(ctx context.Context) error {
 		m.superviseFlow(flow)
 	}
 	return nil
+}
+
+// openFlow opens ONE flow's ledger and refuses one whose raft server id is not
+// this manager's node id.
+//
+// IT EXISTS BECAUSE THERE ARE TWO OPEN SITES. Start opens the flows this node
+// begins with and joinFlow opens the ones it later takes on; a guard written at
+// one of them only would leave the other admitting exactly what the first
+// refuses, which is the same two-call-sites-computing-one-thing drift SetFlows
+// is written to avoid on the flow-set half.
+//
+// THE REFUSAL NAMES BOTH VALUES because an operator supplied them as two
+// separate fields, and a refusal naming neither is one they cannot act on.
+func (m *Manager) openFlow(flow string) (*ledger.Ledger, error) {
+	l, err := m.cfg.Open(flow)
+	if err != nil {
+		return nil, fmt.Errorf("membership: opening the ledger for flow %q failed: %w", flow, err)
+	}
+	id := l.LocalID()
+	if id == m.cfg.Node {
+		return l, nil
+	}
+	// THE REFUSED LEDGER IS CLOSED HERE OR BY NOBODY. It never reaches m.flows, so
+	// the manager's own Close will not find it, and an open ledger holds the
+	// flow's group id bound on the shared mux — a leaked one turns the next
+	// attempt at this flow into a bind refusal naming an unrelated cause.
+	if cerr := l.Close(); cerr != nil {
+		m.logger.Warn("closing a ledger refused for a diverged identity failed",
+			"flow", flow, "error", cerr)
+	}
+
+	return nil, fmt.Errorf("%w: flow %q ledger reports %q, Config.Node is %q",
+		ErrIdentityDiverged, flow, id, m.cfg.Node)
 }
 
 // superviseFlow starts the goroutine that runs a flow's autopilot for exactly as
