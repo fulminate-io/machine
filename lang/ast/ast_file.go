@@ -76,6 +76,12 @@ func (FuncDecl) isDecl() {}
 //
 // A FLOW BODY IS BRACELESS. It runs from the flow line to the next `flow` or
 // `func` declaration, or to end of file, and End reports where that body ends.
+//
+// WHAT THE NAME'S CASE MEANS, which the parser does not act on:
+// an UPPERCASE first rune makes a flow EXPORTED, a lowercase one module-private,
+// and a cross-module reference to a module-private flow is a compile error.
+// A signature is OPTIONAL on an exported flow: present, its declared types are
+// the cross-module contract; absent, the consumer's types are inferred from the body.
 type FlowDecl struct {
 	Name      Ident
 	Signature *FlowSignature

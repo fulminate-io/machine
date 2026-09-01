@@ -1,0 +1,7 @@
+note """loader fixture: an EXPORTED flow carrying a signature, beside a module-private one. The capital O is what makes Orders exported under Go's own rule, and `hidden` is the counterpart a cross-module reference must be refused for -- refused DISTINCTLY from a name that does not exist at all."""
+flow Orders (Order) -> ok OkResult, bad ErrResult
+branch check Clean from in -> ok, bad
+
+flow hidden
+source ingest Poll
+sink done Store from ingest

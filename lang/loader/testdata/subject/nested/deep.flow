@@ -1,0 +1,4 @@
+note """loader fixture at a SECOND DEPTH, so discovery is proved to walk a module rather than list its top directory. Deep is exported and carries NO signature, which is the seam: it resolves without refusal and without any type claim, because typing it is inference over the flow body and belongs to the analysis layer above this module."""
+flow Deep
+source ingest Poll
+sink done Store from ingest

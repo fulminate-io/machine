@@ -6,6 +6,9 @@ package loader
 
 import (
 	"go/types"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -14,6 +17,8 @@ const (
 	subjectDir  = "testdata/subject"
 	subjectPath = "example.com/subject"
 	brokenDir   = "testdata/broken"
+	decoyDir    = "testdata/decoy"
+	decoyFile   = "testdata/decoy/notmine.flow"
 )
 
 // TestTheLoadingSurfaceRefusesLoudlyAndSplitsReceivers exercises the four
@@ -140,4 +145,101 @@ func iface(t *testing.T, loaded *Packages, spelling string) *types.Interface {
 	}
 
 	return under
+}
+
+// TestSourcesFindsFlowFilesThroughTheResolvedModuleDirectory proves discovery
+// walks the directory the Go toolchain RESOLVED for the module rather than the
+// process working directory.
+//
+// The two implementations are indistinguishable without help: the subject module
+// sits under this test's own working directory, so a walk rooted at "." returns
+// the same files as a walk rooted at the module. THE DECOY IS WHAT SEPARATES
+// THEM — a .flow file under testdata but outside the subject module, which only
+// a wrongly-rooted walk can collect.
+//
+// The assertions are on the PROPERTY, never on a count: every path absolute and
+// under the resolved module directory, the decoy absent, both fixture depths
+// reached, the result sorted. A pinned count is a scheduled false failure
+// against correct work, because the next fixture anyone adds breaks it.
+func TestSourcesFindsFlowFilesThroughTheResolvedModuleDirectory(t *testing.T) {
+	loaded, err := Load(subjectDir, []string{"./..."})
+	if err != nil {
+		t.Fatalf("the subject fixture module did not load: %v", err)
+	}
+
+	mod, ok := loaded.Module(subjectPath)
+	if !ok {
+		t.Fatalf("no module was resolved for %q, so a walk proves nothing", subjectPath)
+	}
+
+	if mod.Dir == "" {
+		t.Fatal("the resolved module directory is empty, so a walk rooted at it would walk nothing")
+	}
+
+	// CONTROL: the decoy must actually be on disk, or "the walk excluded it" is
+	// indistinguishable from "there was nothing to exclude".
+	if _, err := os.Stat(decoyFile); err != nil {
+		t.Fatalf("the decoy fixture is missing, so this test cannot separate the two walks: %v", err)
+	}
+
+	decoyRoot, err := filepath.Abs(decoyDir)
+	if err != nil {
+		t.Fatalf("the decoy directory did not resolve: %v", err)
+	}
+
+	sources, err := loaded.Sources(subjectPath)
+	if err != nil {
+		t.Fatalf("Sources refused for a module that resolved: %v", err)
+	}
+
+	if len(sources) == 0 {
+		t.Fatal("Sources found no flow files at all in a module that carries them")
+	}
+
+	atRoot, deeper := false, false
+
+	for _, path := range sources {
+		if !filepath.IsAbs(path) {
+			t.Errorf("%q is not absolute, so it cannot have come from the resolved module directory", path)
+
+			continue
+		}
+
+		if !underDir(path, mod.Dir) {
+			t.Errorf("%q is not rooted at the resolved module directory %q, so the walk did not start there", path, mod.Dir)
+		}
+
+		if underDir(path, decoyRoot) {
+			t.Errorf("the walk collected %q, which sits outside the subject module", path)
+		}
+
+		if filepath.Dir(path) == mod.Dir {
+			atRoot = true
+		} else if underDir(path, mod.Dir) {
+			deeper = true
+		}
+	}
+
+	if !atRoot {
+		t.Error("no source was found at the module's own directory")
+	}
+
+	if !deeper {
+		t.Error("no source was found below the module's own directory, so the walk is not recursive")
+	}
+
+	if !sort.StringsAreSorted(sources) {
+		t.Errorf("Sources returned an unsorted result, so its output depends on directory order: %v", sources)
+	}
+
+	t.Logf("resolved module dir %s, %d flow sources", mod.Dir, len(sources))
+}
+
+// underDir reports whether path sits at or beneath dir, comparing at path
+// separator boundaries so a sibling directory sharing a name prefix is not
+// mistaken for a child.
+func underDir(path, dir string) bool {
+	trimmed := strings.TrimSuffix(dir, string(filepath.Separator)) + string(filepath.Separator)
+
+	return path == dir || strings.HasPrefix(path, trimmed)
 }

@@ -1,0 +1,4 @@
+note """THE DECOY. This file sits under lang/loader/testdata but OUTSIDE the subject module, and it exists so that a walk rooted at the process working directory and a walk rooted at the resolved module directory give DIFFERENT answers. Without it both implementations return the same files whenever the module happens to sit under the current directory, and the gate cannot fail."""
+flow Decoy
+source ingest Poll
+sink done Store from ingest

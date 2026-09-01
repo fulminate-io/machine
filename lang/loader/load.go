@@ -9,6 +9,7 @@ import (
 	goast "go/ast"
 	"go/token"
 	"go/types"
+	"path/filepath"
 	"sort"
 
 	"golang.org/x/tools/go/packages"
@@ -38,6 +39,7 @@ const (
 	noPackages    = "loader: no packages matched the given patterns in "
 	unknownPath   = "loader: no loaded package has the import path "
 	cannotResolve = "loader: cannot resolve the type spelling "
+	ambiguous     = "loader: the type spelling "
 )
 
 // Packages is one generation run's loaded, type-checked package set.
@@ -137,17 +139,26 @@ func (p *Packages) Scope(pkgPath string) (*types.Scope, bool) {
 // spelling resolves to nothing at all: evaluating "gob.GobEncoder" there reports
 // `undefined: gob` even in a package whose files import encoding/gob. Since a
 // flow signature header routinely names a type through its package qualifier,
-// resolution walks the package's files in filename order and answers with the
-// first scope the spelling resolves in — which is what "as it would resolve
-// inside that package" has to mean in a package whose files import different
-// things.
+// resolution walks EVERY file of the package, in filename order.
 //
-// BOTH REFUSALS NAME THEIR SUBJECT, and neither has a fallback. A package that
-// was never loaded is an error naming the path; a spelling that does not resolve
-// is an error naming the spelling and the package it was resolved against. This
-// function never hands back an invalid type beside a nil error — a caller cannot
-// tell that shape from a real answer, which is exactly what makes it a defect
-// rather than a convenience.
+// A SPELLING ITS FILES DISAGREE ABOUT IS REFUSED, NOT DECIDED. Imports are
+// per-file, so one alias can name two packages in two files of the same package
+// — and since, say, encoding/gob and encoding/json both export Encoder, the
+// spelling `codec.Encoder` can denote two different types in one package.
+// Answering with the first file to resolve it would be deterministic and still
+// wrong: it hands the caller one candidate and never discloses that another
+// existed. The walk therefore continues past its first hit and refuses when two
+// files resolve the spelling to types that are not identical, naming both
+// candidates and the files they came from. Files that AGREE are not a
+// disagreement, and resolution answers normally.
+//
+// EVERY REFUSAL NAMES ITS SUBJECT, and none has a fallback. A package that was
+// never loaded is an error naming the path; a spelling that does not resolve is
+// an error naming the spelling and the package it was resolved against; an
+// ambiguous one names what it could not choose between. This function never
+// hands back an invalid type beside a nil error — a caller cannot tell that
+// shape from a real answer, which is exactly what makes it a defect rather than
+// a convenience.
 func (p *Packages) Resolve(pkgPath, spelling string) (types.Type, error) {
 	pkg, ok := p.byPath[pkgPath]
 	if !ok || pkg.Types == nil {
@@ -156,8 +167,13 @@ func (p *Packages) Resolve(pkgPath, spelling string) (types.Type, error) {
 
 	reason := "it denotes no type"
 
-	for _, at := range evalPositions(pkg) {
-		evaluated, err := types.Eval(pkg.Fset, pkg.Types, at, spelling)
+	var (
+		found types.Type
+		from  string
+	)
+
+	for _, site := range evalSites(pkg) {
+		evaluated, err := types.Eval(pkg.Fset, pkg.Types, site.pos, spelling)
 		if err != nil {
 			reason = err.Error()
 
@@ -168,23 +184,44 @@ func (p *Packages) Resolve(pkgPath, spelling string) (types.Type, error) {
 			continue
 		}
 
-		return evaluated.Type, nil
+		if found == nil {
+			found, from = evaluated.Type, site.file
+
+			continue
+		}
+
+		if !types.Identical(found, evaluated.Type) {
+			return nil, errors.New(ambiguous + spelling + " is ambiguous in " + pkgPath + ": " +
+				from + " resolves it to " + found.String() + ", " +
+				site.file + " resolves it to " + evaluated.Type.String())
+		}
 	}
 
-	return nil, errors.New(cannotResolve + spelling + " in " + pkgPath + ": " + reason)
+	if found == nil {
+		return nil, errors.New(cannotResolve + spelling + " in " + pkgPath + ": " + reason)
+	}
+
+	return found, nil
 }
 
-// evalPositions reports the positions a spelling is evaluated at, in a stable
-// order.
+// evalSite is one place a spelling can be evaluated: a position to evaluate at,
+// and the file name to blame in a refusal.
+type evalSite struct {
+	file string
+	pos  token.Pos
+}
+
+// evalSites reports the sites a spelling is evaluated at, in a stable order.
 //
-// One position per file, because file scope is where imports live, sorted by
-// filename so that two runs over the same package resolve an ambiguous spelling
-// the same way. A package loaded without syntax — a dependency reached for its
-// types alone — has only its package scope to offer, which still resolves every
-// unqualified spelling, the only kind that could resolve without imports anyway.
-func evalPositions(pkg *packages.Package) []token.Pos {
+// One site per file, because file scope is where imports live, sorted by
+// filename so that a package's files are always consulted in the same order and
+// an ambiguity is reported with its candidates named the same way on every run.
+// A package loaded without syntax — a dependency reached for its types alone —
+// has only its package scope to offer, which still resolves every unqualified
+// spelling, the only kind that could resolve without imports anyway.
+func evalSites(pkg *packages.Package) []evalSite {
 	if len(pkg.Syntax) == 0 {
-		return []token.Pos{pkg.Types.Scope().Pos()}
+		return []evalSite{{file: pkg.PkgPath, pos: pkg.Types.Scope().Pos()}}
 	}
 
 	files := make([]*goast.File, len(pkg.Syntax))
@@ -193,9 +230,12 @@ func evalPositions(pkg *packages.Package) []token.Pos {
 		return pkg.Fset.Position(files[i].Pos()).Filename < pkg.Fset.Position(files[j].Pos()).Filename
 	})
 
-	at := make([]token.Pos, 0, len(files))
+	at := make([]evalSite, 0, len(files))
 	for _, file := range files {
-		at = append(at, file.Name.End())
+		at = append(at, evalSite{
+			file: filepath.Base(pkg.Fset.Position(file.Pos()).Filename),
+			pos:  file.Name.End(),
+		})
 	}
 
 	return at
