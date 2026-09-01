@@ -381,3 +381,60 @@ jobs:
               exit 1
             }
           }'
+
+  # lang/loader is a separate module for the same reason every other module here
+  # is: a root-scoped `go list ./...` prints only the root package, so without a
+  # job of its own it would rot invisibly. It is also the module that exists so
+  # go/types and golang.org/x/tools have exactly one home — the root module's
+  # direct requirements are OTel-only and its erasure gate forbids the type
+  # switch a go/types walk needs. LIKE lang/lsp and UNLIKE lang/ast,
+  # lang/analysis and lang/lint it HAS a go.sum — x/tools is a real dependency —
+  # so the cache is pointed at that file rather than omitted, because pointing
+  # it at a file that does not exist fails the job rather than missing the
+  # cache. Every step that runs a command carries working-directory lang/loader,
+  # because one that does not would build, test or measure the root module and
+  # report a green about the wrong code entirely.
+  lang-loader:
+    name: lang/loader
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'lang/loader/go.mod'
+          cache-dependency-path: 'lang/loader/go.sum'
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+          working-directory: lang/loader
+          args: --config ${{ github.workspace }}/.golangci.yml
+          github-token: ${{ github.token }}
+          only-new-issues: true
+      - name: Go Build
+        working-directory: lang/loader
+        run: go build ./...
+      - name: Go Test
+        working-directory: lang/loader
+        run: go test -timeout 600s -coverprofile=coverage.out ./...
+
+      # The floor is the coverage the suite actually achieves, so a change that
+      # drops below it fails here rather than surfacing later in a coverage
+      # report. PLACEHOLDER: the value below is not yet a measurement. It is
+      # replaced by the number this module's own suite achieves, measured once
+      # the suite exists, for the reason every job above records — a floor
+      # copied from a sibling describes that sibling's shape and not this one.
+      - name: Enforce coverage floor
+        working-directory: lang/loader
+        env:
+          COVERAGE_FLOOR: "1"
+        run: |
+          total=$(go tool cover -func=coverage.out | awk '$1 == "total:" { print $NF }')
+          test -n "$total" || { echo "coverage.out yielded no total line"; exit 1; }
+          echo "total statement coverage: $total"
+          awk -v got="${total%\%}" -v floor="$COVERAGE_FLOOR" 'BEGIN {
+            if (got + 0 < floor + 0) {
+              printf "coverage %s%% is below the %s%% floor\n", got, floor
+              exit 1
+            }
+          }'
