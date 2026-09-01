@@ -42,9 +42,35 @@ func openTestLedger(t *testing.T, cfg Config) *Ledger {
 	if err != nil {
 		t.Fatalf("Open(%+v): %v", cfg.Flow, err)
 	}
-	t.Cleanup(func() { _ = l.Close() })
+	t.Cleanup(func() { closeWithin(t, l, cleanupCloseCeiling) })
 
 	return l
+}
+
+// cleanupCloseCeiling bounds a cleanup's Close. A correct Close returns in
+// microseconds, so this costs correct work nothing.
+const cleanupCloseCeiling = 30 * time.Second
+
+// closeWithin runs Close in a goroutine and waits a ceiling, REPORTING rather than
+// blocking when it does not return.
+//
+// AN UNBOUNDED CLEANUP TURNS EVERY Close DEADLOCK INTO A TEST-BINARY TIMEOUT. The
+// subtest reports its own named failure at its own ceiling, then the cleanup blocks on
+// the in-progress sync.Once forever, and the only reporter left is `go test -timeout`
+// — which costs minutes and buries the assertion that already fired under a goroutine
+// dump. Measured on the wait-group-join-too-early defect: 600 seconds unbounded against
+// 31 seconds bounded, reporting the same named failure.
+func closeWithin(t *testing.T, l *Ledger, ceiling time.Duration) {
+	t.Helper()
+	done := make(chan error, 1)
+
+	go func() { done <- l.Close() }()
+
+	select {
+	case <-done:
+	case <-time.After(ceiling):
+		t.Errorf("Close for flow %q did not return within %s during cleanup", l.cfg.Flow, ceiling)
+	}
 }
 
 func waitLeadership(t *testing.T, l *Ledger) {

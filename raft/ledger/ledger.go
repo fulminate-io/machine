@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -45,18 +46,31 @@ var (
 	ErrClosed = errors.New("ledger: ledger is closed")
 	// ErrConfigIncomplete reports a Config missing something Open cannot invent.
 	ErrConfigIncomplete = errors.New("ledger: configuration is incomplete")
+	// ErrConfigNegativeDuration reports a Config duration field that is negative.
+	//
+	// ZERO IS A DECLARED SELECTION ON THESE FIELDS AND NEGATIVE IS NOT. Every site that
+	// consumes them tests with a comparison — ReadTimeout <= 0 selecting "no bound of
+	// mine", ForwardTimeout > 0 selecting "use the default" — and each of those reads a
+	// NEGATIVE value as one of the two declared meanings of zero. So a mistyped bound
+	// would not fail; it would quietly become a DIFFERENT bound, and an operator asking
+	// for a tighter one would silently get the default instead, invisibly at every
+	// later observation point.
+	ErrConfigNegativeDuration = errors.New("ledger: configuration carries a negative duration")
 	// ErrNilContext reports a call carrying no context at all, which is a
 	// programming error rather than a state to tolerate.
 	ErrNilContext = errors.New("ledger: a nil context reached the ledger")
-	// ErrNotLeader reports that this node does not lead the flow's group. Every
-	// read and write here is leader-only, so this is the refusal a follower gives
-	// rather than serving a value it cannot prove current.
+	// ErrNotLeader reports that this node does not lead the flow's group. It is what
+	// the LEADER-LOCAL primitives return rather than serving a value this node cannot
+	// prove current.
 	//
-	// THIS REFUSAL IS AN INTERIM AND NOT THE SETTLED CONTRACT. The settled design
-	// forwards a non-leader Save, Update and linearizable Load to the flow group's
-	// leader from the client side, and lane C2 is the successor that replaces it. A
-	// caller treats this as a condition to report, never as a permanent shape to
-	// design around.
+	// IT IS NO LONGER WHAT A CALLER OF THE PUBLIC SURFACE SEES, AND IT DID NOT
+	// DISAPPEAR — IT MOVED BENEATH THE FORWARDING. Append, Get and every Store method
+	// forward a non-leader operation to the flow group's leader, so a follower serves
+	// it rather than refusing it. This refusal survives underneath as THE SIGNAL THAT
+	// MAKES THAT WORK, and the loop reads it twice: to decide an operation must leave
+	// this node, and to decide that a forwarded operation which landed on a node that
+	// no longer leads must be re-resolved rather than relayed on. The forwarding is
+	// bounded by Config.ForwardTimeout and fails with ErrForwardBoundExceeded.
 	//
 	// An error carrying it also wraps the underlying raft sentinel, so a non-voter
 	// catching up as a learner stays distinguishable from a plain non-leader
@@ -116,8 +130,18 @@ type Config struct {
 	Logger hclog.Logger
 	// ReadTimeout bounds how long a linearizable read waits for this node's state
 	// machine to catch up with the commit index it observed. Zero means the
-	// caller's context is the only bound.
+	// caller's context is the only bound; a NEGATIVE value is refused at Open with
+	// ErrConfigNegativeDuration rather than read as that zero.
 	ReadTimeout time.Duration
+	// ForwardTimeout bounds how long an operation forwarded to the flow's leader
+	// keeps retrying across a leadership change before failing with
+	// ErrForwardBoundExceeded. Zero selects defaultForwardTimeout; a NEGATIVE value
+	// is refused at Open with ErrConfigNegativeDuration rather than read as that
+	// zero, which would hand an operator asking for a tighter bound the default one.
+	//
+	// It is WALL-CLOCK rather than a count of attempts, because the number of
+	// attempts one leadership event costs depends entirely on the retry interval.
+	ForwardTimeout time.Duration
 
 	// tuning is applied to the raft config last, after the defaults and this
 	// ledger's own settings.
@@ -139,6 +163,12 @@ func (c Config) validate() error {
 		return fmt.Errorf("ledger: Config.LocalID is this node's raft server id: %w", ErrConfigIncomplete)
 	case c.Mux == nil:
 		return fmt.Errorf("ledger: Config.Mux carries the shared listener raft dials through: %w", ErrConfigIncomplete)
+	case c.ReadTimeout < 0:
+		return fmt.Errorf("ledger: Config.ReadTimeout is %s, and zero already means no bound of this ledger's: %w",
+			c.ReadTimeout, ErrConfigNegativeDuration)
+	case c.ForwardTimeout < 0:
+		return fmt.Errorf("ledger: Config.ForwardTimeout is %s, and zero already selects the default bound: %w",
+			c.ForwardTimeout, ErrConfigNegativeDuration)
 	}
 
 	return nil
@@ -165,6 +195,26 @@ type Ledger struct {
 	notify chan bool
 	done   chan struct{}
 	drain  sync.WaitGroup
+
+	// forwarding counts the forwarding server's serve loop and every handler it has
+	// in flight.
+	//
+	// IT IS A SEPARATE GROUP FROM drain, AND THAT SEPARATION IS LOAD-BEARING. It is
+	// joined in shutdown AFTER the transport group is closed, because on the path
+	// where raft discards its own shutdown future nothing has released the transport
+	// by the time drain is waited on — the serve loop is still parked in Accept, and
+	// joining it there deadlocks Close. On the ordinary drained path raft's shutdown
+	// future closes the transport and wakes Accept before drain.Wait() is reached, so
+	// that path never showed the defect: only the discarded-future one does.
+	forwarding sync.WaitGroup
+
+	// inflight holds the forwarded connections handlers are currently serving, so
+	// Close can END them rather than wait their read deadlines out. inflightClosed
+	// makes the window after Close observable to trackConn, which refuses a
+	// connection accepted past it rather than leaving it held by nobody.
+	inflightMu     sync.Mutex
+	inflight       map[net.Conn]struct{}
+	inflightClosed bool
 
 	// outstanding counts epoch appends that have started and not yet resolved.
 	//
@@ -288,8 +338,18 @@ func (l *Ledger) start() error {
 		return err
 	}
 	l.startLeadershipDrain()
+	l.startForwarding()
 
 	return nil
+}
+
+// startForwarding starts the server that answers operations peers forwarded to this
+// node. It is started after the leadership drain because it serves through the
+// leader-local primitives, which need the drain running to establish a term.
+func (l *Ledger) startForwarding() {
+	l.forwarding.Add(1)
+
+	go l.serveForward(l.group.Forward())
 }
 
 // startLeadershipDrain begins draining raft's leadership notifications.
@@ -538,6 +598,13 @@ func (l *Ledger) shutdown() error {
 			errs = append(errs, fmt.Errorf("ledger: closing the transport group for flow %q: %w", l.cfg.Flow, err))
 		}
 	}
+
+	// The group's close wakes the serve loop out of Accept; closeInflight ends the
+	// connections handlers are already holding, so this wait measures under a
+	// millisecond rather than the handler read deadline. Both must run BEFORE the
+	// join, and the join must run before the bolt store closes under a handler.
+	l.closeInflight()
+	l.forwarding.Wait()
 	if l.bolt != nil {
 		if err := l.bolt.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("ledger: closing the bolt store for flow %q: %w", l.cfg.Flow, err))
@@ -606,8 +673,15 @@ func (l *Ledger) Restore(meta *raft.SnapshotMeta, reader io.Reader, timeout time
 // Flow reports the flow this ledger replicates.
 func (l *Ledger) Flow() string { return l.cfg.Flow }
 
-// Append replicates one entry, waits for this node's state machine to apply it, and
-// returns THE JOURNAL INDEX the entry landed at.
+// appendLocal replicates one entry ON THIS NODE, waits for this node's state machine
+// to apply it, and returns THE JOURNAL INDEX the entry landed at.
+//
+// IT IS LEADER-LOCAL BY DESIGN, AND ITS REFUSAL IS LOAD-BEARING RATHER THAN A GAP. A
+// node that does not lead is refused with ErrNotLeader instead of being served, and
+// the forwarding loop keys on exactly that refusal TWICE: to decide that an operation
+// must leave this node, and to decide that a forwarded operation which landed on a
+// node that no longer leads must be re-resolved by its client rather than relayed on.
+// Callers wanting the operation to reach the leader use Append.
 //
 // The index is part of the contract rather than a convenience: a consumer recording
 // a checkpoint references a journal position, and the index is free here because
@@ -617,7 +691,7 @@ func (l *Ledger) Flow() string { return l.cfg.Flow }
 // It holds no lock of this package's across the raft append: concurrent appends are
 // the throughput lever here, and serializing them behind a mutex would cost roughly
 // an order of magnitude.
-func (l *Ledger) Append(ctx context.Context, entry Entry) (uint64, error) {
+func (l *Ledger) appendLocal(ctx context.Context, entry Entry) (uint64, error) {
 	if ctx == nil {
 		return 0, ErrNilContext
 	}
@@ -640,15 +714,18 @@ func (l *Ledger) Append(ctx context.Context, entry Entry) (uint64, error) {
 	return future.Index(), nil
 }
 
-// Get reads one path linearizably: it proves this node still leads, then waits for
-// its own state machine to catch up with what was committed at the moment of that
-// proof.
+// getLocal reads one path linearizably ON THIS NODE: it proves this node still leads,
+// then waits for its own state machine to catch up with what was committed at the
+// moment of that proof.
 //
-// IT IS LEADER-ONLY, AND THAT IS AN INTERIM. A non-leader is refused with
-// ErrNotLeader rather than served a value it cannot prove current; the settled
-// design forwards the read to the flow group's leader from the client side, and
-// lane C2 is the successor that replaces this refusal.
-func (l *Ledger) Get(ctx context.Context, path string) (Entry, bool, error) {
+// IT IS LEADER-LOCAL BY DESIGN. A node that does not lead is refused with ErrNotLeader
+// rather than served a value it cannot prove current, and that refusal is what the
+// forwarding loop reads to decide the read must leave this node. It is also the read
+// a FORWARDED request is served by, which is why the barrier runs here: the leader
+// proves its term against a quorum and waits for its own state machine, so a peer's
+// read carries the same guarantee a local one does. Callers wanting the read to reach
+// the leader use Get.
+func (l *Ledger) getLocal(ctx context.Context, path string) (Entry, bool, error) {
 	if ctx == nil {
 		return Entry{}, false, ErrNilContext
 	}
@@ -662,6 +739,95 @@ func (l *Ledger) Get(ctx context.Context, path string) (Entry, bool, error) {
 	entry, ok := l.fsm.get(path)
 
 	return entry, ok, nil
+}
+
+// Append replicates one KindSet entry through the flow group's leader and returns THE
+// JOURNAL INDEX it landed at, whether or not this node leads. An entry of any other
+// kind is appended locally and still refuses on a follower; see below.
+//
+// IT TRIES LOCALLY FIRST AND FORWARDS ONLY WHEN THIS NODE IS NOT THE LEADER, so a
+// leader appending its own entries takes no detour and opens no connection. When the
+// operation must travel it is retried across a leadership change until
+// Config.ForwardTimeout elapses, at which point it fails with ErrForwardBoundExceeded
+// naming the flow, the attempts made, the bound and the last condition observed.
+//
+// IT FORWARDS A KindSet ENTRY AND ONLY A KindSet ENTRY. The wire carries a path and an
+// opaque value under one save operation, which the leader applies as a KindSet
+// assignment; no other kind has a representation on it. An entry of any other kind is
+// appended locally instead, and so still refuses on a follower. Rewriting one kind into
+// another on the leader would be a coercion of bad input, and carrying a kind the
+// leader's build may not declare would poison the journal it lands in. KindEpoch is
+// leader-internal in any case — appendEpoch applies it through raft directly and never
+// arrives here.
+//
+// THE RETRY IS SAFE BECAUSE THE OPERATION IS IDEMPOTENT: a KindSet entry assigns one
+// value to one path, so replaying it produces the same state. That holds under the
+// single-writer-per-datum premise this package already documents; under two writers to
+// one path a retry would be a lost-update race, which is the same premise the
+// non-atomic Store.Update already rests on rather than a new one introduced here.
+func (l *Ledger) Append(ctx context.Context, entry Entry) (uint64, error) {
+	if ctx == nil {
+		return 0, ErrNilContext
+	}
+	if entry.Kind != KindSet {
+		return l.appendLocal(ctx, entry)
+	}
+
+	local := func() forwardReply {
+		index, err := l.appendLocal(ctx, entry)
+		code, message := classify(err)
+
+		return forwardReply{Index: index, Code: code, Message: message}
+	}
+	reply, err := l.forward(ctx, forwardRequest{Op: opSave, Path: entry.Path, Value: entry.Value}, local)
+	if err != nil {
+		return 0, err
+	}
+	if err := reply.rebuild(); err != nil {
+		return 0, err
+	}
+
+	return reply.Index, nil
+}
+
+// Get reads one path linearizably. It FORWARDS the read to the flow group's leader when
+// this node does not lead, so a follower serves it rather than refusing it.
+//
+// THE BARRIER RUNS ON WHICHEVER NODE SERVES THE READ, so the guarantee does not weaken
+// when the read travels: the leader proves its term against a quorum and waits for its
+// own state machine before answering, exactly as it would for a local caller. Like
+// Append it tries locally first, so a leader's own read opens no connection.
+//
+// THE FORWARDING IS BOUNDED BY Config.ForwardTimeout. A read that no leader serves
+// before that bound elapses fails with ErrForwardBoundExceeded, naming the flow, the
+// attempts made, the bound and the last condition observed. The caller's own context
+// remains the outer bound and is reported as itself rather than as the forwarding
+// bound, because those are different facts.
+func (l *Ledger) Get(ctx context.Context, path string) (Entry, bool, error) {
+	if ctx == nil {
+		return Entry{}, false, ErrNilContext
+	}
+
+	local := func() forwardReply {
+		entry, present, err := l.getLocal(ctx, path)
+		code, message := classify(err)
+
+		return forwardReply{Value: entry.Value, Present: present, Code: code, Message: message}
+	}
+	reply, err := l.forward(ctx, forwardRequest{Op: opLoad, Path: path}, local)
+	if err != nil {
+		return Entry{}, false, err
+	}
+	if err := reply.rebuild(); err != nil {
+		return Entry{}, false, err
+	}
+	if !reply.Present {
+		return Entry{}, false, nil
+	}
+
+	// The journal only ever stores KindSet entries keyed by their own path, so this
+	// is the entry the state machine holds rather than an approximation of it.
+	return Entry{Kind: KindSet, Path: path, Value: reply.Value}, true, nil
 }
 
 // enqueueTimeout turns the caller's deadline into the bound raft's Apply takes on

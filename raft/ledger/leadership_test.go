@@ -173,15 +173,17 @@ func TestLinearizableReadConvergesOnTheFirstReadOfALeadershipTerm(t *testing.T) 
 	readFirstOfTerm(t, second, "term 2")
 
 	// CONTROL: the read really did go through the barrier on a leader rather than
-	// returning early from some path that skips it. A follower is refused.
+	// returning early from some path that skips it. A follower's LEADER-LOCAL read is
+	// refused. It asks the leader-local primitive deliberately: the public entry point
+	// forwards, so a follower's Get succeeds and would destroy this control.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	for _, node := range nodes {
 		if node == second {
 			continue
 		}
-		if _, _, err := node.ledger.Get(ctx, fencedPath); !errors.Is(err, ErrNotLeader) {
-			t.Fatalf("CONTROL FAILED: a read on the follower %s gave %v, want ErrNotLeader", node.id, err)
+		if _, _, err := node.ledger.getLocal(ctx, fencedPath); !errors.Is(err, ErrNotLeader) {
+			t.Fatalf("CONTROL FAILED: a leader-local read on the follower %s gave %v, want ErrNotLeader", node.id, err)
 		}
 
 		break

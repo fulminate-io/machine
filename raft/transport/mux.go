@@ -49,12 +49,15 @@ type Config struct {
 // than grown — if an arm is added to deliver, it gets a counter in the same
 // breath.
 type Stats struct {
-	Handshakes           uint64
-	RejectedUnknownGroup uint64
-	RejectedMalformed    uint64
-	RejectedQueueFull    uint64
-	RejectedGroupClosed  uint64
-	AcceptErrors         uint64
+	Handshakes               uint64
+	ForwardHandshakes        uint64
+	RejectedUnknownGroup     uint64
+	RejectedMalformed        uint64
+	RejectedQueueFull        uint64
+	RejectedForwardQueueFull uint64
+	RejectedUnknownKind      uint64
+	RejectedGroupClosed      uint64
+	AcceptErrors             uint64
 }
 
 // Mux owns one net.Listener shared by every raft group on this node.
@@ -149,12 +152,15 @@ func (m *Mux) Addr() net.Addr {
 // Stats returns a snapshot of the mux counters.
 func (m *Mux) Stats() Stats {
 	return Stats{
-		Handshakes:           atomic.LoadUint64(&m.stats.Handshakes),
-		RejectedUnknownGroup: atomic.LoadUint64(&m.stats.RejectedUnknownGroup),
-		RejectedMalformed:    atomic.LoadUint64(&m.stats.RejectedMalformed),
-		RejectedQueueFull:    atomic.LoadUint64(&m.stats.RejectedQueueFull),
-		RejectedGroupClosed:  atomic.LoadUint64(&m.stats.RejectedGroupClosed),
-		AcceptErrors:         atomic.LoadUint64(&m.stats.AcceptErrors),
+		Handshakes:               atomic.LoadUint64(&m.stats.Handshakes),
+		ForwardHandshakes:        atomic.LoadUint64(&m.stats.ForwardHandshakes),
+		RejectedUnknownGroup:     atomic.LoadUint64(&m.stats.RejectedUnknownGroup),
+		RejectedMalformed:        atomic.LoadUint64(&m.stats.RejectedMalformed),
+		RejectedQueueFull:        atomic.LoadUint64(&m.stats.RejectedQueueFull),
+		RejectedForwardQueueFull: atomic.LoadUint64(&m.stats.RejectedForwardQueueFull),
+		RejectedUnknownKind:      atomic.LoadUint64(&m.stats.RejectedUnknownKind),
+		RejectedGroupClosed:      atomic.LoadUint64(&m.stats.RejectedGroupClosed),
+		AcceptErrors:             atomic.LoadUint64(&m.stats.AcceptErrors),
 	}
 }
 
@@ -211,16 +217,20 @@ func (m *Mux) isClosed() bool {
 	return m.closed
 }
 
-// route reads one handshake and hands the connection to its group.
+// route reads one handshake and hands the connection to the arm its announced
+// stream kind names.
+//
+// THE KIND IS DELIVERY VOCABULARY AND NOTHING ELSE: the group lookup and the
+// refusal for an unbound group are shared by both arms, so a forwarding
+// connection for a group this node does not host is refused exactly as a raft
+// one is, on the same counter.
 func (m *Mux) route(conn net.Conn) {
-	id, err := readPreamble(conn, m.cfg.HandshakeTimeout)
+	id, kind, err := readPreamble(conn, m.cfg.HandshakeTimeout)
 	if err != nil {
-		atomic.AddUint64(&m.stats.RejectedMalformed, 1)
-		m.logger.Warn("refusing connection with a malformed handshake", "remote", conn.RemoteAddr(), "error", err)
-		_ = conn.Close()
+		m.refuseHandshake(conn, err)
 		return
 	}
-	atomic.AddUint64(&m.stats.Handshakes, 1)
+	m.countHandshake(kind)
 	m.mu.RLock()
 	s := m.groups[id]
 	m.mu.RUnlock()
@@ -230,7 +240,39 @@ func (m *Mux) route(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
+	if kind == KindForward {
+		m.deliverForward(s, conn)
+		return
+	}
 	m.deliver(s, conn)
+}
+
+// refuseHandshake counts and closes a connection whose handshake this node will
+// not deliver. It distinguishes a kind this build does not declare from a
+// malformed head because they mean different things to an operator: the first is
+// a peer from a version that speaks something newer, the second is a stray
+// client that is not speaking this protocol at all.
+func (m *Mux) refuseHandshake(conn net.Conn, err error) {
+	if errors.Is(err, ErrBadStreamKind) {
+		atomic.AddUint64(&m.stats.RejectedUnknownKind, 1)
+		m.logger.Warn("refusing an undeclared stream kind", "remote", conn.RemoteAddr(), "error", err)
+		_ = conn.Close()
+		return
+	}
+	atomic.AddUint64(&m.stats.RejectedMalformed, 1)
+	m.logger.Warn("refusing connection with a malformed handshake", "remote", conn.RemoteAddr(), "error", err)
+	_ = conn.Close()
+}
+
+// countHandshake counts an accepted handshake against the arm that will deliver
+// it, so the two arms stay separately observable instead of summing into one
+// number that cannot tell forwarding load from raft load.
+func (m *Mux) countHandshake(kind StreamKind) {
+	if kind == KindForward {
+		atomic.AddUint64(&m.stats.ForwardHandshakes, 1)
+		return
+	}
+	atomic.AddUint64(&m.stats.Handshakes, 1)
 }
 
 // deliver hands conn to s, refusing rather than holding it when s is backlogged.
@@ -248,6 +290,27 @@ func (m *Mux) deliver(s *groupStream, conn net.Conn) {
 	case <-time.After(m.cfg.HandshakeTimeout):
 		atomic.AddUint64(&m.stats.RejectedQueueFull, 1)
 		m.logger.Warn("refusing connection for a backlogged group", "group", string(s.id))
+		_ = conn.Close()
+	}
+}
+
+// deliverForward hands conn to s's forwarding queue, refusing rather than
+// holding it when that queue is backlogged. It mirrors deliver arm for arm and
+// for the same reason given there: refusing a backlogged group is backpressure
+// rather than a fallback, because it repairs itself as the group's forwarding
+// server drains the queue, and it is loud. A group released mid-handshake counts
+// against the same RejectedGroupClosed the raft arm uses, because it is the same
+// condition on the same door.
+func (m *Mux) deliverForward(s *groupStream, conn net.Conn) {
+	select {
+	case s.forwardCh <- conn:
+	case <-s.doneCh:
+		atomic.AddUint64(&m.stats.RejectedGroupClosed, 1)
+		m.logger.Warn("refusing a forwarding connection for a group unbound mid-handshake", "group", string(s.id))
+		_ = conn.Close()
+	case <-time.After(m.cfg.HandshakeTimeout):
+		atomic.AddUint64(&m.stats.RejectedForwardQueueFull, 1)
+		m.logger.Warn("refusing a forwarding connection for a backlogged group", "group", string(s.id))
 		_ = conn.Close()
 	}
 }

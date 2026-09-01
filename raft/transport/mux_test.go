@@ -26,7 +26,7 @@ func dialTagged(t *testing.T, m *Mux, id GroupID) net.Conn {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	if err := writePreamble(c, id, 2*time.Second); err != nil {
+	if err := writePreamble(c, id, KindRaft, 2*time.Second); err != nil {
 		t.Fatalf("handshake: %v", err)
 	}
 	return c

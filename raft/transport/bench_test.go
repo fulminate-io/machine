@@ -114,7 +114,7 @@ var benchSink []byte
 func BenchmarkEncodePreamble(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		buf, err := encodePreamble("flow-alpha")
+		buf, err := encodePreamble("flow-alpha", KindRaft)
 		if err != nil {
 			b.Fatal(err)
 		}

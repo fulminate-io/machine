@@ -18,14 +18,48 @@ import (
 // ErrNotLeader's own doc while Ledger.Get's kept the label left it GREEN while
 // printing the claim that the file labels the refusal.
 var contractDocs = map[string][]string{
-	"package ledger": {"lane C2"},
-	"ErrNotLeader":   {"lane C2"},
-	"Ledger.Get":     {"lane C2"},
-	"Store":          {"not atomic", "single-writer-per-datum", "ErrNotLeader", "lane C2"},
-	"Config.Dir":     {"documented mode, not a fallback"},
+	"package ledger":            {"forwards", "bounded", "ErrForwardBoundExceeded"},
+	"ErrNotLeader":              {"leader-local", "forward"},
+	"Ledger.Append":             {"forwards", "KindSet"},
+	"Ledger.Get":                {"forwards", "ForwardTimeout", "ErrForwardBoundExceeded"},
+	"Ledger.getLocal":           {"leader-local", "refuse"},
+	"Store":                     {"not atomic", "single-writer-per-datum", "computes at the caller", "ErrForwardBoundExceeded"},
+	"ErrForwardBoundExceeded":   {"elapsed", "names"},
+	"ErrLeaderUnavailable":      {"retryable", "cannot serve"},
+	"ErrConfigNegativeDuration": {"negative", "zero"},
+	"Config.ForwardTimeout":     {"bounds", "retry"},
+	"Config.Dir":                {"documented mode, not a fallback"},
 }
 
-func TestRefusalDocsLabelTheLaneC2Interim(t *testing.T) {
+// LEDGER.APPEND AND LEDGER.GET ARE IN THE REGISTRY DELIBERATELY. They are the two
+// exported entry points a consumer actually lands on, and with the settled contract
+// stated on getLocal and Store but removed from both of them — leaving bare docs that
+// still satisfy revive's exported rule — a registry that omitted them would pass green
+// while neither exported doc mentioned forwarding, the bound, or its sentinel.
+//
+// APPEND'S SECOND TOKEN IS NOT DECORATIVE EITHER. It forwards a KindSet entry and ONLY
+// a KindSet entry; with only "forwards" required, a doc reading "replicates one entry
+// ... whether or not this node leads" satisfies the gate while being FALSE for every
+// other kind, leaving the restriction in a body comment godoc never renders.
+
+// retiredInterimPhrases are claims no production doc comment may still make.
+//
+// THEY MATCH THE INTERIM'S CLAIM, NOT ANY WORD IN IT. Measured while authoring: an
+// earlier list containing the bare word "leader-only" RED-FLAGGED CORRECT WORK, because
+// a settled doc legitimately says a method is no longer leader-only.
+var retiredInterimPhrases = []string{
+	"lane C2",
+	"that is an interim",
+	"is an interim rather than",
+	"successor that replaces",
+}
+
+// interimSurvivors is EXPLICITLY EMPTY. There is no declaration for which the interim
+// label is still true, and saying so here is what makes the leg below a closed
+// assertion rather than a sweep with an unstated exception list.
+var interimSurvivors = map[string]bool{}
+
+func TestContractDocsStateTheSettledForwardingContract(t *testing.T) {
 	docs := collectContractDocs(t)
 
 	// CONTROL: the matcher can fail. Without it, a registry whose every lookup
@@ -49,6 +83,21 @@ func TestRefusalDocsLabelTheLaneC2Interim(t *testing.T) {
 		for _, phrase := range phrases {
 			if !stated(doc, phrase) {
 				t.Errorf("%s: its own doc comment does not state %q; a reader landing on this declaration alone would not learn it", declaration, phrase)
+			}
+		}
+	}
+
+	// THE ABSENCE LEG. No production declaration may still describe the refusal as an
+	// interim awaiting a successor lane, because there is no successor left to await —
+	// this lane is it.
+	for declaration, doc := range docs {
+		if interimSurvivors[declaration] {
+			continue
+		}
+		for _, phrase := range retiredInterimPhrases {
+			if stated(doc, phrase) {
+				t.Errorf("%s: its doc comment still states %q, describing the refusal as an interim awaiting a successor lane",
+					declaration, phrase)
 			}
 		}
 	}

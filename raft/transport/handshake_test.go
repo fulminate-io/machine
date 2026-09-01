@@ -14,7 +14,7 @@ func TestPreambleRoundTripAndNoOverRead(t *testing.T) {
 	defer func() { _ = client.Close() }()
 	defer func() { _ = server.Close() }()
 	go func() {
-		if err := writePreamble(client, "flow-alpha", time.Second); err != nil {
+		if err := writePreamble(client, "flow-alpha", KindRaft, time.Second); err != nil {
 			t.Error(err)
 			return
 		}
@@ -22,7 +22,7 @@ func TestPreambleRoundTripAndNoOverRead(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	id, err := readPreamble(server, time.Second)
+	id, _, err := readPreamble(server, time.Second)
 	if err != nil {
 		t.Fatalf("readPreamble: %v", err)
 	}
@@ -48,12 +48,12 @@ func TestPreambleRoundTripAndNoOverRead(t *testing.T) {
 	coalescedClient, coalescedServer := net.Pipe()
 	defer func() { _ = coalescedClient.Close() }()
 	defer func() { _ = coalescedServer.Close() }()
-	head, err := encodePreamble("flow-beta")
+	head, err := encodePreamble("flow-beta", KindRaft)
 	if err != nil {
 		t.Fatal(err)
 	}
 	go func() { _, _ = coalescedClient.Write(append(head, []byte("RAFTBYTES")...)) }()
-	coalescedID, err := readPreamble(coalescedServer, time.Second)
+	coalescedID, _, err := readPreamble(coalescedServer, time.Second)
 	if err != nil {
 		t.Fatalf("readPreamble on a coalesced write: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestPreambleRoundTripAndNoOverRead(t *testing.T) {
 }
 
 func TestPreambleRejections(t *testing.T) {
-	good, err := encodePreamble("g")
+	good, err := encodePreamble("g", KindRaft)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestPreambleRejections(t *testing.T) {
 			defer func() { _ = client.Close() }()
 			defer func() { _ = server.Close() }()
 			go func() { _, _ = client.Write(tc.head) }()
-			_, err := readPreamble(server, time.Second)
+			_, _, err := readPreamble(server, time.Second)
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
 			}
@@ -108,20 +108,20 @@ func TestPreambleShortReadIsRefused(t *testing.T) {
 		_, _ = client.Write([]byte("mrmx"))
 		_ = client.Close()
 	}()
-	if _, err := readPreamble(server, time.Second); err == nil {
+	if _, _, err := readPreamble(server, time.Second); err == nil {
 		t.Fatal("a truncated handshake was accepted")
 	}
 }
 
 func TestEncodePreambleRefusesOutOfRangeIDs(t *testing.T) {
-	if _, err := encodePreamble(""); !errors.Is(err, ErrGroupIDRange) {
+	if _, err := encodePreamble("", KindRaft); !errors.Is(err, ErrGroupIDRange) {
 		t.Fatalf("empty id: err = %v, want ErrGroupIDRange", err)
 	}
 	long := GroupID(strings.Repeat("x", MaxGroupIDLen+1))
-	if _, err := encodePreamble(long); !errors.Is(err, ErrGroupIDRange) {
+	if _, err := encodePreamble(long, KindRaft); !errors.Is(err, ErrGroupIDRange) {
 		t.Fatalf("over-long id: err = %v, want ErrGroupIDRange", err)
 	}
-	if err := writePreamble(nil, long, time.Second); !errors.Is(err, ErrGroupIDRange) {
+	if err := writePreamble(nil, long, KindRaft, time.Second); !errors.Is(err, ErrGroupIDRange) {
 		t.Fatalf("writePreamble over-long id: err = %v, want ErrGroupIDRange", err)
 	}
 }

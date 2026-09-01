@@ -37,11 +37,29 @@
 // it to that predicate, and giving it an arm in the state machine's apply; it is a
 // coordinated upgrade by design, not an accident of deployment order.
 //
-// EVERY READ AND WRITE IS LEADER-ONLY, AND THAT IS AN INTERIM. raft refuses both an
-// append and a leadership verification on a node that is not the leader, so this
-// package returns ErrNotLeader there rather than serving a value it cannot prove
-// current. That is NOT the settled contract: the settled design forwards a
-// non-leader Save, Update and linearizable Load to the flow group's leader from the
-// client side, and lane C2 is the successor that replaces the refusal. A flow author
-// treats it as a condition to report, never as a permanent shape to design around.
+// A NON-LEADER FORWARDS RATHER THAN REFUSING. raft refuses both an append and a
+// leadership verification on a node that is not the leader, so the leader-local
+// primitives beneath this package's surface return ErrNotLeader there. The surface
+// itself — Append, Get, and every Store method over them — resolves the flow group's
+// leader and carries the operation to it, so a flow author calls the same methods on
+// any member of the group and gets the same answer.
+//
+// THE REFUSAL DID NOT DISAPPEAR; IT BECAME THE SIGNAL THE FORWARDING RUNS ON. The loop
+// reads it twice: to decide an operation must leave this node, and to decide that a
+// forwarded operation which landed on a node that no longer leads must be re-resolved
+// by its client rather than relayed onward — relaying it would let two peers whose
+// leader resolution disagrees bounce it between them with no bound governing the chain.
+//
+// THE FORWARDING IS BOUNDED, and the bound is wall-clock rather than a count of
+// attempts, because the attempts one leadership event costs depend entirely on the
+// retry interval. Config.ForwardTimeout sets it and the default covers raft's own
+// worst compliant detection-plus-election window twice over. An operation no leader
+// serves within it fails with ErrForwardBoundExceeded, naming the flow, the attempts
+// made, the bound and the last condition observed — so a caller can tell a leadership
+// change in progress from a group that has lost quorum. The caller's own context is the
+// outer bound and is reported as itself.
+//
+// A FORWARDED READ IS STILL LINEARIZABLE, because the barrier above runs ON THE NODE
+// THAT SERVES IT. The leader proves its term against a quorum and waits for its own
+// state machine before answering, so traveling costs the read none of its guarantee.
 package ledger

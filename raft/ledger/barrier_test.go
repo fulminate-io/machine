@@ -106,16 +106,18 @@ func TestLinearizableReadFencesAConcurrentlyCommittedWrite(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// A read on a NON-LEADER is refused at VerifyLeader rather than answering from
-	// its own possibly-stale state machine.
+	// A LEADER-LOCAL read on a NON-LEADER is refused at VerifyLeader rather than
+	// answering from its own possibly-stale state machine. It asks the leader-local
+	// primitive deliberately: the public entry point forwards, so asking that one
+	// here would exercise forwarding and prove nothing about the barrier's refusal.
 	refused := 0
 	for _, node := range nodes {
 		if node == leader {
 			continue
 		}
-		_, _, err := node.ledger.Get(ctx, "heap/fenced")
+		_, _, err := node.ledger.getLocal(ctx, "heap/fenced")
 		if !errors.Is(err, ErrNotLeader) {
-			t.Fatalf("a read on the follower %s gave %v, want ErrNotLeader", node.id, err)
+			t.Fatalf("a leader-local read on the follower %s gave %v, want ErrNotLeader", node.id, err)
 		}
 		refused++
 	}

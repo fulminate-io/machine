@@ -21,21 +21,28 @@ var _ raft.StreamLayer = (*groupStream)(nil)
 // deliberately separate from Group: raft's NetworkTransport.Close calls
 // StreamLayer.Close, and that call must unbind ONE group rather than take the
 // node's whole listener — or every other group — down with it.
+// forwardCh is the second delivery queue, holding connections the handshake
+// announced as KindForward. It is separate from acceptCh so a backlog on one
+// arm cannot starve the other, and it is released by the SAME doneCh: the
+// group owns both streams' lifetime, so there is one door rather than two.
 type groupStream struct {
-	mux      *Mux
-	id       GroupID
-	acceptCh chan net.Conn
-	doneCh   chan struct{}
-	once     sync.Once
+	mux       *Mux
+	id        GroupID
+	acceptCh  chan net.Conn
+	forwardCh chan net.Conn
+	doneCh    chan struct{}
+	once      sync.Once
 }
 
-// newGroupStream builds the binding for id with the mux's queue depth.
+// newGroupStream builds the binding for id with the mux's queue depth, which
+// both delivery queues take: neither arm is privileged over the other.
 func newGroupStream(m *Mux, id GroupID) *groupStream {
 	return &groupStream{
-		mux:      m,
-		id:       id,
-		acceptCh: make(chan net.Conn, m.cfg.AcceptQueueDepth),
-		doneCh:   make(chan struct{}),
+		mux:       m,
+		id:        id,
+		acceptCh:  make(chan net.Conn, m.cfg.AcceptQueueDepth),
+		forwardCh: make(chan net.Conn, m.cfg.AcceptQueueDepth),
+		doneCh:    make(chan struct{}),
 	}
 }
 
@@ -74,7 +81,7 @@ func (s *groupStream) Dial(address raft.ServerAddress, timeout time.Duration) (n
 	if err != nil {
 		return nil, err
 	}
-	if err := writePreamble(conn, s.id, timeout); err != nil {
+	if err := writePreamble(conn, s.id, KindRaft, timeout); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}

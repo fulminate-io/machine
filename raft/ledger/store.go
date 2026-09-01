@@ -33,14 +33,17 @@ import (
 // breaks that premise is depending on atomicity this store does not provide, and
 // should not read the in-memory store's guarantee across to here.
 //
-// EVERY METHOD IS LEADER-ONLY, AND THAT IS AN INTERIM RATHER THAN THE SETTLED
-// CONTRACT. raft refuses both an append and a leadership verification on a node that
-// is not the leader, so Load, Save and Update on a follower return an error wrapping
-// ErrNotLeader rather than serving a value this node cannot prove current. The
-// settled design forwards a non-leader Save, Update and linearizable Load to the
-// flow group's leader from the client side, and that successor work is lane C2. A
-// flow author should therefore treat the refusal as a condition to report, not as a
-// permanent shape to design around.
+// EVERY METHOD WORKS ON ANY MEMBER OF THE GROUP. Load, Save and Update on a follower
+// FORWARD to the flow group's leader rather than refusing, so a flow author calls them
+// the same way everywhere and does not design around which node they landed on. The
+// forwarding is bounded: an operation no leader serves before Config.ForwardTimeout
+// elapses fails with ErrForwardBoundExceeded, which names the flow, the attempts made,
+// the bound and the last condition observed.
+//
+// UPDATE STILL COMPUTES AT THE CALLER when it forwards. Only the read and the write
+// travel; fn runs in this process on the value the leader returned, so no closure
+// crosses the wire and the datum's own worker is what computes. That is the same
+// division the atomicity note above describes, and forwarding does not change it.
 //
 // Nothing here holds a lock across a raft append. Concurrent appends are the whole
 // throughput lever on a replicated log, and serializing them behind a mutex would

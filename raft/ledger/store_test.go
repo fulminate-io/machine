@@ -138,17 +138,32 @@ func TestSaveIsVisibleToTheNextLoadWithoutABarrier(t *testing.T) {
 	}
 }
 
-func TestFollowerStoreRefusesWithErrNotLeader(t *testing.T) {
+// TestLeaderLocalPrimitivesStillRefuseOnAFollower is the NAMED SUCCESSOR to
+// TestFollowerStoreRefusesWithErrNotLeader, which asserted that a follower's Store
+// refuses. That is deliberately no longer true: the ticket requires the refusal not
+// survive as a reachable path, so a follower's Store now forwards and succeeds.
+//
+// THE REFUSAL DID NOT DISAPPEAR WHEN FORWARDING ARRIVED — IT MOVED BENEATH IT, and
+// this test carries the superseded one's property at the level it now lives. That
+// matters because the refusal is what the forwarding loop keys on twice: to decide an
+// operation must leave this node, and to decide a forwarded operation that landed on a
+// node no longer leading must be re-resolved rather than relayed. If it stopped being
+// reachable here, both decisions would silently lose their signal.
+func TestLeaderLocalPrimitivesStillRefuseOnAFollower(t *testing.T) {
 	nodes := newCluster(t, "flow-store-follower", 3)
 	leader := waitClusterLeader(t, nodes)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// CONTROL: the leader's store answers, so the refusals below are about being a
-	// follower rather than about the store being broken everywhere.
-	if err := leader.ledger.Store().Save(ctx, "heap/alpha", "leader-write"); err != nil {
-		t.Fatalf("CONTROL FAILED: saving on the leader: %v", err)
+	// CONTROL: the LEADER's own leader-local primitives answer, so the refusals below
+	// are about being a follower rather than about the primitives being broken
+	// everywhere.
+	if _, err := leader.ledger.appendLocal(ctx, Entry{Kind: KindSet, Path: "heap/alpha", Value: []byte("leader-write")}); err != nil {
+		t.Fatalf("CONTROL FAILED: the leader's own appendLocal: %v", err)
+	}
+	if _, present, err := leader.ledger.getLocal(ctx, "heap/alpha"); err != nil || !present {
+		t.Fatalf("CONTROL FAILED: the leader's own getLocal gave present=%v err=%v", present, err)
 	}
 
 	checked := 0
@@ -156,19 +171,15 @@ func TestFollowerStoreRefusesWithErrNotLeader(t *testing.T) {
 		if node == leader {
 			continue
 		}
-		store := node.ledger.Store()
 
-		if value, ok, err := store.Load(ctx, "heap/alpha"); !errors.Is(err, ErrNotLeader) {
-			t.Fatalf("Load on the follower %s gave %v present=%v err=%v, want ErrNotLeader rather than a value it cannot prove current",
-				node.id, value, ok, err)
-		} else if value != nil || ok {
-			t.Fatalf("a refused Load on %s still returned %v present=%v; a failed read reports nothing", node.id, value, ok)
+		if entry, present, err := node.ledger.getLocal(ctx, "heap/alpha"); !errors.Is(err, ErrNotLeader) {
+			t.Fatalf("getLocal on the follower %s gave %v present=%v err=%v, want ErrNotLeader rather than a value it cannot prove current",
+				node.id, entry, present, err)
+		} else if present {
+			t.Fatalf("a refused getLocal on %s still reported present; a failed read reports nothing", node.id)
 		}
-		if err := store.Save(ctx, "heap/alpha", "follower-write"); !errors.Is(err, ErrNotLeader) {
-			t.Fatalf("Save on the follower %s gave %v, want ErrNotLeader", node.id, err)
-		}
-		if _, err := store.Update(ctx, "heap/alpha", func(v any) any { return v }); !errors.Is(err, ErrNotLeader) {
-			t.Fatalf("Update on the follower %s gave %v, want ErrNotLeader", node.id, err)
+		if _, err := node.ledger.appendLocal(ctx, Entry{Kind: KindSet, Path: "heap/alpha", Value: []byte("follower-write")}); !errors.Is(err, ErrNotLeader) {
+			t.Fatalf("appendLocal on the follower %s gave %v, want ErrNotLeader", node.id, err)
 		}
 		checked++
 	}
