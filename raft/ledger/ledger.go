@@ -178,6 +178,18 @@ type Ledger struct {
 	// deliberately slow append without standing up a raft cluster to slow down.
 	establish func()
 
+	// establishmentProbe, when non-nil, is called inside awaitEstablishment's loop
+	// immediately after its FIRST read and before its second.
+	//
+	// It exists because the missed wakeup that loop's ordering guards against
+	// reproduces about twice in four thousand attempts naturally, which is a flake
+	// rather than a gate. Recording an establishment from here forces the exact
+	// interleaving deterministically: under the correct order the record lands after
+	// the wake channel is already held and the re-check sees it, and under the
+	// defective order it lands in the gap between the two reads and the reader parks
+	// on a channel nothing will ever close.
+	establishmentProbe func()
+
 	// epochMu guards the term this node has established and the journal index its
 	// epoch entry landed at. The pair is written only when an epoch append RESOLVES,
 	// so a leadership flap part-way through an append records nothing.

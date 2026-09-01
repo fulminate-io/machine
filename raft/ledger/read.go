@@ -94,16 +94,34 @@ func (l *Ledger) readSatisfied() (bool, error) {
 // It re-reads the term on every pass: a flap mid-wait means the term this read must
 // be fenced against has changed, and the establishment recorded for the old one says
 // nothing about the new.
+//
+// THE WAKE CHANNEL IS TAKEN BEFORE THE ESTABLISHMENT IS CHECKED, AND THAT ORDER IS
+// THE WHOLE CORRECTNESS ARGUMENT. The two live under different locks — the record
+// under epochMu, the broadcast under the tracker's — so checking first and
+// subscribing second leaves a gap: a record that lands entirely between them is
+// missed by the check that already ran AND closes a channel this reader has not
+// taken yet, so the reader goes on to park on the fresh replacement and is never
+// woken. With no ReadTimeout and a deadline-less caller that is an indefinite block
+// on the published read path, in exactly the fresh-leader window.
+//
+// Subscribing first removes the gap in both directions: a record BEFORE the channel
+// read is seen by the re-check below, and one AFTER it closes the very channel this
+// reader is holding. This mirrors why waitApplied is safe — observe() takes the index
+// and the channel together under one lock — except that establishment cannot be read
+// under the tracker's lock, so the ordering does the work the shared lock does there.
 func (l *Ledger) awaitEstablishment(ctx context.Context) (uint64, error) {
 	for {
-		term := l.raft.CurrentTerm()
-		if epoch, established := l.establishment(term); established {
-			return epoch, nil
-		}
-
 		_, wake, poison := l.fsm.observe()
 		if poison != nil {
 			return 0, poison
+		}
+		if l.establishmentProbe != nil {
+			l.establishmentProbe()
+		}
+
+		term := l.raft.CurrentTerm()
+		if epoch, established := l.establishment(term); established {
+			return epoch, nil
 		}
 
 		select {

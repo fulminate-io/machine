@@ -3,12 +3,61 @@ package ledger
 import (
 	"context"
 	"io"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 )
+
+func TestEstablishmentWaitDoesNotMissAConcurrentRecord(t *testing.T) {
+	// The establishment record and the wake broadcast live under DIFFERENT locks, so
+	// a reader that checks establishment before subscribing to the wake channel has a
+	// gap: a record landing entirely between the two is missed by the check that
+	// already ran and closes a channel the reader has not taken yet. The reader then
+	// parks on the fresh replacement and nothing ever wakes it — with no ReadTimeout
+	// and a deadline-less caller, an indefinite block on the published read path.
+	//
+	// THE INTERLEAVING IS FORCED, NOT SAMPLED. Naturally it reproduces about twice in
+	// four thousand attempts, which is a flake; driven from the probe it is
+	// deterministic on every run.
+	l := openTestLedger(t, Config{Flow: "flow-missed-wakeup", LocalID: "n0", Mux: testMux(t), Bootstrap: true})
+	waitLeadership(t, l)
+	awaitEstablished(t, l)
+
+	term := l.raft.CurrentTerm()
+
+	// CONTROL: while the term IS established the wait returns immediately, so the
+	// harness is not passing because waiting is broken in general.
+	immediate, cancelImmediate := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelImmediate()
+	if _, err := l.awaitEstablishment(immediate); err != nil {
+		t.Fatalf("CONTROL FAILED: the wait failed on an already-established term: %v", err)
+	}
+
+	// Clear the record so this term reads as unestablished, which is the state a
+	// fresh leader is in before its epoch entry resolves.
+	l.epochMu.Lock()
+	l.epochTerm, l.epochIndex = 0, 0
+	l.epochMu.Unlock()
+
+	const recordedAt = 42
+	var once sync.Once
+	l.establishmentProbe = func() {
+		once.Do(func() { l.recordEstablishment(term, recordedAt) })
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	epoch, err := l.awaitEstablishment(ctx)
+	if err != nil {
+		t.Fatalf("a record landing between the wait's two reads was MISSED: %v; the reader parked on a channel the broadcast had already replaced, and with no ReadTimeout that block is indefinite", err)
+	}
+	if epoch != recordedAt {
+		t.Fatalf("the wait returned epoch %d, want the %d recorded during it", epoch, recordedAt)
+	}
+}
 
 func TestFreshLeaderReadIsNotStale(t *testing.T) {
 	dir := t.TempDir()
