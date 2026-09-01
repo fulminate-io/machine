@@ -35,7 +35,9 @@ func tokenMux(t *testing.T, tokens ...Token) *Mux {
 // signer would produce.
 func dialRaw(t *testing.T, m *Mux, head []byte) net.Conn {
 	t.Helper()
-	c, err := net.DialTimeout("tcp", m.Addr().String(), 2*time.Second)
+	// The LISTENER address, not the advertised one: a mux under test may advertise
+	// a routable address that nothing on this host can dial.
+	c, err := net.DialTimeout("tcp", m.ln.Addr().String(), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -148,6 +150,15 @@ func assertDeliveredVia(t *testing.T, accept func() (net.Conn, error), c net.Con
 	}
 	if string(got) != payload {
 		t.Fatalf("%s: delivered %q, want %q", why, got, payload)
+	}
+}
+
+// mustSetTokens rotates and fails the test on a refusal, so a rotation the mux
+// declines cannot pass silently as one it accepted.
+func mustSetTokens(t *testing.T, m *Mux, tokens ...Token) {
+	t.Helper()
+	if err := m.SetTokens(tokens...); err != nil {
+		t.Fatalf("SetTokens(%v): %v", tokens, err)
 	}
 }
 
@@ -336,6 +347,76 @@ func TestUnauthenticatedMuxIsRefusedOnANonLoopbackAdvertisement(t *testing.T) {
 	_ = onLoopback.Close()
 }
 
+func TestSetTokensRefusesEmptyingARoutableMux(t *testing.T) {
+	const tok Token = "join-token"
+	routable := &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 8300}
+
+	// THE ROTATION DOOR. Every other leg in this file tests New; nothing tested
+	// SetTokens, and while it returned no error a narrowing to zero elements moved
+	// an already-constructed routable mux to an empty accepted set — every proof
+	// admitted, no refusal, no log, no counter — while this roster stayed green.
+	t.Run("routable refuses emptying", func(t *testing.T) {
+		m, err := New(Config{
+			BindAddr: "127.0.0.1:0", Advertise: routable, Tokens: []Token{tok},
+			HandshakeTimeout: 500 * time.Millisecond, RPCTimeout: time.Second,
+		})
+		if err != nil {
+			t.Fatalf("New on a routable advertisement WITH a token: %v", err)
+		}
+		t.Cleanup(func() { _ = m.Close() })
+		s, err := m.bindStream("known")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = s.Close() }()
+
+		if err := m.SetTokens(); !errors.Is(err, ErrTokenRequired) {
+			t.Fatalf("SetTokens() on a routable mux: err = %v, want ErrTokenRequired: the loopback rule must "+
+				"hold at the rotation door as well as at construction", err)
+		}
+
+		// AND THE SET WAS NOT MUTATED. An implementation that emptied first and
+		// returned the error afterwards would satisfy the assertion above and be
+		// exactly as open as one that never refused, so what is checked here is an
+		// unsigned proof rather than the return value.
+		unsigned, err := encodePreamble(KindRaft, "known", openSigner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertRefused(t, dialRaw(t, m, unsigned), "an unsigned proof after a refused emptying")
+		if st := m.Stats(); st.RejectedUnauthenticated != 1 {
+			t.Fatalf("RejectedUnauthenticated = %d, want 1: the refused emptying left the mux accepting "+
+				"every proof", st.RejectedUnauthenticated)
+		}
+	})
+
+	// THE ARM THAT STOPS THE FIX FROM BREAKING THE RULED DEV MODE. An
+	// implementation that refused EVERY emptying passes the arm above and breaks
+	// the zero-config mode the ruling protects, where the token is absent or
+	// implicit locally.
+	t.Run("loopback still empties", func(t *testing.T) {
+		m := tokenMux(t, tok)
+		s, err := m.bindStream("known")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = s.Close() }()
+
+		if err := m.SetTokens(); err != nil {
+			t.Fatalf("SetTokens() on a loopback mux: %v — dev and tests stay zero-config, so emptying here "+
+				"is the ruled shape rather than a hole", err)
+		}
+		// AND THE EMPTYING TOOK EFFECT: an unsigned proof is now admitted, which is
+		// what makes this an assertion rather than a check that a call returned nil.
+		unsigned, err := encodePreamble(KindRaft, "known", openSigner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertDelivered(t, s, dialHeadSession(t, m, unsigned, ""), "OPEN",
+			"an unsigned proof against a mux emptied on loopback")
+	})
+}
+
 func TestRotationAdmitsBothTokensDuringOverlapAndOnlyTheNewOneAfter(t *testing.T) {
 	const outgoing Token = "outgoing-token"
 	const incoming Token = "incoming-token"
@@ -347,7 +428,7 @@ func TestRotationAdmitsBothTokensDuringOverlapAndOnlyTheNewOneAfter(t *testing.T
 			t.Fatal(err)
 		}
 		defer func() { _ = s.Close() }()
-		m.SetTokens(incoming, outgoing)
+		mustSetTokens(t, m, incoming, outgoing)
 		assertDelivered(t, s, dialHeadSession(t, m, headUnder(t, KindRaft, "known", outgoing), outgoing),
 			"OLD", "a peer still holding the outgoing token")
 		assertDelivered(t, s, dialHeadSession(t, m, headUnder(t, KindRaft, "known", incoming), incoming),
@@ -361,8 +442,8 @@ func TestRotationAdmitsBothTokensDuringOverlapAndOnlyTheNewOneAfter(t *testing.T
 			t.Fatal(err)
 		}
 		defer func() { _ = s.Close() }()
-		m.SetTokens(incoming, outgoing)
-		m.SetTokens(incoming)
+		mustSetTokens(t, m, incoming, outgoing)
+		mustSetTokens(t, m, incoming)
 		assertDelivered(t, s, dialHeadSession(t, m, headUnder(t, KindRaft, "known", incoming), incoming),
 			"NEW", "a peer holding the incoming token")
 		assertRefused(t, dialUnder(t, m, KindRaft, "known", outgoing), "a peer holding the withdrawn token")
@@ -386,7 +467,7 @@ func TestRotationAdmitsBothTokensDuringOverlapAndOnlyTheNewOneAfter(t *testing.T
 		defer func() { _ = s.Close() }()
 		assertDelivered(t, s, dialHeadSession(t, m, headUnder(t, KindRaft, "known", compromised), compromised),
 			"BEFORE", "a peer holding the token that is about to be revoked")
-		m.SetTokens(incoming)
+		mustSetTokens(t, m, incoming)
 		assertRefused(t, dialUnder(t, m, KindRaft, "known", compromised),
 			"the same peer after the accepted set was narrowed to one element")
 		if st := m.Stats(); st.RejectedUnauthenticated != 1 {

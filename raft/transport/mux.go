@@ -183,10 +183,18 @@ func (m *Mux) checkAdvertisable() error {
 	if addr.IP == nil || addr.IP.IsUnspecified() {
 		return ErrNotAdvertisable
 	}
-	if !addr.IP.IsLoopback() && m.signer.empty() {
+	if !m.loopback() && m.signer.empty() {
 		return ErrTokenRequired
 	}
 	return nil
+}
+
+// loopback reports whether the address this mux ADVERTISES is one only this host
+// can reach. It is the single definition both doors consult, so the construction
+// rule and the rotation rule cannot drift apart.
+func (m *Mux) loopback() bool {
+	addr, ok := m.Addr().(*net.TCPAddr)
+	return ok && addr.IP != nil && addr.IP.IsLoopback()
 }
 
 // SetTokens replaces the accepted token set, and is the ONLY rotation
@@ -194,7 +202,30 @@ func (m *Mux) checkAdvertisable() error {
 // either is admitted; installing [new] closes it; and a revocation is that same
 // narrowing rather than a second path that would rot between uses. The first
 // element is what this node dials with from the next connection on.
-func (m *Mux) SetTokens(tokens ...Token) { m.signer.set(tokens) }
+//
+// IT REFUSES AN EMPTYING THAT WOULD LEAVE A ROUTABLE MUX ACCEPTING EVERY PROOF,
+// with the same ErrTokenRequired New uses, so the two doors enforce one rule.
+// The loopback rule was previously gated at CONSTRUCTION ONLY, and nothing
+// stopped a later SetTokens from moving an already-constructed routable mux to
+// an empty accepted set — at which point verification is a no-op and every proof
+// is admitted, with no refusal, no log and no counter moving. That is a silent
+// fail-open on an authentication surface.
+//
+// THE REFUSAL IS SCOPED TO ROUTABLE ADVERTISEMENTS AND MUST NOT BE WIDENED.
+// Emptying the set on a LOOPBACK mux is legitimate: it is the ruled zero-config
+// dev and test mode, where the token is absent or implicit. An implementation
+// that refused every emptying would break the mode that ruling protects.
+//
+// NOTHING IS MUTATED ON THE REFUSING PATH. A version that emptied the set first
+// and returned the error afterwards would be exactly as open as one that never
+// refused at all.
+func (m *Mux) SetTokens(tokens ...Token) error {
+	if len(tokens) == 0 && !m.loopback() {
+		return fmt.Errorf("%w: Config.Tokens cannot be emptied on a mux advertising %s", ErrTokenRequired, m.Addr())
+	}
+	m.signer.set(tokens)
+	return nil
+}
 
 // Addr reports the one address every group on this mux is reached at. Group
 // identity is carried by the handshake, never by the address.

@@ -157,6 +157,14 @@ func TestAnnounceToANonLeaderRedirectsToTheFlowsLeader(t *testing.T) {
 	follower := newClusterNode(t, "b-follower", []string{"alpha"}, 2)
 	follower.peering(leader.addr)
 	follower.start(t)
+	// THE PRECONDITION, and it is a precondition rather than a workaround. A
+	// redirect names the address raft believes leads the flow, so a node that has
+	// been staged but has not yet received a single AppendEntries has nothing to
+	// name and correctly refuses instead. MEASURED before this wait existed: 2
+	// failures in 8 runs, every one of them "flow alpha has no known leader to
+	// redirect to" — the implementation behaving correctly against a test that had
+	// not established the state it was asserting about.
+	awaitKnowsLeader(t, follower, "alpha")
 
 	// The follower hosts the flow and does not lead it, which is the case that
 	// must produce a redirect rather than a refusal.
