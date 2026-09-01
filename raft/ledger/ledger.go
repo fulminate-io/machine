@@ -673,6 +673,50 @@ func (l *Ledger) Restore(meta *raft.SnapshotMeta, reader io.Reader, timeout time
 // Flow reports the flow this ledger replicates.
 func (l *Ledger) Flow() string { return l.cfg.Flow }
 
+// Configuration reports the membership this node's state machine has applied and
+// the index it landed at.
+//
+// IT IS READABLE ON EVERY MEMBER, not only the leader. Raft's own membership
+// events are leader-only, so the every-node signal is the state machine's
+// configuration commit — which every member applies.
+func (l *Ledger) Configuration() (raft.Configuration, uint64) {
+	view := l.fsm.observeConfiguration()
+
+	return view.configuration, view.index
+}
+
+// WatchConfiguration blocks until the applied membership has advanced past since,
+// then returns it with the index it landed at.
+//
+// MEMBERSHIP IS READ THROUGH A CURSOR, NOT A CHANNEL, and that is what makes a
+// lost signal unrepresentable. raft calls StoreConfiguration on its own state
+// machine goroutine, so a callback that blocked would park the state machine, and
+// a buffered channel that filled would DROP the membership change a recovery
+// decision depends on. A reader holds a cursor and asks for everything since it;
+// a slow reader falls behind without anything blocking or dropping.
+//
+// THE WAKE CHANNEL IS TAKEN WITH THE VALUE IT ACCOUNTS FOR, under one lock, so
+// there is no window in which a commit lands between the check and the subscribe —
+// the same reasoning waitApplied rests on.
+//
+// IT DOES NOT CONSULT THE POISON. See configurationView: a poisoned journal is
+// exactly when a recovery path most needs membership, and this reports raft's own
+// configuration rather than a journal value.
+func (l *Ledger) WatchConfiguration(ctx context.Context, since uint64) (raft.Configuration, uint64, error) {
+	for {
+		view := l.fsm.observeConfiguration()
+		if view.index > since {
+			return view.configuration, view.index, nil
+		}
+
+		select {
+		case <-view.wake:
+		case <-ctx.Done():
+			return raft.Configuration{}, 0, ctx.Err()
+		}
+	}
+}
+
 // appendLocal replicates one entry ON THIS NODE, waits for this node's state machine
 // to apply it, and returns THE JOURNAL INDEX the entry landed at.
 //

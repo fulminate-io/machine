@@ -32,6 +32,13 @@ type fsm struct {
 	applied uint64
 	wake    chan struct{}
 	poison  error
+	// configuration and configurationIndex track the last membership this state
+	// machine applied. They live under the SAME mutex and are woken by the SAME
+	// broadcast channel as the applied index, which is what lets a membership
+	// reader park on progress and on a context at once without a second channel
+	// being handed to raft.
+	configuration      raft.Configuration
+	configurationIndex uint64
 }
 
 func newFSM() *fsm {
@@ -70,16 +77,47 @@ func (f *fsm) applyEntry(index uint64, entry Entry) any {
 	}
 }
 
-// StoreConfiguration advances the tracked index for a membership commit and does
-// nothing else.
+// StoreConfiguration records a membership commit and advances the tracked index.
 //
 // IMPLEMENTING raft.ConfigurationStore IS NOT OPTIONAL HERE, and it is not only
 // about membership. raft's own applySingle returns early for a configuration entry
 // when the state machine does not implement this interface, deliberately not
 // advancing its index either — so without this method a configuration commit
 // would leave a reader parked behind an index the state machine never reaches.
-func (f *fsm) StoreConfiguration(index uint64, _ raft.Configuration) {
-	f.advance(index)
+//
+// The membership and its index are recorded and the tracked index advanced in ONE
+// critical section, for the reason set gives: no reader may observe the index
+// without the value it accounts for.
+func (f *fsm) StoreConfiguration(index uint64, configuration raft.Configuration) {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+
+	f.configuration = configuration
+	f.configurationIndex = index
+	f.advanceLocked(index)
+}
+
+// configurationView is the membership, the index it landed at, and the wake
+// channel, read together under one lock.
+//
+// IT CARRIES NO POISON, DELIBERATELY. A poisoned journal is exactly when a
+// recovery decision most needs to see membership, and this reports raft's OWN
+// configuration rather than any journal value — so a poison that refuses journal
+// reads must not also silence the signal a recovery path reads in order to act
+// on it.
+type configurationView struct {
+	configuration raft.Configuration
+	index         uint64
+	wake          chan struct{}
+}
+
+// observeConfiguration reads the membership, its index and the wake channel as
+// ONE consistent triple, the way observe does for the applied index.
+func (f *fsm) observeConfiguration() configurationView {
+	f.mutex.RLock()
+	defer f.mutex.RUnlock()
+
+	return configurationView{configuration: f.configuration, index: f.configurationIndex, wake: f.wake}
 }
 
 // set stores an entry and advances the index in ONE critical section, so no reader

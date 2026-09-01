@@ -61,6 +61,8 @@ const (
 	// leadershipPollInterval is how often a flow's supervisor re-reads whether
 	// this node leads it.
 	leadershipPollInterval = 50 * time.Millisecond
+	// defaultEvictInterval is how often a leader runs one eviction round.
+	defaultEvictInterval = 10 * time.Second
 )
 
 // Config carries what the control channel needs to serve and to dial.
@@ -126,10 +128,11 @@ func (c Config) validate() error {
 // Manager owns this node's membership control channel: the acceptor that serves
 // peers and the client that asks them.
 type Manager struct {
-	cfg    Config
-	logger hclog.Logger
-	link   *transport.MembershipLink
-	peers  *peers
+	cfg     Config
+	logger  hclog.Logger
+	link    *transport.MembershipLink
+	peers   *peers
+	signals *signalLog
 
 	// admit is the staging call, held as a field for ONE reason: the availability
 	// proof has to be able to run the wrong shape. The mutant it exists to catch
@@ -194,6 +197,7 @@ func New(cfg Config) (*Manager, error) {
 		logger:   logger,
 		link:     link,
 		peers:    newPeers(link, logger),
+		signals:  newSignalLog(),
 		inflight: map[net.Conn]struct{}{},
 		flows:    map[string]*ledger.Ledger{},
 		pilots:   map[string]*flowPilot{},
@@ -323,7 +327,9 @@ func (m *Manager) answer(conn net.Conn, kind msgKind, body []byte) error {
 		return m.answerStats(conn, body)
 	case msgAnnounce:
 		return m.answerJoin(conn, body)
-	case msgLeave, msgAnnounceReply, msgStatsReply, msgLeaveReply:
+	case msgLeave:
+		return m.answerDeparture(conn, body)
+	case msgAnnounceReply, msgStatsReply, msgLeaveReply:
 		return fmt.Errorf("%w: kind %d", ErrUnservedMessage, uint8(kind))
 	default:
 		return fmt.Errorf("%w: kind %d", ErrUnknownMessage, uint8(kind))
@@ -346,6 +352,15 @@ func (m *Manager) answerJoin(conn net.Conn, body []byte) error {
 		return err
 	}
 	return m.reply(conn, msgAnnounceReply, m.answerAnnounce(req))
+}
+
+// answerDeparture serves a leave.
+func (m *Manager) answerDeparture(conn net.Conn, body []byte) error {
+	var req leave
+	if err := decodeMessage(body, &req); err != nil {
+		return err
+	}
+	return m.reply(conn, msgLeaveReply, m.answerLeave(req))
 }
 
 // reply bounds the write in time and sends one message. The write deadline

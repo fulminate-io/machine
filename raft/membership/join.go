@@ -61,8 +61,12 @@ func (m *Manager) superviseFlow(flow string) {
 	m.mu.Lock()
 	m.pilots[flow] = pilot
 	m.mu.Unlock()
-	m.wg.Add(1)
+	m.wg.Add(2)
 	go m.supervise(flow, pilot, l.Raft())
+	// The membership watcher runs on EVERY node, unlike the promoter above,
+	// because a follower that could not see a configuration change could not act
+	// on one.
+	go m.watchMembership(flow, pilot)
 }
 
 // supervise starts and stops a flow's autopilot as this node gains and loses
@@ -76,6 +80,8 @@ func (m *Manager) supervise(flow string, pilot *flowPilot, r *raft.Raft) {
 	defer m.wg.Done()
 	ticker := time.NewTicker(leadershipPollInterval)
 	defer ticker.Stop()
+	evictions := time.NewTicker(orDuration(m.cfg.Autopilot.ReconcileInterval, defaultEvictInterval))
+	defer evictions.Stop()
 	running := false
 	for {
 		running = m.reconcileLeadership(flow, pilot, r, running)
@@ -85,6 +91,13 @@ func (m *Manager) supervise(flow string, pilot *flowPilot, r *raft.Raft) {
 				<-pilot.stop()
 			}
 			return
+		case <-pilot.done:
+			if running {
+				<-pilot.stop()
+			}
+			return
+		case <-evictions.C:
+			m.evictRound(m.pilotCtx, flow)
 		case <-ticker.C:
 		}
 	}

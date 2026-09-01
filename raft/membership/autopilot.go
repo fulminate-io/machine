@@ -40,11 +40,21 @@ type flowPilot struct {
 	mgr   *Manager
 	flow  string
 	pilot *autopilot.Autopilot
+	// done releases this flow's supervisor when the flow itself goes away,
+	// which a manager-wide cancel cannot express: a single flow leaving must
+	// stop reading a raft handle that is about to be closed, while every other
+	// flow keeps running.
+	done     chan struct{}
+	doneOnce sync.Once
 
-	mu     sync.Mutex
-	state  *autopilot.State
-	failed []raft.ServerID
+	mu      sync.Mutex
+	state   *autopilot.State
+	failed  []raft.ServerID
+	healthy map[raft.ServerID]bool
 }
+
+// release ends this flow's supervision, once.
+func (f *flowPilot) release() { f.doneOnce.Do(func() { close(f.done) }) }
 
 // flowPilot must satisfy autopilot's integration contract exactly; a drift in
 // that interface must break the build here rather than at a call site.
@@ -52,7 +62,7 @@ var _ autopilot.ApplicationIntegration = (*flowPilot)(nil)
 
 // newFlowPilot builds the integration and the autopilot instance for one flow.
 func newFlowPilot(m *Manager, flow string, r *raft.Raft) *flowPilot {
-	f := &flowPilot{mgr: m, flow: flow}
+	f := &flowPilot{mgr: m, flow: flow, done: make(chan struct{}), healthy: map[raft.ServerID]bool{}}
 	tuning := m.cfg.Autopilot
 	f.pilot = autopilot.New(r, f,
 		autopilot.WithLogger(m.logger.Named("autopilot").With("flow", flow)),
@@ -84,11 +94,26 @@ func (f *flowPilot) AutopilotConfig() *autopilot.Config {
 	}
 }
 
-// NotifyState records the state the membership signals read.
+// NotifyState records the state the membership signals read, and turns the
+// health it carries into unreachable and returned signals.
 func (f *flowPilot) NotifyState(state *autopilot.State) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.state = state
+	f.mu.Unlock()
+	f.noteHealth(healthOf(state))
+}
+
+// healthOf projects autopilot's published state down to the one thing the
+// signals read: whether each member is healthy.
+func healthOf(state *autopilot.State) *autopilotState {
+	out := &autopilotState{health: map[raft.ServerID]bool{}}
+	if state == nil {
+		return out
+	}
+	for id, server := range state.Servers {
+		out.health[id] = server.Health.Healthy
+	}
+	return out
 }
 
 // FetchServerStats answers from the PER-NODE stats view, never by dialing here.
