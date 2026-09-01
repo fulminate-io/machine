@@ -60,6 +60,20 @@ func TestSaveIsVisibleToTheNextLoadWithoutABarrier(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
+	// FENCE ESTABLISHMENT BEFORE SAMPLING. This test measures the no-append-on-read
+	// rule by sampling raft's last log index around the read and requiring no delta,
+	// and the epoch append is ASYNCHRONOUS — it runs off a leadership acquisition and
+	// off a restore. An epoch landing inside the sampling window is attributed to the
+	// read, which is a CONTAMINATED MEASUREMENT rather than a broken subject:
+	// observed once under full-suite load and zero times in twelve isolated runs.
+	// Waiting until this term's epoch has been appended and applied leaves the read
+	// as the only thing that could move the index during the window.
+	//
+	// The ASSERTION IS UNCHANGED. It is the gate protecting the no-append-on-read
+	// rule, which this package leaned on twice to keep repairs off the read path, and
+	// it is not loosened into a tolerance.
+	awaitEstablished(t, l)
+
 	// CONTROL: a Save DOES move the log's last index, so the unchanged index across
 	// the Load below is evidence about reads rather than an index that never moves.
 	beforeSave := l.raft.LastIndex()

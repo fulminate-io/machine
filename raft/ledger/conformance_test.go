@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"context"
+	"io"
 	"testing"
 	"time"
 
@@ -22,6 +23,10 @@ import (
 // It is an ANONYMOUS interface deliberately. A named exported interface would become
 // part of the seam and invite implementations; the point is to pin the concrete
 // type's shape, not to offer an abstraction.
+// Restore is pinned here alongside the rest because it is now published surface a
+// consumer is REQUIRED to use: a snapshot delivered through Raft().Restore skips the
+// epoch epilogue and leaves every read on that node timing out. A method the seam
+// tells callers they must use is exactly the kind that must not drift silently.
 type ledgerSurface = interface {
 	Close() error
 	Store() *Store
@@ -29,6 +34,7 @@ type ledgerSurface = interface {
 	Flow() string
 	Append(context.Context, Entry) (uint64, error)
 	Get(context.Context, string) (Entry, bool, error)
+	Restore(*raft.SnapshotMeta, io.Reader, time.Duration) error
 }
 
 var _ ledgerSurface = (*Ledger)(nil)

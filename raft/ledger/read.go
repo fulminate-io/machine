@@ -23,40 +23,106 @@ var (
 // barrier is the linearizable read this package BUILDS, because hashicorp/raft
 // v1.7.3 exposes no ReadIndex to borrow one from.
 //
-// Two steps, and both are necessary. VerifyLeader proves against a quorum that this
-// node still holds its term, so the value about to be read is not a deposed
-// leader's. The commit index observed AFTER that proof is then waited for on this
-// node's OWN state machine, because raft's commit index counts entries this state
-// machine may not have applied yet — reading at the commit index alone returns a
-// value that is stale by exactly those entries.
+// Four steps: prove leadership, await this term's ESTABLISHMENT, take the target as
+// the greater of the commit index and this term's epoch position, then wait for the
+// state machine to reach it.
 //
-// It never acquires raft's Barrier: that is a full replicated write, and a read
-// path must not append to the log to answer a question.
+// STEP TWO IS NOT OPTIONAL AND IT IS NOT A LIVENESS NICETY. raft advances a leader's
+// commit index only once something commits in its CURRENT term, so a leader that has
+// just replayed a log from disk reports a commit index far behind its last index —
+// zero, in the measured case, while the log held committed entries. A barrier that
+// went straight to the commit index there took a target an EMPTY state machine
+// already satisfied, returned instantly, and answered ABSENT for data that was
+// committed and on disk. That is a data-integrity defect, not a slow read.
+//
+// THE BARRIER THEREFORE MUST NOT FALL THROUGH TO THE COMMIT INDEX WHEN THE TERM IS
+// UNESTABLISHED: falling through IS the defective state. An unestablished term is
+// WAITED on, bounded by the caller's context, and reported as a wrapped
+// ErrReadTimeout naming the term.
+//
+// The per-term epoch entry is the fence because it commits in the CURRENT term, so
+// its apply implies every earlier entry in the log has applied too — exactly the
+// marker a fresh leader lacks. Taking the target from LastIndex would also close the
+// hole, and was refused: it makes a read wait on entries that are not yet committed
+// and that a leadership loss can leave uncommitted forever, converting a fast correct
+// read into a timeout during the very flap this barrier exists to survive.
+//
+// It never acquires raft's Barrier: that is a full replicated write, and a read path
+// must not append to the log to answer a question.
 func (l *Ledger) barrier(ctx context.Context) error {
 	if err := l.raft.VerifyLeader().Error(); err != nil {
 		return fmt.Errorf("ledger: verifying leadership for flow %q: %w", l.cfg.Flow, translateRaftError(err))
 	}
-	target := l.raft.CommitIndex()
-
-	if l.cfg.ReadTimeout <= 0 {
-		return l.fsm.waitApplied(ctx, target)
+	if satisfied, err := l.readSatisfied(); satisfied || err != nil {
+		return err
 	}
 
-	// The ReadTimeout is materialized ONLY on the branch that actually waits. A
-	// read whose state machine is already caught up is the common case, and giving
-	// it a per-call deadline context would allocate on every one of them.
-	applied, _, poison := l.fsm.observe()
-	switch {
-	case poison != nil:
-		return poison
-	case applied >= target:
-		return nil
-	}
-
-	waitCtx, cancel := context.WithTimeout(ctx, l.cfg.ReadTimeout)
+	waitCtx, cancel := l.readContext(ctx)
 	defer cancel()
 
-	return l.fsm.waitApplied(waitCtx, target)
+	epoch, err := l.awaitEstablishment(waitCtx)
+	if err != nil {
+		return err
+	}
+
+	return l.fsm.waitApplied(waitCtx, max(l.raft.CommitIndex(), epoch))
+}
+
+// readSatisfied reports whether this read needs no waiting at all: the term is
+// established and the state machine has already reached the target.
+//
+// It is separated so the common case touches NO context. A read on a stable leader
+// reaches this and returns, and materializing a per-call deadline ahead of it would
+// allocate on every one of them.
+func (l *Ledger) readSatisfied() (bool, error) {
+	epoch, established := l.establishment(l.raft.CurrentTerm())
+	if !established {
+		return false, nil
+	}
+
+	applied, _, poison := l.fsm.observe()
+	if poison != nil {
+		return false, poison
+	}
+
+	return applied >= max(l.raft.CommitIndex(), epoch), nil
+}
+
+// awaitEstablishment blocks until this node has recorded an epoch entry for the term
+// it currently holds, and returns the index that entry landed at.
+//
+// It re-reads the term on every pass: a flap mid-wait means the term this read must
+// be fenced against has changed, and the establishment recorded for the old one says
+// nothing about the new.
+func (l *Ledger) awaitEstablishment(ctx context.Context) (uint64, error) {
+	for {
+		term := l.raft.CurrentTerm()
+		if epoch, established := l.establishment(term); established {
+			return epoch, nil
+		}
+
+		_, wake, poison := l.fsm.observe()
+		if poison != nil {
+			return 0, poison
+		}
+
+		select {
+		case <-wake:
+		case <-ctx.Done():
+			return 0, fmt.Errorf("ledger: term %d is not established, so no committed index can be trusted yet: %w",
+				term, ErrReadTimeout)
+		}
+	}
+}
+
+// readContext applies Config.ReadTimeout, when there is one, to the branch that
+// actually waits.
+func (l *Ledger) readContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if l.cfg.ReadTimeout <= 0 {
+		return ctx, func() {}
+	}
+
+	return context.WithTimeout(ctx, l.cfg.ReadTimeout)
 }
 
 // waitApplied blocks until the state machine has applied everything up to target,

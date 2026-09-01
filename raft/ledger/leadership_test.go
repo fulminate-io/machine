@@ -89,41 +89,98 @@ func waitClusterLeader(t *testing.T, nodes []*clusterNode) *clusterNode {
 	return nil
 }
 
-// readFirstOfTerm takes THE FIRST READ of a term with no write before it, which is
-// the only shape that exposes a term whose election no-op was never applied. A
-// write on the new term would advance the tracked index past that no-op by itself
-// and hide the stall.
+// fencedPath and fencedValue are committed on the FIRST term of the tests below and
+// read back on every later one.
+const (
+	fencedPath  = "heap/fenced"
+	fencedValue = "committed-on-an-earlier-term"
+)
+
+// readFirstOfTerm takes THE FIRST READ of a term with no write before it and
+// requires it to return the value committed on an earlier term.
+//
+// TWO PROPERTIES, AND THE SECOND IS THE ONE THIS GATE EXISTS FOR. Convergence — the
+// read completing rather than expiring — was the original property and it remains.
+// It is NOT sufficient: a barrier whose target is trivially satisfied converges
+// instantly and answers ABSENT for committed data, which is exactly what a barrier
+// reading a fresh leader's commit index does. So the value is asserted, not the
+// completion.
+//
+// The no-preceding-write clause is load-bearing: a write on the new term advances
+// the tracked index past the election no-op by itself and masks BOTH failure modes.
 func readFirstOfTerm(t *testing.T, node *clusterNode, term string) {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	before := node.ledger.raft.CommitIndex()
-	if _, _, err := node.ledger.Get(ctx, "heap/never-written"); err != nil {
-		t.Fatalf("%s: the first read of the term on %s did not converge (CommitIndex was %d, tracked %d): %v",
-			term, node.id, before, node.ledger.fsm.appliedIndex(), err)
+	commit, applied := node.ledger.raft.CommitIndex(), node.ledger.fsm.appliedIndex()
+	entry, ok, err := node.ledger.Get(ctx, fencedPath)
+	if err != nil {
+		t.Fatalf("%s: the first read of the term on %s did not converge (CommitIndex %d, tracked %d): %v",
+			term, node.id, commit, applied, err)
+	}
+	if !ok {
+		t.Fatalf("%s: the first read of the term on %s answered ABSENT for a value committed on an earlier term (CommitIndex %d, tracked %d): the read completed and was WRONG",
+			term, node.id, commit, applied)
+	}
+	if got := string(entry.Value); got != fencedValue {
+		t.Fatalf("%s: the first read of the term on %s returned %q, want %q", term, node.id, got, fencedValue)
+	}
+}
+
+// awaitEstablished blocks until this term's epoch entry has been appended AND
+// applied, so nothing this ledger does asynchronously can still move the log index.
+//
+// A test that cannot confirm establishment fails as a CONTROL rather than sampling
+// anyway, because an unfenced sample is exactly the contaminated measurement this
+// helper exists to prevent.
+func awaitEstablished(t *testing.T, l *Ledger) {
+	t.Helper()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if epoch, ok := l.establishment(l.raft.CurrentTerm()); ok && l.fsm.appliedIndex() >= epoch {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("CONTROL FAILED: flow %q never established its term within 30s, so any sample taken now would be unfenced", l.Flow())
+}
+
+// commitFencedValue writes the cell every later term's first read must return.
+func commitFencedValue(t *testing.T, node *clusterNode) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := node.ledger.Append(ctx, Entry{Kind: KindSet, Path: fencedPath, Value: []byte(fencedValue)}); err != nil {
+		t.Fatalf("committing the fenced value on %s: %v", node.id, err)
 	}
 }
 
 func TestLinearizableReadConvergesOnTheFirstReadOfALeadershipTerm(t *testing.T) {
 	nodes := newCluster(t, "flow-term-one", 3)
-	leader := waitClusterLeader(t, nodes)
+	first := waitClusterLeader(t, nodes)
 
-	// NO WRITE HAS HAPPENED ON THIS TERM. The only entries in the log are raft's
-	// own election no-op, which never reaches a state machine, and this ledger's
-	// epoch entry, which does.
-	readFirstOfTerm(t, leader, "term 1")
+	// Commit the value on THIS term, then move to a new one. The read under test is
+	// the first of the NEW term, so the value it must return was committed on an
+	// earlier term — the case a fresh leader's commit index cannot account for.
+	commitFencedValue(t, first)
 
-	// CONTROL: the read really did go through the barrier on a leader, rather than
+	second := otherThan(nodes, first)
+	transferLeadership(t, first, second)
+	readFirstOfTerm(t, second, "term 2")
+
+	// CONTROL: the read really did go through the barrier on a leader rather than
 	// returning early from some path that skips it. A follower is refused.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	for _, node := range nodes {
-		if node == leader {
+		if node == second {
 			continue
 		}
-		if _, _, err := node.ledger.Get(ctx, "heap/never-written"); !errors.Is(err, ErrNotLeader) {
+		if _, _, err := node.ledger.Get(ctx, fencedPath); !errors.Is(err, ErrNotLeader) {
 			t.Fatalf("CONTROL FAILED: a read on the follower %s gave %v, want ErrNotLeader", node.id, err)
 		}
 
@@ -135,7 +192,7 @@ func TestFirstReadOfASecondLeadershipTermConverges(t *testing.T) {
 	nodes := newCluster(t, "flow-terms", 3)
 
 	first := waitClusterLeader(t, nodes)
-	readFirstOfTerm(t, first, "term 1")
+	commitFencedValue(t, first)
 
 	// Term 2: kill the leader outright. The two survivors hold quorum.
 	if err := first.ledger.Close(); err != nil {

@@ -113,6 +113,19 @@ func (f *fsm) advance(index uint64) {
 	f.advanceLocked(index)
 }
 
+// broadcast wakes everything parked on the tracker WITHOUT moving the index.
+//
+// It exists because a reader can be waiting on something that is not an index: a
+// barrier parked until this term is established must re-evaluate when the epoch
+// position is recorded, and that record is not an apply.
+func (f *fsm) broadcast() {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+
+	close(f.wake)
+	f.wake = make(chan struct{})
+}
+
 // advanceLocked closes the current wake channel and installs a fresh one, which is
 // what lets a waiter select on progress AND a context at the same time. A
 // sync.Cond cannot be selected on, so a broadcast channel is the shape here.
