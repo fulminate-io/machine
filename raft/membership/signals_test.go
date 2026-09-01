@@ -174,7 +174,19 @@ func TestASignalCursorOlderThanTheRetentionWindowIsRefusedNotSilentlySkipped(t *
 	}
 	// THE REFUSAL NAMES THE OLDEST INDEX STILL HELD, which is what a consumer
 	// needs in order to know how far it must rebuild from Membership.
-	oldest := uint64(51)
+	//
+	// THE EXPECTATION IS READ FROM THE LOG, and only the DERIVATION moved: a
+	// cursor now packs this log's incarnation, so a bare sequence handed back to
+	// Watch would be a FOREIGN cursor rather than an old one. The assertion's
+	// content is unchanged — the oldest retained SEQUENCE is still 51 after 1074
+	// publishes into a 1024-slot window — and the refusal must still name a
+	// cursor the consumer can actually use.
+	mgr.signals.mu.Lock()
+	oldest := mgr.signals.retained[0].Index
+	mgr.signals.mu.Unlock()
+	if got := oldest & signalSequenceMask; got != 51 {
+		t.Fatalf("the oldest retained sequence is %d, want 51", got)
+	}
 	if !strings.Contains(err.Error(), fmt.Sprintf("oldest retained %d", oldest)) {
 		t.Fatalf("the refusal %q does not name the oldest retained index %d", err, oldest)
 	}
@@ -528,4 +540,202 @@ func TestSignalKindNamesEveryKind(t *testing.T) {
 	if undeclared == "" || !strings.Contains(undeclared, "200") {
 		t.Fatalf("an undeclared kind rendered as %q, which names neither the kind nor its number", undeclared)
 	}
+}
+
+// publishInto puts one signal into a log directly, so a test can drive the
+// numbering without standing up a cluster.
+func publishInto(log *signalLog, node string) {
+	log.publish(Signal{Kind: SignalPeerEvicted, Flow: "alpha", Node: node})
+}
+
+// lastIndex reports the cursor a reader would be holding after the last publish.
+func lastIndex(t *testing.T, log *signalLog) uint64 {
+	t.Helper()
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	if len(log.retained) == 0 {
+		t.Fatal("the log holds no signals, so there is no cursor to carry")
+	}
+	return log.retained[len(log.retained)-1].Index
+}
+
+func TestASignalCursorFromAnotherIncarnationIsRefusedNotSilentlyEmpty(t *testing.T) {
+	// THE RESTART SHAPE. A cursor minted before a restart is applied to a fresh
+	// log numbering from the beginning again. Unguarded it clears the retention
+	// check — the fresh log's oldest is 1, so nothing is "older" — and the
+	// collection loop then finds nothing, so the reader is told NOTHING.
+	before := newSignalLog()
+	for i := 0; i < 3; i++ {
+		publishInto(before, "n")
+	}
+	carried := lastIndex(t, before)
+
+	after := newSignalLog()
+	for i := 0; i < 3; i++ {
+		publishInto(after, "n")
+	}
+	if before.incarnation == after.incarnation {
+		t.Fatal("CONTROL FAILED: two logs minted the same incarnation, so this arm cannot distinguish them")
+	}
+
+	batch := after.since(carried)
+	if batch.err == nil {
+		t.Fatalf("a pre-restart cursor was answered with %d signals and no error: that is silence, and the "+
+			"blocking read parks on it exactly when a recovery loop needs it", len(batch.signals))
+	}
+	if !errors.Is(batch.err, ErrCursorTooOld) {
+		t.Fatalf("err = %v, does not satisfy errors.Is against ErrCursorTooOld: a consumer keyed on the "+
+			"sentinel this plan published would not recognise it", batch.err)
+	}
+	if !errors.Is(batch.err, ErrCursorForeignIncarnation) {
+		t.Fatalf("err = %v, want it to also name the foreign incarnation so a restart is distinguishable "+
+			"from a retention overrun", batch.err)
+	}
+
+	// THE CONTROL: the fresh log still serves from the beginning, so the refusal
+	// above is about the cursor rather than a log that refuses everything.
+	fresh := after.since(0)
+	if fresh.err != nil {
+		t.Fatalf("CONTROL FAILED: the fresh log refused a zero cursor: %v", fresh.err)
+	}
+	if len(fresh.signals) != 3 {
+		t.Fatalf("CONTROL FAILED: the fresh log served %d signals from the beginning, want 3", len(fresh.signals))
+	}
+	t.Logf("a pre-restart cursor is refused by name and the fresh log still serves from the beginning: %v",
+		batch.err)
+
+	// THE CROSS-NODE SHAPE, GATED SEPARATELY rather than argued to be subsumed by
+	// the restart one. The cursor space carries no instance identity, so a
+	// consumer that reconnects to a DIFFERENT node applies one instance's
+	// numbering to another's — and under ephemeral identity peer rotation is the
+	// designed steady state, not an exceptional case.
+	nodeA, _ := testNode(t, "a-node")
+	nodeB, _ := testNode(t, "b-node")
+	for i := 0; i < 3; i++ {
+		publishInto(nodeA.signals, "peer")
+		publishInto(nodeB.signals, "peer")
+	}
+	if nodeA.signals.incarnation == nodeB.signals.incarnation {
+		t.Fatal("CONTROL FAILED: two nodes minted the same incarnation")
+	}
+	crossed := nodeB.signals.since(lastIndex(t, nodeA.signals))
+	if crossed.err == nil {
+		t.Fatalf("a cursor from another node was answered with %d signals and no error", len(crossed.signals))
+	}
+	if !errors.Is(crossed.err, ErrCursorTooOld) {
+		t.Fatalf("err = %v, does not satisfy errors.Is against ErrCursorTooOld", crossed.err)
+	}
+	t.Logf("a cursor carried to a different node is refused by name: %v", crossed.err)
+}
+
+func TestWatchRefusesAForeignCursorRatherThanParkingOnIt(t *testing.T) {
+	mgr, _ := testNode(t, "a-node")
+	for i := 0; i < 3; i++ {
+		publishInto(mgr.signals, "peer")
+	}
+	// A cursor whose incarnation is definitely not this log's.
+	foreign := (mgr.signals.incarnation + 1) << signalIncarnationShift
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, _, err := mgr.Watch(ctx, foreign)
+	elapsed := time.Since(start)
+
+	// NEVER SILENCE AND NEVER A PARK. This is what makes the defect a blocking
+	// one rather than a nuisance: a recovery loop hangs exactly when recovery is
+	// needed.
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Watch parked on a foreign cursor for %v and returned the context error: a consumer's "+
+			"recovery loop hangs here", elapsed)
+	}
+	if !errors.Is(err, ErrCursorTooOld) {
+		t.Fatalf("err = %v, want a refusal satisfying ErrCursorTooOld", err)
+	}
+	// A gate that accepted a SLOW refusal would pass against an implementation
+	// that still parked and merely happened to be woken.
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("the refusal took %v, which is slow enough that it may have parked and been woken", elapsed)
+	}
+
+	// THE CONTROL THAT KEEPS THE GUARD FROM BEING A BLANKET REFUSAL: a
+	// SAME-incarnation cursor must still resume, and from the right place.
+	batch, cursor, err := mgr.Watch(ctx, 0)
+	if err != nil || len(batch) != 3 {
+		t.Fatalf("CONTROL FAILED: reading from the beginning gave %d signals, err=%v", len(batch), err)
+	}
+	for i := 0; i < 2; i++ {
+		publishInto(mgr.signals, "later")
+	}
+	resumed, _, err := mgr.Watch(ctx, cursor)
+	if err != nil {
+		t.Fatalf("CONTROL FAILED: a same-incarnation cursor was refused: %v", err)
+	}
+	if len(resumed) != 2 {
+		t.Fatalf("CONTROL FAILED: resuming gave %d signals, want exactly the 2 published after the cursor",
+			len(resumed))
+	}
+	t.Logf("a foreign cursor is refused immediately and a same-incarnation cursor still resumes: "+
+		"refused in %v, resumed with %d", elapsed, len(resumed))
+}
+
+func TestASequenceOverflowRollsTheIncarnationAndRefusesOutstandingCursors(t *testing.T) {
+	log := newSignalLog()
+	publishInto(log, "early")
+	outstanding := lastIndex(t, log)
+	first := log.incarnation
+
+	// Drive the sequence to its last usable value. Unreachable in production,
+	// because signals are published on membership events — and gated anyway,
+	// because a silent wrap corrupts the discriminator undetectably.
+	log.mu.Lock()
+	log.next = signalSequenceMask
+	log.mu.Unlock()
+	publishInto(log, "at-the-edge")
+
+	edge := lastIndex(t, log)
+	if edge&signalSequenceMask != signalSequenceMask {
+		t.Fatalf("the edge signal carries sequence %d, want the mask %d", edge&signalSequenceMask,
+			signalSequenceMask)
+	}
+	if edge>>signalIncarnationShift != first {
+		t.Fatalf("the sequence carried into the incarnation bits at the edge: incarnation reads %d, want %d",
+			edge>>signalIncarnationShift, first)
+	}
+
+	// The next publish would carry, so it must roll instead.
+	publishInto(log, "after-the-roll")
+	log.mu.Lock()
+	rolled := log.incarnation
+	retained := append([]Signal(nil), log.retained...)
+	log.mu.Unlock()
+
+	if rolled == first {
+		t.Fatal("the sequence reached the mask and the incarnation did not roll: the next publish carries " +
+			"into the incarnation bits and the discriminator is silently corrupt")
+	}
+	if len(retained) != 1 {
+		t.Fatalf("the retained window holds %d signals after the roll, want only the post-roll one: the old "+
+			"window belongs to the old numbering and the sequence comparison assumes one numbering",
+			len(retained))
+	}
+	if got := retained[0].Index & signalSequenceMask; got != 1 {
+		t.Fatalf("the first post-roll signal carries sequence %d, want 1", got)
+	}
+	if got := retained[0].Index >> signalIncarnationShift; got != rolled {
+		t.Fatalf("the first post-roll signal carries incarnation %d, want the rolled %d", got, rolled)
+	}
+
+	// A cursor outstanding across the roll SHOULD be refused, which is exactly
+	// what a restart already gets.
+	batch := log.since(outstanding)
+	if batch.err == nil {
+		t.Fatalf("a cursor outstanding across the roll was answered with %d signals and no error",
+			len(batch.signals))
+	}
+	if !errors.Is(batch.err, ErrCursorTooOld) {
+		t.Fatalf("err = %v, want a refusal satisfying ErrCursorTooOld", batch.err)
+	}
+	t.Logf("a sequence overflow rolls the incarnation, drops the old window, and refuses outstanding "+
+		"cursors: %v", batch.err)
 }

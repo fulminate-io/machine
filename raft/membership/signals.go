@@ -7,6 +7,8 @@ package membership
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sync"
@@ -23,6 +25,28 @@ import (
 // complete history while being a gap. A consumer's correct response is to rebuild
 // from Membership, which it can only do if it is told.
 var ErrCursorTooOld = errors.New("membership: signal cursor is older than the retained window")
+
+// ErrCursorForeignIncarnation refuses a cursor minted by a DIFFERENT incarnation
+// of this log — one from before a restart, or one carried over from another node.
+//
+// IT WRAPS ErrCursorTooOld ON PURPOSE. The consumer's correct response is
+// identical to the retention case and already published: rebuild from
+// Membership. Wrapping means a consumer keyed on that sentinel keeps working,
+// while one that wants to tell a restart from a retention overrun still can.
+var ErrCursorForeignIncarnation = fmt.Errorf(
+	"%w: it was minted by a different incarnation of this signal log", ErrCursorTooOld)
+
+// The cursor is one uint64 carrying two fields: this log's incarnation in the
+// high bits, the sequence in the low.
+//
+// THE DISCRIMINATOR GOES INSIDE THE PUBLISHED uint64 rather than beside it,
+// because Watch's signature and Signal.Index are seam surfaces this plan
+// declares and pins against drift. Packing gives the discriminator every
+// property it needs without touching that contract.
+const (
+	signalIncarnationShift = 32
+	signalSequenceMask     = uint64(1)<<signalIncarnationShift - 1
+)
 
 // maxRetainedSignals bounds the signal window.
 //
@@ -89,21 +113,66 @@ type Signal struct {
 // reader falls behind without anything blocking or dropping. A channel we owned
 // could drop, and any channel raft sends on can wedge it.
 type signalLog struct {
-	mu       sync.Mutex
-	wake     chan struct{}
-	retained []Signal
-	next     uint64
+	mu sync.Mutex
+	// incarnation distinguishes THIS log from every other one a consumer could
+	// hold a cursor from. Without it a cursor is meaningful only by accident: a
+	// restart renumbers from the beginning, and a consumer that reconnects to a
+	// DIFFERENT node applies one instance's numbering to another's — which under
+	// ephemeral identity is the designed steady state rather than an exception.
+	incarnation uint64
+	wake        chan struct{}
+	retained    []Signal
+	next        uint64
 }
 
 func newSignalLog() *signalLog {
-	return &signalLog{wake: make(chan struct{}), next: 1}
+	return &signalLog{incarnation: newIncarnation(), wake: make(chan struct{}), next: 1}
+}
+
+// newIncarnation mints a non-zero instance discriminator.
+//
+// ZERO IS EXCLUDED because zero is how a caller spells "from the beginning", so
+// a log whose incarnation were zero could not tell that request from a cursor.
+// This is an instance discriminator rather than a security value: the only
+// property it needs is that two logs are overwhelmingly unlikely to share one.
+//
+// IT DRAWS FROM crypto/rand ANYWAY. A weak source would satisfy the property,
+// but gosec refuses one on sight and the module's lint gate admits no findings —
+// and this package has no hot path here to protect, since an incarnation is
+// minted once per log. crypto/rand.Read never returns an error and always fills
+// its argument entirely; it panics rather than reporting a short read.
+func newIncarnation() uint64 {
+	for {
+		var raw [4]byte
+		_, _ = rand.Read(raw[:])
+		if n := uint64(binary.BigEndian.Uint32(raw[:])); n != 0 {
+			return n
+		}
+	}
+}
+
+// roll starts a fresh numbering when the sequence would otherwise carry into the
+// incarnation bits.
+//
+// ROLLING IS THE RIGHT RESPONSE RATHER THAN A LAST RESORT: the numbering has
+// restarted, so every outstanding cursor SHOULD be refused — which is exactly
+// what a restart already gets. The retained window is dropped with it because it
+// belongs to the old numbering, and leaving it would break the sequence
+// comparison in since, which assumes one numbering.
+func (s *signalLog) roll() {
+	s.incarnation = newIncarnation()
+	s.next = 1
+	s.retained = nil
 }
 
 // publish records one signal and wakes every parked reader.
 func (s *signalLog) publish(sig Signal) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sig.Index = s.next
+	if s.next > signalSequenceMask {
+		s.roll()
+	}
+	sig.Index = s.incarnation<<signalIncarnationShift | s.next
 	s.next++
 	s.retained = append(s.retained, sig)
 	if len(s.retained) > maxRetainedSignals {
@@ -128,12 +197,26 @@ func (s *signalLog) since(cursor uint64) signalBatch {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	batch := signalBatch{cursor: cursor, wake: s.wake}
+	// THE INCARNATION IS CHECKED FIRST, AND THE RETENTION COMPARISON BELOW DEPENDS
+	// ON IT HAVING RUN. Comparing sequences across two different numberings is
+	// meaningless, so that comparison is sound only once the high bits are known
+	// equal. A zero cursor is exempt: it is how a caller spells "from the
+	// beginning" and belongs to no incarnation.
+	if cursor != 0 && cursor>>signalIncarnationShift != s.incarnation {
+		batch.err = fmt.Errorf("%w: cursor %d carries incarnation %d, this log is %d",
+			ErrCursorForeignIncarnation, cursor, cursor>>signalIncarnationShift, s.incarnation)
+		return batch
+	}
 	if len(s.retained) > 0 {
 		oldest := s.retained[0].Index
 		// The reader's next expected signal is cursor+1. If the window no longer
 		// holds it, signals were dropped between them and saying so is the only
 		// honest answer.
-		if cursor+1 < oldest {
+		//
+		// THE COMPARISON IS ON THE SEQUENCE, NEVER ON THE PACKED VALUE. Packed, the
+		// oldest retained index is an enormous number and even a zero cursor — the
+		// most common call there is — reads as older than the window.
+		if (cursor&signalSequenceMask)+1 < oldest&signalSequenceMask {
 			batch.err = fmt.Errorf("%w: cursor %d, oldest retained %d", ErrCursorTooOld, cursor, oldest)
 			return batch
 		}

@@ -120,6 +120,14 @@ func (m *Manager) evictionPermitted(flow string, servers []raft.Server, live []s
 	// costs the group no voting power, so charging it a vote refuses evictions
 	// that were never a risk — and specifically makes a stale nonvoter permanently
 	// un-evictable in the steady state, which is where they accumulate.
+	//
+	// AND THE CONSEQUENCE THAT BUYS, stated here because a reader of this code
+	// should see the trade and not only the fix: a LIVE nonvoter can be evicted
+	// under a right-size wrong-membership resolution, where the unconditional
+	// subtraction happened to refuse it. The trade is deliberate and bounded — no
+	// vote is lost, the configuration never falls below the live count or below
+	// quorum, and the joiner re-announces on its next probe — and it replaces a
+	// strictly worse state, stale nonvoters accumulating without bound.
 	cost := 0
 	if victim.Suffrage == raft.Voter {
 		cost = 1
