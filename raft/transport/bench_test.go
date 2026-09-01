@@ -111,10 +111,16 @@ func BenchmarkApplyOverStock(b *testing.B) { benchApply(b, stockTransport) }
 // nothing at all.
 var benchSink []byte
 
+// benchSigner keys the benchmark to a real token so BenchmarkEncodePreamble
+// measures the SIGNED path. An empty accepted set makes signer.sign a no-op, so
+// benchmarking through one would report the unsigned cost and the allocation
+// budget it gates would pass without ever exercising the authentication block.
+var benchSigner = newSigner([]Token{"benchmark-token"})
+
 func BenchmarkEncodePreamble(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		buf, err := encodePreamble("flow-alpha", KindRaft)
+		buf, err := encodePreamble(KindRaft, "flow-alpha", benchSigner)
 		if err != nil {
 			b.Fatal(err)
 		}

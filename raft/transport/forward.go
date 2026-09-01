@@ -54,18 +54,10 @@ func (l *forwardListener) Addr() net.Addr { return l.stream.mux.Addr() }
 func (g *Group) Forward() net.Listener { return &forwardListener{stream: g.stream} }
 
 // DialForward opens a forwarding connection to address and announces this group
-// on it. It mirrors groupStream.Dial and inherits its discipline: the connection
-// handed back is the RAW dialed connection with the handshake already written
-// and no deadline of ours left on it, so the caller owns it unwrapped and this
-// package contributes nothing to the per-operation path.
+// on it. It mirrors groupStream.Dial and inherits its discipline, including the
+// session exchange: a forwarded ledger operation is encrypted on exactly the
+// same terms as a raft one, because both reach the wire through the one dial
+// path rather than through arms that could drift apart.
 func (g *Group) DialForward(address string, timeout time.Duration) (net.Conn, error) {
-	conn, err := net.DialTimeout("tcp", address, timeout)
-	if err != nil {
-		return nil, err
-	}
-	if err := writePreamble(conn, g.stream.id, KindForward, timeout); err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-	return conn, nil
+	return dialSession(g.stream.mux, KindForward, g.stream.id, address, timeout)
 }

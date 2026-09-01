@@ -72,20 +72,16 @@ func (s *groupStream) Close() error {
 // address, and the handshake is what tells them apart.
 func (s *groupStream) Addr() net.Addr { return s.mux.Addr() }
 
-// Dial opens a connection to address and announces this group on it. The
-// connection handed back is the raw dialed connection with the handshake
-// already written and no deadline of ours left set, so raft owns it unwrapped
-// and the mux contributes nothing to the per-RPC path.
+// Dial opens a connection to address, announces this group on it and completes
+// the session exchange. The connection handed back is the session conn over the
+// raw dialed connection, with no deadline of ours left set.
+//
+// EXACTLY ONE WRAPPER SITS BETWEEN RAFT AND THE SOCKET, which is the successor
+// to lane B's unwrapped-connection rule rather than a retreat from it: the mux
+// still contributes no second layer, no buffered reader and no copy, and the one
+// wrapper it does contribute is the encryption decision ce79d7e2 ruled.
 func (s *groupStream) Dial(address raft.ServerAddress, timeout time.Duration) (net.Conn, error) {
-	conn, err := net.DialTimeout("tcp", string(address), timeout)
-	if err != nil {
-		return nil, err
-	}
-	if err := writePreamble(conn, s.id, KindRaft, timeout); err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-	return conn, nil
+	return dialSession(s.mux, KindRaft, s.id, string(address), timeout)
 }
 
 // release wakes everything parked on this binding, once.

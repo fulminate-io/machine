@@ -23,7 +23,16 @@ func (r *recordingListener) Accept() (net.Conn, error) {
 	return c, err
 }
 
-func TestAcceptHandsRaftTheListenersOwnConnection(t *testing.T) {
+// THESE TWO REPLACE lane B's TestAcceptHandsRaftTheListenersOwnConnection and
+// TestDialReturnsTheRawTCPConnection, which asserted that raft is handed the
+// listener's object BY POINTER IDENTITY and that Dial returns a *net.TCPConn.
+// Encrypting the stream makes both false by construction, so the surface they
+// protected genuinely no longer exists. What they were actually protecting —
+// that the mux contributes nothing to the per-RPC path — survives as EXACTLY ONE
+// wrapper, and that is what these assert: a second wrapper, a buffered reader or
+// a copy still fails, which is the defect class the originals caught.
+
+func TestRaftReceivesASessionConnOverTheListenersOwnConnection(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -40,24 +49,30 @@ func TestAcceptHandsRaftTheListenersOwnConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dialed := dialTagged(t, m, "identity")
+	dialed := dialSessionTagged(t, m, KindRaft, "identity")
 	defer func() { _ = dialed.Close() }()
 
 	accepted, err := s.Accept()
 	if err != nil {
 		t.Fatal(err)
 	}
+	session, ok := accepted.(*sessionConn)
+	if !ok {
+		t.Fatalf("raft was handed %T, want *sessionConn: the ruled encryption is absent", accepted)
+	}
 	select {
 	case produced := <-rec.last:
-		if produced != accepted {
-			t.Fatalf("raft was handed %p but the listener produced %p: the mux wrapped the connection, which would put it on the per-RPC path", accepted, produced)
+		if session.Conn != produced {
+			t.Fatalf("the session wraps %p but the listener produced %p: something else sits between the session "+
+				"and the socket, which would put a second layer on the per-RPC path",
+				session.Conn, produced)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("CONTROL FAILED: the recording listener produced nothing")
 	}
 }
 
-func TestDialReturnsTheRawTCPConnection(t *testing.T) {
+func TestDialReturnsASessionConnOverARawTCPConnection(t *testing.T) {
 	m := testMux(t)
 	if _, err := m.bindStream("dial-shape"); err != nil {
 		t.Fatal(err)
@@ -68,7 +83,12 @@ func TestDialReturnsTheRawTCPConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = conn.Close() }()
-	if _, ok := conn.(*net.TCPConn); !ok {
-		t.Fatalf("Dial returned %T, want *net.TCPConn: raft must receive the connection unwrapped", conn)
+	session, ok := conn.(*sessionConn)
+	if !ok {
+		t.Fatalf("Dial returned %T, want *sessionConn: the ruled encryption is absent", conn)
+	}
+	if _, ok := session.Conn.(*net.TCPConn); !ok {
+		t.Fatalf("the session wraps %T, want *net.TCPConn: exactly one wrapper may sit between raft and the socket",
+			session.Conn)
 	}
 }

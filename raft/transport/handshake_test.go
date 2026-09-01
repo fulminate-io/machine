@@ -9,12 +9,17 @@ import (
 	"time"
 )
 
+// openSigner is the signer an unauthenticated mux carries. An empty accepted set
+// signs nothing and admits every proof, which is the zero-config loopback shape
+// and exactly why the mux refuses to advertise a routable address holding one.
+var openSigner = newSigner(nil)
+
 func TestPreambleRoundTripAndNoOverRead(t *testing.T) {
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
 	defer func() { _ = server.Close() }()
 	go func() {
-		if err := writePreamble(client, "flow-alpha", KindRaft, time.Second); err != nil {
+		if _, err := writePreamble(client, KindRaft, "flow-alpha", time.Second, openSigner); err != nil {
 			t.Error(err)
 			return
 		}
@@ -22,12 +27,12 @@ func TestPreambleRoundTripAndNoOverRead(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	id, _, err := readPreamble(server, time.Second)
+	p, err := readPreamble(server, time.Second, openSigner)
 	if err != nil {
 		t.Fatalf("readPreamble: %v", err)
 	}
-	if id != "flow-alpha" {
-		t.Fatalf("group id = %q, want flow-alpha", id)
+	if p.ID != "flow-alpha" {
+		t.Fatalf("group id = %q, want flow-alpha", p.ID)
 	}
 	rest := make([]byte, 9)
 	if _, err := io.ReadFull(server, rest); err != nil {
@@ -48,17 +53,17 @@ func TestPreambleRoundTripAndNoOverRead(t *testing.T) {
 	coalescedClient, coalescedServer := net.Pipe()
 	defer func() { _ = coalescedClient.Close() }()
 	defer func() { _ = coalescedServer.Close() }()
-	head, err := encodePreamble("flow-beta", KindRaft)
+	head, err := encodePreamble(KindRaft, "flow-beta", openSigner)
 	if err != nil {
 		t.Fatal(err)
 	}
 	go func() { _, _ = coalescedClient.Write(append(head, []byte("RAFTBYTES")...)) }()
-	coalescedID, _, err := readPreamble(coalescedServer, time.Second)
+	coalesced, err := readPreamble(coalescedServer, time.Second, openSigner)
 	if err != nil {
 		t.Fatalf("readPreamble on a coalesced write: %v", err)
 	}
-	if coalescedID != "flow-beta" {
-		t.Fatalf("coalesced group id = %q, want flow-beta", coalescedID)
+	if coalesced.ID != "flow-beta" {
+		t.Fatalf("coalesced group id = %q, want flow-beta", coalesced.ID)
 	}
 	if err := coalescedServer.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
 		t.Fatal(err)
@@ -73,10 +78,15 @@ func TestPreambleRoundTripAndNoOverRead(t *testing.T) {
 }
 
 func TestPreambleRejections(t *testing.T) {
-	good, err := encodePreamble("g", KindRaft)
+	good, err := encodePreamble(KindRaft, "g", openSigner)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The four landed fixtures are kept BYTE FOR BYTE across the version-2
+	// layout, which is what keeps lane B's roster meaningful rather than merely
+	// green: each one rewrites a field of the fixed head, and the head did not
+	// move. bad kind is the fifth, rewriting byte 5 — the byte this version's
+	// sibling lane gave a meaning — to a value no build declares.
 	cases := []struct {
 		name string
 		head []byte
@@ -84,6 +94,7 @@ func TestPreambleRejections(t *testing.T) {
 	}{
 		{"bad magic", append([]byte("XXXX"), good[4:]...), ErrBadMagic},
 		{"bad version", append(append([]byte{}, good[:4]...), append([]byte{9, 0, 0, 1}, good[8:]...)...), ErrBadVersion},
+		{"bad kind", append(append([]byte{}, good[:5]...), append([]byte{99}, good[6:]...)...), ErrBadStreamKind},
 		{"zero length", append(append([]byte{}, good[:6]...), 0, 0), ErrGroupIDRange},
 		{"over length", append(append([]byte{}, good[:6]...), 0xFF, 0xFF), ErrGroupIDRange},
 	}
@@ -93,7 +104,7 @@ func TestPreambleRejections(t *testing.T) {
 			defer func() { _ = client.Close() }()
 			defer func() { _ = server.Close() }()
 			go func() { _, _ = client.Write(tc.head) }()
-			_, _, err := readPreamble(server, time.Second)
+			_, err := readPreamble(server, time.Second, openSigner)
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
 			}
@@ -108,20 +119,20 @@ func TestPreambleShortReadIsRefused(t *testing.T) {
 		_, _ = client.Write([]byte("mrmx"))
 		_ = client.Close()
 	}()
-	if _, _, err := readPreamble(server, time.Second); err == nil {
+	if _, err := readPreamble(server, time.Second, openSigner); err == nil {
 		t.Fatal("a truncated handshake was accepted")
 	}
 }
 
 func TestEncodePreambleRefusesOutOfRangeIDs(t *testing.T) {
-	if _, err := encodePreamble("", KindRaft); !errors.Is(err, ErrGroupIDRange) {
+	if _, err := encodePreamble(KindRaft, "", openSigner); !errors.Is(err, ErrGroupIDRange) {
 		t.Fatalf("empty id: err = %v, want ErrGroupIDRange", err)
 	}
 	long := GroupID(strings.Repeat("x", MaxGroupIDLen+1))
-	if _, err := encodePreamble(long, KindRaft); !errors.Is(err, ErrGroupIDRange) {
+	if _, err := encodePreamble(KindRaft, long, openSigner); !errors.Is(err, ErrGroupIDRange) {
 		t.Fatalf("over-long id: err = %v, want ErrGroupIDRange", err)
 	}
-	if err := writePreamble(nil, long, KindRaft, time.Second); !errors.Is(err, ErrGroupIDRange) {
+	if _, err := writePreamble(nil, KindRaft, long, time.Second, openSigner); !errors.Is(err, ErrGroupIDRange) {
 		t.Fatalf("writePreamble over-long id: err = %v, want ErrGroupIDRange", err)
 	}
 }

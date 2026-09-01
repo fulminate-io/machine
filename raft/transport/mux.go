@@ -21,6 +21,13 @@ var (
 	ErrClosed          = errors.New("transport: mux is closed")
 	ErrGroupBound      = errors.New("transport: group id is already bound")
 	ErrNotAdvertisable = errors.New("transport: bind address is not advertisable")
+	// ErrTokenRequired refuses a mux that would advertise a routable address
+	// while accepting every proof. A mux carrying no token is correct on
+	// loopback, where dev and tests stay zero-config, and a silent hole on an
+	// address peers can reach — so it is an error out of New rather than a
+	// warning or a permissive default, and the operator who meant to run
+	// authenticated finds out at startup instead of never.
+	ErrTokenRequired = errors.New("transport: a non-loopback advertisement requires Config.Tokens")
 )
 
 // Config carries the mux's listener and the per-group NetworkTransport knobs.
@@ -42,6 +49,11 @@ type Config struct {
 	// MaxPool and RPCTimeout are handed to every group's NetworkTransport.
 	MaxPool    int
 	RPCTimeout time.Duration
+	// Tokens is the ORDERED set of join secrets this node accepts. The first
+	// element is what this node dials with; every element is accepted inbound,
+	// which is what makes a rotation an overlap rather than a cutover. An empty
+	// set accepts every proof and is refused on a non-loopback advertisement.
+	Tokens []Token
 }
 
 // Stats reports what the mux accepted and refused. Every refusal is counted:
@@ -56,6 +68,8 @@ type Stats struct {
 	RejectedQueueFull        uint64
 	RejectedForwardQueueFull uint64
 	RejectedUnknownKind      uint64
+	RejectedUnauthenticated  uint64
+	RejectedSessionSetup     uint64
 	RejectedGroupClosed      uint64
 	AcceptErrors             uint64
 }
@@ -66,6 +80,7 @@ type Mux struct {
 	advertise net.Addr
 	logger    hclog.Logger
 	cfg       Config
+	signer    *signer
 
 	mu     sync.RWMutex
 	groups map[GroupID]*groupStream
@@ -98,6 +113,7 @@ func newMux(ln net.Listener, cfg Config) (*Mux, error) {
 		advertise: cfg.Advertise,
 		logger:    cfg.Logger,
 		cfg:       withDefaults(cfg),
+		signer:    newSigner(cfg.Tokens),
 		groups:    map[GroupID]*groupStream{},
 	}
 	if m.logger == nil {
@@ -129,6 +145,12 @@ func withDefaults(cfg Config) Config {
 // checkAdvertisable refuses an address peers could not dial back, mirroring
 // raft's own newTCPTransport check. Without it a node bound to 0.0.0.0 hands
 // peers a ServerAddress of 0.0.0.0:port and the cluster silently cannot form.
+//
+// IT ALSO REFUSES AN UNAUTHENTICATED MUX ON A ROUTABLE ADDRESS. An empty token
+// set makes every proof acceptable, which is the intended zero-config shape on
+// loopback and a hole anywhere a peer can reach; the two conditions are checked
+// in one place because they are the same question — what this node is about to
+// tell peers to dial.
 func (m *Mux) checkAdvertisable() error {
 	addr, ok := m.Addr().(*net.TCPAddr)
 	if !ok {
@@ -137,8 +159,18 @@ func (m *Mux) checkAdvertisable() error {
 	if addr.IP == nil || addr.IP.IsUnspecified() {
 		return ErrNotAdvertisable
 	}
+	if !addr.IP.IsLoopback() && m.signer.empty() {
+		return ErrTokenRequired
+	}
 	return nil
 }
+
+// SetTokens replaces the accepted token set, and is the ONLY rotation
+// mechanism. Installing [new, old] opens an overlap in which a peer holding
+// either is admitted; installing [new] closes it; and a revocation is that same
+// narrowing rather than a second path that would rot between uses. The first
+// element is what this node dials with from the next connection on.
+func (m *Mux) SetTokens(tokens ...Token) { m.signer.set(tokens) }
 
 // Addr reports the one address every group on this mux is reached at. Group
 // identity is carried by the handshake, never by the address.
@@ -159,6 +191,8 @@ func (m *Mux) Stats() Stats {
 		RejectedQueueFull:        atomic.LoadUint64(&m.stats.RejectedQueueFull),
 		RejectedForwardQueueFull: atomic.LoadUint64(&m.stats.RejectedForwardQueueFull),
 		RejectedUnknownKind:      atomic.LoadUint64(&m.stats.RejectedUnknownKind),
+		RejectedUnauthenticated:  atomic.LoadUint64(&m.stats.RejectedUnauthenticated),
+		RejectedSessionSetup:     atomic.LoadUint64(&m.stats.RejectedSessionSetup),
 		RejectedGroupClosed:      atomic.LoadUint64(&m.stats.RejectedGroupClosed),
 		AcceptErrors:             atomic.LoadUint64(&m.stats.AcceptErrors),
 	}
@@ -224,27 +258,71 @@ func (m *Mux) isClosed() bool {
 // refusal for an unbound group are shared by both arms, so a forwarding
 // connection for a group this node does not host is refused exactly as a raft
 // one is, on the same counter.
+//
+// THE PROOF IS VERIFIED BEFORE ANY ROUTING DECISION, inside readPreamble. A mux
+// that looked its group up first and verified second would tell an
+// unauthenticated peer which group ids this node hosts, by answering an unbound
+// one differently from a bound one — so an unsigned connection naming a group
+// that does not exist here is refused as unauthenticated, not as unknown.
 func (m *Mux) route(conn net.Conn) {
-	id, kind, err := readPreamble(conn, m.cfg.HandshakeTimeout)
+	p, err := readPreamble(conn, m.cfg.HandshakeTimeout, m.signer)
 	if err != nil {
 		m.refuseHandshake(conn, err)
 		return
 	}
-	m.countHandshake(kind)
-	m.mu.RLock()
-	s := m.groups[id]
-	m.mu.RUnlock()
+	m.countHandshake(p.Kind)
+	s := m.binding(p)
 	if s == nil {
-		atomic.AddUint64(&m.stats.RejectedUnknownGroup, 1)
-		m.logger.Warn("refusing connection for an unbound group", "group", string(id), "remote", conn.RemoteAddr())
-		_ = conn.Close()
+		m.refuseUnbound(conn, p)
 		return
 	}
-	if kind == KindForward {
-		m.deliverForward(s, conn)
+	wrapped, err := wrapAccepted(conn, p.Token, p.Nonce, m.cfg.HandshakeTimeout)
+	if err != nil {
+		m.refuseSession(conn, err)
 		return
 	}
-	m.deliver(s, conn)
+	if p.Kind == KindForward {
+		m.deliverForward(s, wrapped)
+		return
+	}
+	m.deliver(s, wrapped)
+}
+
+// refuseSession counts and closes a connection whose session exchange failed.
+// It is the last refusal arm and it gets its own counter for the reason the
+// Stats comment gives: no connection is dropped without a number moving, and an
+// operator reading a rising count here is looking at a different fault from a
+// malformed head or an unacceptable proof.
+func (m *Mux) refuseSession(conn net.Conn, err error) {
+	atomic.AddUint64(&m.stats.RejectedSessionSetup, 1)
+	m.logger.Warn("refusing a connection whose session exchange failed", "remote", conn.RemoteAddr(), "error", err)
+	_ = conn.Close()
+}
+
+// binding resolves the stream a verified preamble names.
+//
+// A MEMBERSHIP CONNECTION RESOLVES TO NOTHING HERE, and that is a refusal rather
+// than an omission: this node holds no control channel, so handing the
+// connection to the raft group that happens to share its id would deliver
+// control bytes into raft's RPC decoder. Refusing is the correct answer for a
+// binding this node does not have.
+func (m *Mux) binding(p preamble) *groupStream {
+	if p.Kind == KindMembership {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.groups[p.ID]
+}
+
+// refuseUnbound counts and closes a connection naming a binding this node does
+// not hold. It writes no byte back: a peer with no business here learns nothing
+// about which groups exist.
+func (m *Mux) refuseUnbound(conn net.Conn, p preamble) {
+	atomic.AddUint64(&m.stats.RejectedUnknownGroup, 1)
+	m.logger.Warn("refusing connection for an unbound group",
+		"kind", uint8(p.Kind), "group", string(p.ID), "remote", conn.RemoteAddr())
+	_ = conn.Close()
 }
 
 // refuseHandshake counts and closes a connection whose handshake this node will
@@ -253,6 +331,12 @@ func (m *Mux) route(conn net.Conn) {
 // a peer from a version that speaks something newer, the second is a stray
 // client that is not speaking this protocol at all.
 func (m *Mux) refuseHandshake(conn net.Conn, err error) {
+	if errors.Is(err, ErrUnauthenticated) {
+		atomic.AddUint64(&m.stats.RejectedUnauthenticated, 1)
+		m.logger.Warn("refusing a connection carrying no acceptable proof", "remote", conn.RemoteAddr(), "error", err)
+		_ = conn.Close()
+		return
+	}
 	if errors.Is(err, ErrBadStreamKind) {
 		atomic.AddUint64(&m.stats.RejectedUnknownKind, 1)
 		m.logger.Warn("refusing an undeclared stream kind", "remote", conn.RemoteAddr(), "error", err)

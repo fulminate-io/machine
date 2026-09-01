@@ -17,7 +17,7 @@ func dialForwardTagged(t *testing.T, m *Mux, id GroupID) net.Conn {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	if err := writePreamble(c, id, KindForward, 2*time.Second); err != nil {
+	if _, err := writePreamble(c, KindForward, id, 2*time.Second, m.signer); err != nil {
 		t.Fatalf("forwarding handshake: %v", err)
 	}
 	return c
@@ -56,12 +56,12 @@ func TestForwardingAndRaftStreamsShareOneListener(t *testing.T) {
 
 	// ONE listener and ONE group id, two kinds. Each connection writes a payload
 	// naming the arm it belongs to.
-	raftConn := dialTagged(t, m, "shared")
+	raftConn := dialSessionTagged(t, m, KindRaft, "shared")
 	defer func() { _ = raftConn.Close() }()
 	if _, err := raftConn.Write([]byte("RAFT!")); err != nil {
 		t.Fatal(err)
 	}
-	forwardConn := dialForwardTagged(t, m, "shared")
+	forwardConn := dialSessionTagged(t, m, KindForward, "shared")
 	defer func() { _ = forwardConn.Close() }()
 	if _, err := forwardConn.Write([]byte("FWD!!")); err != nil {
 		t.Fatal(err)
@@ -89,7 +89,7 @@ func TestUndeclaredStreamKindIsRefusedAndCounted(t *testing.T) {
 
 	// encodePreamble writes the kind it is given rather than policing it, which
 	// is what lets this test announce a kind this build does not declare.
-	head, err := encodePreamble("declared-only", StreamKind(99))
+	head, err := encodePreamble(StreamKind(99), "declared-only", m.signer)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,14 @@ func TestForwardingListenerReportsTheSharedAddressAndClosesWithItsGroup(t *testi
 	}
 }
 
-func TestDialForwardReturnsTheRawTCPConnection(t *testing.T) {
+// THIS REPLACES lane C2's TestDialForwardReturnsTheRawTCPConnection, on the same
+// terms and for the same reason as the two raft-arm identity gates in
+// identity_test.go: the ruled session encryption wraps every delivered
+// connection, so "DialForward hands back a *net.TCPConn" is false by
+// construction and the surface it asserted no longer exists. The property worth
+// keeping — that the forwarding arm puts nothing EXTRA on the per-operation path
+// — survives as exactly one wrapper, and that is what this asserts.
+func TestDialForwardReturnsASessionConnOverARawTCPConnection(t *testing.T) {
 	m := testMux(t)
 	s, err := m.bindStream("dial-forward-shape")
 	if err != nil {
@@ -239,7 +246,13 @@ func TestDialForwardReturnsTheRawTCPConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = conn.Close() }()
-	if _, ok := conn.(*net.TCPConn); !ok {
-		t.Fatalf("DialForward returned %T, want *net.TCPConn: the caller must receive the connection unwrapped", conn)
+	session, ok := conn.(*sessionConn)
+	if !ok {
+		t.Fatalf("DialForward returned %T, want *sessionConn: a forwarded operation must be encrypted on the "+
+			"same terms as a raft one", conn)
+	}
+	if _, ok := session.Conn.(*net.TCPConn); !ok {
+		t.Fatalf("the session wraps %T, want *net.TCPConn: exactly one wrapper may sit on the per-operation path",
+			session.Conn)
 	}
 }

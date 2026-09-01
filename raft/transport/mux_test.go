@@ -26,9 +26,23 @@ func dialTagged(t *testing.T, m *Mux, id GroupID) net.Conn {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	if err := writePreamble(c, id, KindRaft, 2*time.Second); err != nil {
+	if _, err := writePreamble(c, KindRaft, id, 2*time.Second, m.signer); err != nil {
 		t.Fatalf("handshake: %v", err)
 	}
+	return c
+}
+
+// dialSessionTagged dials through the PRODUCTION dial path, so a test holding a
+// delivered connection speaks exactly what a peer speaks: preamble, session
+// exchange, then records. dialTagged above stays raw and is for the refusal
+// cases, which are refused before any session exists.
+func dialSessionTagged(t *testing.T, m *Mux, kind StreamKind, id GroupID) net.Conn {
+	t.Helper()
+	c, err := dialSession(m, kind, id, m.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("session dial: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
 
@@ -48,7 +62,10 @@ func TestUnknownGroupIsRefusedAndCounted(t *testing.T) {
 		t.Fatal("the connection for an unbound group was not closed")
 	}
 
-	c2 := dialTagged(t, m, "known")
+	// The DELIVERED case dials through the session path: a connection the mux
+	// routes now expects its peer to have completed the session exchange, and
+	// the payload below crosses as an encrypted record.
+	c2 := dialSessionTagged(t, m, KindRaft, "known")
 	if _, err := c2.Write([]byte("HELLO")); err != nil {
 		t.Fatal(err)
 	}
