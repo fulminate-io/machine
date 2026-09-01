@@ -106,7 +106,15 @@ type Config struct {
 	// Flow names the flow this ledger replicates. It doubles as the transport
 	// group id, which is how N flows share one listener.
 	Flow string
-	// LocalID is this node's raft server id. It must be stable across restarts.
+	// LocalID is this node's raft server id. It must be unique across all time and
+	// must not change for a given raft data directory.
+	//
+	// UNIQUENESS IS WHAT RAFT ITSELF ASKS FOR, and the ephemeral-identity model
+	// satisfies it: an id is used once and never reused. THE SECOND HALF IS THE
+	// ONE THAT BITES. An id is paired with the raft state beside it — the log and
+	// votedFor in the data directory — so a node that returns with that state
+	// under a different id presents as a new member while carrying an old
+	// member's history.
 	LocalID string
 	// Mux is the shared listener every group on this node is reached through. It
 	// is required even for a one-voter ledger, because raft demands a Transport.
