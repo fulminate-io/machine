@@ -200,6 +200,12 @@ func TestEnumerationOnAFollowerAgreesWithTheLeader(t *testing.T) {
 		t.Fatal("CONTROL FAILED: the divergent entry is absent from the follower's state machine, so a local read and a forwarded read would agree anyway and this leg proves nothing")
 	}
 
+	// DISCLOSURE: report the planted divergence on the SUCCESS path. The control
+	// above speaks only by failing, so without this line a run in which the
+	// divergence was never planted is indistinguishable from one in which it was.
+	t.Logf("the follower's own state machine carries a divergent entry the leader never replicated: %s",
+		"state/checkpoint/datum-local-only")
+
 	leaderEntries, err := leader.ledger.List(ctx, "state/")
 	if err != nil {
 		t.Fatalf("the leader's enumeration: %v", err)

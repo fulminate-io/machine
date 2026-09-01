@@ -52,7 +52,7 @@
 // admit that the parser must refuse?
 //
 // IT THEN GREW TO FIVE AND CAME BACK TO FOUR, and that episode is why the Go
-// span's stop set has seven members rather than six. The conformance recognizer
+// span's stop set has eight members rather than seven. The conformance recognizer
 // proved that the else-last rule this header had claimed the notation expressed
 // was not expressed by it at all: an Arm begins with the opaque goSpan terminal,
 // and nothing in the notation can constrain what an opaque terminal's scanner

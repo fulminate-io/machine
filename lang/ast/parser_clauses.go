@@ -51,7 +51,7 @@ func (p *parser) parseClauses(cl *Clauses) {
 // to.
 //
 // THE CONTINUATION RULE lives here: after a newline a statement continues only
-// if the next line opens with one of the six clause keywords, and otherwise the
+// if the next line opens with one of the seven clause keywords, and otherwise the
 // newline terminates it. That is one token of lookahead past the newline, which
 // the lexer's re-entrancy supplies without giving the parser a second permanent
 // lookahead slot. Indentation stays cosmetic and the grammar stays LL(1).

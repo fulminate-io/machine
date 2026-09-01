@@ -291,7 +291,7 @@ func (p *parser) parseStateField() (StateField, bool) {
 //
 // NOTE THAT `var h func(int) error` PARSES. The type span begins with the `func`
 // keyword, and it works only because `func` is deliberately absent from the Go
-// span's stop set — the stop condition is a closed set of seven reserved words,
+// span's stop set — the stop condition is a closed set of eight reserved words,
 // not every keyword.
 func (p *parser) parseVar() Decl {
 	decl := VarDecl{Start: p.tok.pos}

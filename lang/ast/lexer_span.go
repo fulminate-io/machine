@@ -26,15 +26,15 @@ const (
 	spanTrimCutset = " \t\r"
 )
 
-// spanStopKeywords are the SEVEN reserved words that end a Go span at bracket
+// spanStopKeywords are the EIGHT reserved words that end a Go span at bracket
 // depth zero. It is a closed set, NOT "any keyword", and that difference is load
 // bearing: `func` is a keyword too, and `var h func(int) error` and
 // `clone func(x T) T` begin their TYPE spellings with it. Adding func here is a
 // one-line change that returns an empty span and parses the declaration as
 // garbage.
 //
-// SIX ARE THE CLAUSE KEYWORDS, which end a span because a clause follows it.
-// `else` is the seventh and earns its place differently: a switch arm begins
+// SEVEN ARE THE CLAUSE KEYWORDS, which end a span because a clause follows it.
+// `else` is the eighth and earns its place differently: a switch arm begins
 // with a Go span, so without this an else arm would scan as an ordinary arm
 // value and the grammar's trailing `[ Else ]` would order nothing. Stopping here
 // makes an else arm unmatchable as an Arm, which is what makes else-last a rule
