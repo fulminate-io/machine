@@ -213,8 +213,13 @@ func TestTheAnchorHoldsOnANodeThatForwardsRatherThanTransforms(t *testing.T) {
 	if records[0].Anchor != AnchorCompletion {
 		t.Fatalf("the router journaled at anchor %q, want %q", records[0].Anchor, AnchorCompletion)
 	}
-	if records[0].Node != "router" {
-		t.Fatalf("the record names node %q, want the router", records[0].Node)
+	// A COMPLETION RECORD NAMES THE EMITTER IT WAS WRITTEN AT, which on a branching
+	// node is the branch rather than the bare node name. That is what makes the
+	// record self-placing on resume: a route journals at whichever branch its filter
+	// chose, and a record naming only "router" could not say which outlet to
+	// re-inject it into.
+	if records[0].Node != "router"+leftSuffix {
+		t.Fatalf("the record names node %q, want the branch the filter chose", records[0].Node)
 	}
 	if len(events) < 2 || events[0] != "fn" || events[1] != "journal:completion" {
 		t.Fatalf("the observed order was %v, want the journal call AFTER the filter ran", events)

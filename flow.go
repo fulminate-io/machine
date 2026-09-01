@@ -153,7 +153,138 @@ func journalCompletion[I, O any](ctx context.Context, w *worker[I], out *emitter
 
 		return
 	}
-	w.write(ctx, AnchorCompletion, packet.ID(), data, payload)
+
+	// THE RECORD NAMES THE EMITTER, NOT THE NODE, and on a single-outlet node those
+	// are the same string. They differ on a BRANCHING node, where the emitter is
+	// name.left or name.right — and that difference is load-bearing: a route journals
+	// at whichever branch its filter chose and a split journals at BOTH, so a record
+	// that named only the node could not tell resume which outlet to re-inject it
+	// into. Naming the emitter makes each record self-placing.
+	record := CheckpointRecord{
+		Flow: w.machine.name, Datum: packet.ID(), Node: out.producer,
+		Anchor: AnchorCompletion, Data: data,
+	}
+	if err := w.machine.cfg.journal.Checkpoint(ctx, record); err != nil {
+		w.dispatch(ctx, NodeError[I]{Node: w.name, Payload: payload,
+			Err: fmt.Errorf("machine: journaling the completion checkpoint for node %q: %w", w.name, err)})
+	}
+}
+
+// resume re-places the datums a dead worker left behind for this node.
+//
+// IT HONORS THE ANCHOR THE RECORD WAS WRITTEN AT, which is the whole point of
+// carrying the anchor rather than re-deriving it. An ARRIVAL record is this node's
+// INPUT, so it goes back onto this node's own edge and the node RUNS AGAIN — safe
+// because the author declared it idempotent. A COMPLETION record is this node's
+// OUTPUT, so it goes onto the OUTBOUND edge and is re-injected into the SUCCESSORS;
+// this node is never re-run, which is what keeps a non-idempotent node's side effects
+// from happening twice.
+//
+// IT PARKS IN Orphans ITSELF rather than reading a shutdown flag and then waiting on
+// something taken separately. A wake signal and the state it announces living under
+// different locks is how a missed wakeup happens; here there is one call, and its
+// context is the machine's, so the loop ends when the machine does.
+func resume[I, O any](ctx context.Context, w *worker[I], out *emitter[O]) {
+	if !w.checkpoint || w.machine.cfg.journal == nil {
+		return
+	}
+
+	for {
+		records, err := w.machine.cfg.journal.Orphans(ctx, w.machine.name)
+		if err != nil {
+			if ctx.Err() == nil {
+				w.report(ctx, fmt.Errorf("machine: reading orphans for node %q: %w", w.name, err))
+			}
+
+			return
+		}
+		for _, record := range records {
+			reclaim(ctx, w, out, record)
+		}
+	}
+}
+
+// reclaim claims one orphaned record and re-places it if this worker won.
+//
+// A LOST CLAIM IS ORDINARY AND IS NOT REPORTED. Claim returning false means another
+// survivor won the datum, which is the recovery protocol working rather than a
+// failure. Only a claim that ERRORED reaches the handler.
+func reclaim[I, O any](ctx context.Context, w *worker[I], out *emitter[O], record CheckpointRecord) {
+	arrival := record.Anchor == AnchorArrival && record.Node == w.name
+	completion := record.Anchor == AnchorCompletion && record.Node == out.producer
+	if !arrival && !completion {
+		return
+	}
+
+	won, err := w.machine.cfg.journal.Claim(ctx, record.Flow, record.Datum, w.machine.name)
+	if err != nil {
+		w.report(ctx, fmt.Errorf("machine: claiming datum %q for node %q: %w", record.Datum, w.name, err))
+
+		return
+	}
+	if !won {
+		return
+	}
+
+	if arrival {
+		rerun(ctx, w, record)
+
+		return
+	}
+	reinject(ctx, w, out, record)
+}
+
+// rerun puts an ARRIVAL record back on the node's own edge, so the node processes the
+// datum again.
+func rerun[I any](ctx context.Context, w *worker[I], record CheckpointRecord) {
+	packet, err := w.codec.Unmarshal(record.Data)
+	if err != nil {
+		w.report(ctx, fmt.Errorf(
+			"machine: rebuilding the arrival record for datum %q: %w", record.Datum, err))
+
+		return
+	}
+	if err := w.edge.Send(ctx, packet); err != nil {
+		w.report(ctx, fmt.Errorf(
+			"machine: re-running datum %q on node %q: %w", record.Datum, w.name, err))
+	}
+}
+
+// reinject puts a COMPLETION record on the OUTBOUND edge, so the successors receive
+// what the node produced and the node itself is never run again.
+func reinject[I, O any](ctx context.Context, w *worker[I], out *emitter[O], record CheckpointRecord) {
+	packet, err := out.codec.Unmarshal(record.Data)
+	if err != nil {
+		w.report(ctx, fmt.Errorf(
+			"machine: rebuilding the completion record for datum %q: %w", record.Datum, err))
+
+		return
+	}
+	if err := out.edge.Send(ctx, packet); err != nil {
+		w.report(ctx, fmt.Errorf(
+			"machine: re-injecting datum %q past node %q: %w", record.Datum, w.name, err))
+	}
+}
+
+// retire drops a completed datum's record and its claim together.
+//
+// IT FIRES UNCONDITIONALLY rather than being gated on whether the flow declared a
+// checkpoint. Retiring a datum that was never checkpointed is a no-op on the journal
+// side, and gating it would mean tracking per-datum whether a checkpoint was ever
+// written — state this path does not have and does not need.
+//
+// CRASH WINDOW, stated rather than narrowed: a worker that dies between the datum
+// completing and this retire landing leaves a record for a datum that is already
+// done, and recovery will claim and re-run it. That is the at-least-once semantic
+// this design documents rather than masks; a second mechanism to narrow it would be
+// another thing that can disagree with the first.
+func (w *worker[I]) retire(ctx context.Context, datum string) {
+	if w.machine.cfg.journal == nil {
+		return
+	}
+	if err := w.machine.cfg.journal.Retire(ctx, w.machine.name, datum); err != nil {
+		w.report(ctx, fmt.Errorf("machine: retiring datum %q at node %q: %w", datum, w.name, err))
+	}
 }
 
 // requireCompletionCodec refuses AT START when a completion-anchored checkpoint node
@@ -179,6 +310,28 @@ func requireCompletionCodec[I, O any](w *worker[I], out *emitter[O]) {
 			"or mark %q idempotent to checkpoint on arrival instead",
 			w.name, out.consumer, out.consumer, w.name, w.name)
 	})
+}
+
+// outlets declares the two emitters a BRANCHING node produces, each carrying the
+// completion-codec requirement in its own right: a branching node journals down
+// whichever outlet its work selects, so either can be the one that needs a codec.
+func outlets[U any](m *Machine, w *worker[U], name string) (left, right *emitter[U]) {
+	left = newEmitter[U](m, name+leftSuffix)
+	right = newEmitter[U](m, name+rightSuffix)
+	requireCompletionCodec(w, left)
+	requireCompletionCodec(w, right)
+
+	return left, right
+}
+
+// runBranching starts a two-outlet node: its read loop, and one resume loop per
+// outlet, because a completion record names the outlet it was written at.
+func runBranching[U any](w *worker[U], run runner[U], left, right *emitter[U]) {
+	w.record.run = func(ctx context.Context) {
+		go w.readLoop(ctx, run)
+		go resume(ctx, w, left)
+		go resume(ctx, w, right)
+	}
 }
 
 // runner processes one datum for a node. It takes the PACKET the edge delivered; the
@@ -481,7 +634,11 @@ func (w *worker[I]) split(onLeft, onRight *emitter[I], fn Duplicator[I]) runner[
 
 func (w *worker[I]) drain() runner[I] {
 	return func(ctx context.Context, p Packet[I]) {
-		w.guard(ctx, w.bind(p), func(_ context.Context, inner Frame[I]) {
+		w.guard(ctx, w.bind(p), func(spanCtx context.Context, inner Frame[I]) {
+			// THE RETIREMENT TRIGGER. A datum that has left the flow is exactly a
+			// datum whose recovery record is no longer wanted, so this is the same
+			// terminal path that already reclaims the frame's state.
+			w.retire(spanCtx, inner.ID())
 			inner.state.release()
 		})
 	}
@@ -506,6 +663,7 @@ func (m *Machine) Source[T any](name string, opts ...NodeOption[T]) (Flow[T, T],
 	out := newEmitter[T](m, name)
 	w.record.run = func(ctx context.Context) {
 		go w.readLoop(ctx, w.transform(out, func(f Frame[T]) T { return f.Value() }))
+		go resume(ctx, w, out)
 	}
 	ingest := func(ctx context.Context, payload T) error {
 		return w.edge.Send(ctx, packetOf(newFrame(name, payload, m.cfg.store)))
@@ -542,6 +700,7 @@ func (f Flow[T, U]) Map[V any](name string, fn Transformation[U, V], opts ...Nod
 	requireCompletionCodec(w, out)
 	w.record.run = func(ctx context.Context) {
 		go w.readLoop(ctx, w.transform(out, fn))
+		go resume(ctx, w, out)
 	}
 	return Flow[T, V]{machine: f.machine, out: out}
 }
@@ -553,13 +712,8 @@ func (f Flow[T, U]) Map[V any](name string, fn Transformation[U, V], opts ...Nod
 func (f Flow[T, U]) If(name string, fn Filter[U], opts ...NodeOption[U]) (left, right Flow[T, U]) {
 	w := newWorker[U](f.machine, name, opts...)
 	f.out.bind(name, w.edge, w.codec)
-	onTrue := newEmitter[U](f.machine, name+leftSuffix)
-	onFalse := newEmitter[U](f.machine, name+rightSuffix)
-	requireCompletionCodec(w, onTrue)
-	requireCompletionCodec(w, onFalse)
-	w.record.run = func(ctx context.Context) {
-		go w.readLoop(ctx, w.route(onTrue, onFalse, fn))
-	}
+	onTrue, onFalse := outlets(f.machine, w, name)
+	runBranching(w, w.route(onTrue, onFalse, fn), onTrue, onFalse)
 	return Flow[T, U]{machine: f.machine, out: onTrue}, Flow[T, U]{machine: f.machine, out: onFalse}
 }
 
@@ -570,13 +724,8 @@ func (f Flow[T, U]) If(name string, fn Filter[U], opts ...NodeOption[U]) (left, 
 func (f Flow[T, U]) Tee(name string, fn Duplicator[U], opts ...NodeOption[U]) (left, right Flow[T, U]) {
 	w := newWorker[U](f.machine, name, opts...)
 	f.out.bind(name, w.edge, w.codec)
-	onLeft := newEmitter[U](f.machine, name+leftSuffix)
-	onRight := newEmitter[U](f.machine, name+rightSuffix)
-	requireCompletionCodec(w, onLeft)
-	requireCompletionCodec(w, onRight)
-	w.record.run = func(ctx context.Context) {
-		go w.readLoop(ctx, w.split(onLeft, onRight, fn))
-	}
+	onLeft, onRight := outlets(f.machine, w, name)
+	runBranching(w, w.split(onLeft, onRight, fn), onLeft, onRight)
 	return Flow[T, U]{machine: f.machine, out: onLeft}, Flow[T, U]{machine: f.machine, out: onRight}
 }
 
@@ -611,16 +760,51 @@ func (f Flow[T, U]) Drop(name string, opts ...NodeOption[U]) {
 // reclaimed. Output does not process, so it does not advance the datum's Node stamp
 // and has no read loop of its own.
 //
-// It hands back the edge's own channel, so what leaves the flow is what the edge
-// carried: a packet, with the identity accessors and the projection and no reach into
-// state. That is not a narrowing — a frame leaving a flow never carried a capability
-// view either, so every gated accessor on it panicked; the difference is that the call
-// now fails to compile instead.
+// What leaves the flow is what the edge carried: a packet, with the identity
+// accessors and the projection and no reach into state. That is not a narrowing — a
+// frame leaving a flow never carried a capability view either, so every gated
+// accessor on it panicked; the difference is that the call now fails to compile
+// instead.
+//
+// WITH A JOURNAL WIRED IT HANDS BACK A FORWARDING CHANNEL RATHER THAN THE EDGE'S OWN,
+// because this is a terminal and retirement fires where a datum leaves the flow. The
+// handoff stays synchronous — the forwarding channel is unbuffered, so a send still
+// blocks until the caller reads — and with no journal the edge's own channel is
+// returned unchanged.
 func (f Flow[T, U]) Output(name string, opts ...NodeOption[U]) <-chan Packet[U] {
 	w := newWorker[U](f.machine, name, opts...)
 	f.out.bind(name, w.edge, w.codec)
 	if w.edge == nil {
 		return nil
 	}
-	return w.edge.Receive()
+	if f.machine.cfg.journal == nil {
+		return w.edge.Receive()
+	}
+
+	return w.retiring(w.edge.Receive())
+}
+
+// retiring forwards packets to the caller, retiring each datum as it leaves.
+//
+// The retire happens BEFORE the handoff rather than after, so a caller that never
+// reads cannot leave the record outstanding for a datum the flow has already
+// finished with.
+func (w *worker[I]) retiring(in <-chan Packet[I]) <-chan Packet[I] {
+	out := make(chan Packet[I])
+	ctx, cancel := context.WithCancel(context.Background())
+	w.machine.addCloser(func(context.Context) { cancel() })
+
+	go func() {
+		defer close(out)
+		for p := range in {
+			w.retire(ctx, p.ID())
+			select {
+			case out <- p:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	return out
 }
