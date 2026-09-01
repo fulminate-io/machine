@@ -108,6 +108,13 @@ func assertRefused(t *testing.T, c net.Conn, why string) {
 // dead run that reports nothing about which property broke.
 func assertDelivered(t *testing.T, s *groupStream, c net.Conn, payload, why string) {
 	t.Helper()
+	assertDeliveredVia(t, s.Accept, c, payload, why)
+}
+
+// assertDeliveredVia is assertDelivered against any accept function, so the
+// membership link is asserted through the same helper a raft group is.
+func assertDeliveredVia(t *testing.T, accept func() (net.Conn, error), c net.Conn, payload, why string) {
+	t.Helper()
 	if _, err := c.Write([]byte(payload)); err != nil {
 		t.Fatalf("%s: write: %v", why, err)
 	}
@@ -117,7 +124,7 @@ func assertDelivered(t *testing.T, s *groupStream, c net.Conn, payload, why stri
 	}
 	ch := make(chan arrival, 1)
 	go func() {
-		conn, err := s.Accept()
+		conn, err := accept()
 		ch <- arrival{conn, err}
 	}()
 	var arrived arrival

@@ -16,6 +16,30 @@ import (
 	"github.com/hashicorp/go-hclog"
 )
 
+// streamKey names one binding on the shared listener.
+//
+// THE TABLE IS KEYED BY THE PAIR, NOT BY THE ID, and that is what makes the
+// control channel a separate NAMESPACE rather than a reserved name. A reserved
+// group id would live in the same namespace as user-chosen flow names, so a
+// flow named to match it would collide; keying by the pair makes that collision
+// unrepresentable instead of merely unlikely.
+type streamKey struct {
+	kind StreamKind
+	id   GroupID
+}
+
+// bindingKey maps an announced handshake kind to the key its binding lives
+// under. A FORWARDING CONNECTION RESOLVES TO ITS GROUP'S RAFT BINDING, because
+// one binding carries both of a group's queues: the kind names the delivery arm,
+// not a second group. A membership connection resolves to its own key, which is
+// the whole point of the pair.
+func bindingKey(kind StreamKind, id GroupID) streamKey {
+	if kind == KindForward {
+		return streamKey{kind: KindRaft, id: id}
+	}
+	return streamKey{kind: kind, id: id}
+}
+
 // Mux lifecycle refusals, declared beside the code that returns them.
 var (
 	ErrClosed          = errors.New("transport: mux is closed")
@@ -83,7 +107,7 @@ type Mux struct {
 	signer    *signer
 
 	mu     sync.RWMutex
-	groups map[GroupID]*groupStream
+	groups map[streamKey]*groupStream
 	closed bool
 
 	stats Stats
@@ -114,7 +138,7 @@ func newMux(ln net.Listener, cfg Config) (*Mux, error) {
 		logger:    cfg.Logger,
 		cfg:       withDefaults(cfg),
 		signer:    newSigner(cfg.Tokens),
-		groups:    map[GroupID]*groupStream{},
+		groups:    map[streamKey]*groupStream{},
 	}
 	if m.logger == nil {
 		m.logger = hclog.NewNullLogger()
@@ -299,20 +323,13 @@ func (m *Mux) refuseSession(conn net.Conn, err error) {
 	_ = conn.Close()
 }
 
-// binding resolves the stream a verified preamble names.
-//
-// A MEMBERSHIP CONNECTION RESOLVES TO NOTHING HERE, and that is a refusal rather
-// than an omission: this node holds no control channel, so handing the
-// connection to the raft group that happens to share its id would deliver
-// control bytes into raft's RPC decoder. Refusing is the correct answer for a
-// binding this node does not have.
+// binding resolves the stream a verified preamble names. A kind this node holds
+// no binding for resolves to nothing and is refused, which is the correct answer
+// for a control connection reaching a node that has bound no control channel.
 func (m *Mux) binding(p preamble) *groupStream {
-	if p.Kind == KindMembership {
-		return nil
-	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.groups[p.ID]
+	return m.groups[bindingKey(p.Kind, p.ID)]
 }
 
 // refuseUnbound counts and closes a connection naming a binding this node does
@@ -404,7 +421,14 @@ func (m *Mux) deliverForward(s *groupStream, conn net.Conn) {
 // routing seam directly — once a NetworkTransport exists it owns every Accept,
 // so a test that also called Accept would park forever.
 func (m *Mux) bindStream(id GroupID) (*groupStream, error) {
-	if len(id) == 0 || len(id) > MaxGroupIDLen {
+	return m.bindKey(streamKey{kind: KindRaft, id: id})
+}
+
+// bindKey is the one registration path. bindStream and BindMembership differ
+// only in the key they compute, so every rule below — the id range, the
+// duplicate refusal and the closed-mux refusal — holds identically for both.
+func (m *Mux) bindKey(k streamKey) (*groupStream, error) {
+	if len(k.id) == 0 || len(k.id) > MaxGroupIDLen {
 		return nil, ErrGroupIDRange
 	}
 	m.mu.Lock()
@@ -412,20 +436,20 @@ func (m *Mux) bindStream(id GroupID) (*groupStream, error) {
 	if m.closed {
 		return nil, ErrClosed
 	}
-	if _, dup := m.groups[id]; dup {
-		return nil, fmt.Errorf("%w: %q", ErrGroupBound, string(id))
+	if _, dup := m.groups[k]; dup {
+		return nil, fmt.Errorf("%w: %q", ErrGroupBound, string(k.id))
 	}
-	s := newGroupStream(m, id)
-	m.groups[id] = s
+	s := newGroupStream(m, k)
+	m.groups[k] = s
 	return s, nil
 }
 
-// unbind removes a group and releases anything waiting on it. The release runs
+// unbind removes a binding and releases anything waiting on it. The release runs
 // outside the lock.
-func (m *Mux) unbind(id GroupID) {
+func (m *Mux) unbind(k streamKey) {
 	m.mu.Lock()
-	s := m.groups[id]
-	delete(m.groups, id)
+	s := m.groups[k]
+	delete(m.groups, k)
 	m.mu.Unlock()
 	if s != nil {
 		s.release()
@@ -437,13 +461,13 @@ func (m *Mux) unbind(id GroupID) {
 func (m *Mux) Close() error {
 	m.mu.Lock()
 	m.closed = true
-	ids := make([]GroupID, 0, len(m.groups))
-	for id := range m.groups {
-		ids = append(ids, id)
+	keys := make([]streamKey, 0, len(m.groups))
+	for k := range m.groups {
+		keys = append(keys, k)
 	}
 	m.mu.Unlock()
-	for _, id := range ids {
-		m.unbind(id)
+	for _, k := range keys {
+		m.unbind(k)
 	}
 	return m.ln.Close()
 }

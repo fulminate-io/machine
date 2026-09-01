@@ -27,6 +27,7 @@ var _ raft.StreamLayer = (*groupStream)(nil)
 // group owns both streams' lifetime, so there is one door rather than two.
 type groupStream struct {
 	mux       *Mux
+	kind      StreamKind
 	id        GroupID
 	acceptCh  chan net.Conn
 	forwardCh chan net.Conn
@@ -34,12 +35,16 @@ type groupStream struct {
 	once      sync.Once
 }
 
+// key is the pair this stream is registered under.
+func (s *groupStream) key() streamKey { return streamKey{kind: s.kind, id: s.id} }
+
 // newGroupStream builds the binding for id with the mux's queue depth, which
 // both delivery queues take: neither arm is privileged over the other.
-func newGroupStream(m *Mux, id GroupID) *groupStream {
+func newGroupStream(m *Mux, k streamKey) *groupStream {
 	return &groupStream{
 		mux:       m,
-		id:        id,
+		kind:      k.kind,
+		id:        k.id,
 		acceptCh:  make(chan net.Conn, m.cfg.AcceptQueueDepth),
 		forwardCh: make(chan net.Conn, m.cfg.AcceptQueueDepth),
 		doneCh:    make(chan struct{}),
@@ -64,7 +69,7 @@ func (s *groupStream) Accept() (net.Conn, error) {
 // NetworkTransport.Close calls straight through to here, so closing the shared
 // listener would take every other group on the node down with one group.
 func (s *groupStream) Close() error {
-	s.mux.unbind(s.id)
+	s.mux.unbind(s.key())
 	return nil
 }
 
