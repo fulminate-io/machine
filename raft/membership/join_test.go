@@ -1,0 +1,250 @@
+package membership
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/hashicorp/go-hclog"
+	"github.com/hashicorp/raft"
+
+	"github.com/whitaker-io/machine/raft/ledger"
+	"github.com/whitaker-io/machine/raft/transport"
+)
+
+// clusterNode is one worker in a test cluster: its shared listener, its manager,
+// and the address peers reach it at.
+type clusterNode struct {
+	mgr  *Manager
+	mux  *transport.Mux
+	id   string
+	addr string
+}
+
+// newClusterNode builds a worker whose peer set is supplied directly rather than
+// resolved, because several instances on distinct ports of one loopback host is
+// a set DNS cannot express.
+func newClusterNode(t *testing.T, id string, flows []string, expect int) *clusterNode {
+	t.Helper()
+	mux, err := transport.New(transport.Config{
+		BindAddr:         "127.0.0.1:0",
+		HandshakeTimeout: 2 * time.Second,
+		RPCTimeout:       2 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("transport.New: %v", err)
+	}
+	addr := mux.Addr().String()
+	cfg := Config{
+		Node: id, Advertise: addr, Mux: mux, Logger: hclog.NewNullLogger(),
+		Flows: flows, Expect: expect,
+		Open: func(flow string) (*ledger.Ledger, error) {
+			return ledger.Open(ledger.Config{Flow: flow, LocalID: id, Mux: mux})
+		},
+	}
+	if expect > 0 {
+		cfg.Peers = "peers.invalid:0"
+	}
+	mgr, err := New(cfg)
+	if err != nil {
+		_ = mux.Close()
+		t.Fatalf("membership.New(%s): %v", id, err)
+	}
+	t.Cleanup(func() {
+		_ = mgr.Close()
+		_ = mux.Close()
+	})
+	return &clusterNode{mgr: mgr, mux: mux, id: id, addr: addr}
+}
+
+// peering points a node's discovery at an explicit address set.
+func (n *clusterNode) peering(addrs ...string) {
+	n.mgr.resolve = func(context.Context, string) ([]string, error) {
+		return append([]string(nil), addrs...), nil
+	}
+}
+
+// start settles the node's flows, failing the test if it cannot.
+func (n *clusterNode) start(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := n.mgr.Start(ctx); err != nil {
+		t.Fatalf("Start(%s): %v", n.id, err)
+	}
+}
+
+// raftFor reaches a flow's raft handle on this node.
+func (n *clusterNode) raftFor(t *testing.T, flow string) *raft.Raft {
+	t.Helper()
+	l, ok := n.mgr.Ledger(flow)
+	if !ok {
+		t.Fatalf("node %s does not host flow %q", n.id, flow)
+	}
+	return l.Raft()
+}
+
+// awaitLeader blocks until a flow has a leader on this node's view.
+func (n *clusterNode) awaitLeader(t *testing.T, flow string) {
+	t.Helper()
+	r := n.raftFor(t, flow)
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if r.State() == raft.Leader {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("node %s never became leader of flow %q", n.id, flow)
+}
+
+// suffrageIn reports how id is recorded in a flow's committed configuration.
+func suffrageIn(t *testing.T, r *raft.Raft, id string) (raft.ServerSuffrage, bool) {
+	t.Helper()
+	future := r.GetConfiguration()
+	if err := future.Error(); err != nil {
+		t.Fatalf("GetConfiguration: %v", err)
+	}
+	for _, server := range future.Configuration().Servers {
+		if string(server.ID) == id {
+			return server.Suffrage, true
+		}
+	}
+	return 0, false
+}
+
+// awaitSuffrage waits for id to reach want in a flow's committed configuration.
+func awaitSuffrage(t *testing.T, r *raft.Raft, id string, want raft.ServerSuffrage, window time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(window)
+	for time.Now().Before(deadline) {
+		if got, ok := suffrageIn(t, r, id); ok && got == want {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
+}
+
+func TestAnnounceStagesTheJoinerAsANonvoter(t *testing.T) {
+	leader := newClusterNode(t, "a-leader", []string{"alpha"}, 0)
+	leader.start(t)
+	leader.awaitLeader(t, "alpha")
+
+	joiner := newClusterNode(t, "b-joiner", []string{"alpha"}, 2)
+	joiner.peering(leader.addr)
+	joiner.start(t)
+
+	r := leader.raftFor(t, "alpha")
+	got, ok := suffrageIn(t, r, "b-joiner")
+	if !ok {
+		t.Fatal("the joiner is absent from the leader's committed configuration")
+	}
+	// THE DISCRIMINATING ASSERTION. An implementation that staged with AddVoter
+	// would satisfy "present in the configuration" and report Voter here.
+	if got != raft.Nonvoter {
+		t.Fatalf("the joiner is recorded at suffrage %v, want Nonvoter: admission must not raise quorum", got)
+	}
+}
+
+func TestAnnounceToANonLeaderRedirectsToTheFlowsLeader(t *testing.T) {
+	leader := newClusterNode(t, "a-leader", []string{"alpha"}, 0)
+	leader.start(t)
+	leader.awaitLeader(t, "alpha")
+
+	follower := newClusterNode(t, "b-follower", []string{"alpha"}, 2)
+	follower.peering(leader.addr)
+	follower.start(t)
+
+	// The follower hosts the flow and does not lead it, which is the case that
+	// must produce a redirect rather than a refusal.
+	third := newClusterNode(t, "c-third", []string{"alpha"}, 3)
+	third.peering(follower.addr, leader.addr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	reply, err := third.mgr.announceTo(ctx, follower.addr, "alpha")
+	if err != nil {
+		t.Fatalf("announce to the follower: %v", err)
+	}
+	to, ok := reply.Redirects["alpha"]
+	if !ok {
+		t.Fatalf("the follower did not redirect; it answered staged=%v refused=%v", reply.Staged, reply.Refused)
+	}
+	if to != leader.addr {
+		t.Fatalf("the redirect named %q, want the flow's leader %q", to, leader.addr)
+	}
+
+	// AND THE REDIRECT STAGES: the joiner re-announces to the address it named.
+	third.start(t)
+	if _, ok := suffrageIn(t, leader.raftFor(t, "alpha"), "c-third"); !ok {
+		t.Fatal("the re-announce to the redirected address did not stage the joiner")
+	}
+}
+
+func TestAnnounceRefusesAFlowTheReceiverDoesNotHost(t *testing.T) {
+	host := newClusterNode(t, "a-host", []string{"alpha"}, 0)
+	host.start(t)
+	host.awaitLeader(t, "alpha")
+
+	asker := newClusterNode(t, "b-asker", nil, 0)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	reply, err := asker.mgr.announceTo(ctx, host.addr, "bravo")
+	if err != nil {
+		t.Fatalf("announce: %v", err)
+	}
+	if len(reply.Staged) != 0 {
+		t.Fatalf("a flow the receiver does not host was staged: %v", reply.Staged)
+	}
+	reason, ok := reply.Refused["bravo"]
+	if !ok {
+		t.Fatal("the unhosted flow was omitted rather than refused: a silent omission is indistinguishable " +
+			"from a lost message")
+	}
+	if !strings.Contains(reason, "bravo") {
+		t.Fatalf("the refusal %q does not name the flow it refused", reason)
+	}
+	// THE CONTROL: the same receiver DOES answer for the flow it hosts, so the
+	// refusal above is about the flow rather than about a node that answers
+	// nothing.
+	ok2, err := asker.mgr.announceTo(ctx, host.addr, "alpha")
+	if err != nil {
+		t.Fatalf("CONTROL FAILED: announce for the hosted flow: %v", err)
+	}
+	if len(ok2.Staged) == 0 && len(ok2.Redirects) == 0 {
+		t.Fatalf("CONTROL FAILED: the hosted flow was neither staged nor redirected: %+v", ok2)
+	}
+}
+
+func TestAFlowNeitherBootstrappedNorReachableIsAnError(t *testing.T) {
+	// THE INPUT THAT MATTERS: a node whose peers probe has NOT seen Expect
+	// instances answer. Nothing hosts the flow and nobody else is up, so the
+	// count-and-lowest-id rule is unsatisfied and stays that way.
+	lonely := newClusterNode(t, "a-lonely", []string{"orphan"}, 3)
+	lonely.peering()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := lonely.mgr.Start(ctx)
+	if err == nil {
+		t.Fatal("Start created a group for an unplaceable flow: two workers each creating a one-voter group " +
+			"for one flow produce two logs that can never merge")
+	}
+	if !errors.Is(err, ErrFlowUnplaced) {
+		t.Fatalf("err = %v, want ErrFlowUnplaced", err)
+	}
+	if !strings.Contains(err.Error(), "orphan") {
+		t.Fatalf("the error %q does not name the flow it refused", err)
+	}
+
+	// AND NOTHING WAS CREATED: the ledger exists but its group does not, which is
+	// what separates a refusal from a self-bootstrap that also happened to error.
+	r := lonely.raftFor(t, "orphan")
+	future := r.GetConfiguration()
+	if future.Error() == nil && len(future.Configuration().Servers) != 0 {
+		t.Fatalf("a group was created anyway, with %d servers", len(future.Configuration().Servers))
+	}
+}

@@ -95,6 +95,13 @@ type announce struct {
 // be asked instead. A silent omission would be indistinguishable from a lost
 // message and would leave a worker believing it had joined a flow it had not.
 type announceReply struct {
+	// Node identifies the answering member.
+	//
+	// IT IS CARRIED BECAUSE THE CREATION RULE NEEDS IT. When no instance hosts a
+	// flow yet, the node that creates its group is the one holding the lowest id
+	// among those that answered — and an answer that did not say who sent it
+	// could not be compared. Nothing else reads it.
+	Node      string
 	Staged    []string
 	Redirects map[string]string
 	Refused   map[string]string

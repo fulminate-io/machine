@@ -92,6 +92,13 @@ func (p *peers) statsView() map[string]map[string]FlowStats {
 	return p.view
 }
 
+// addresses reports the peer set this node asks.
+func (p *peers) addresses() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.addrs...)
+}
+
 // failuresSnapshot reports the peers the last round could not reach.
 func (p *peers) failuresSnapshot() map[string]error {
 	p.mu.Lock()

@@ -6,6 +6,7 @@
 package membership
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -13,7 +14,9 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-hclog"
+	"github.com/hashicorp/raft"
 
+	"github.com/whitaker-io/machine/raft/ledger"
 	"github.com/whitaker-io/machine/raft/transport"
 )
 
@@ -26,6 +29,20 @@ var (
 	// reply kind arriving at an acceptor, for instance. It is distinct from
 	// ErrUnknownMessage, which refuses a kind no build declares.
 	ErrUnservedMessage = errors.New("membership: control message kind has no handler here")
+	// ErrConfigRange refuses a configuration value outside the range this package
+	// can act on, naming the field and the value.
+	ErrConfigRange = errors.New("membership: configuration value is out of range")
+	// ErrFlowUnplaced refuses to start a flow that could neither be found through
+	// the peers address nor created under the count-and-lowest-id rule.
+	//
+	// IT IS AN ERROR RATHER THAN A SELF-BOOTSTRAP, and that is the whole point:
+	// two workers each creating a one-voter group for the same flow produce two
+	// logs that can never merge, so while the rule is unsatisfied the only safe
+	// action is none.
+	ErrFlowUnplaced = errors.New("membership: flow is neither reachable nor creatable under the rule")
+	// ErrNotStaged reports a join whose node never appeared in the leader's
+	// committed configuration.
+	ErrNotStaged = errors.New("membership: the joiner is absent from the committed configuration")
 )
 
 const (
@@ -41,6 +58,9 @@ const (
 	controlReadTimeout = 2 * time.Second
 	// statsInterval is how long a stats view is served before a fresh round runs.
 	statsInterval = 2 * time.Second
+	// leadershipPollInterval is how often a flow's supervisor re-reads whether
+	// this node leads it.
+	leadershipPollInterval = 50 * time.Millisecond
 )
 
 // Config carries what the control channel needs to serve and to dial.
@@ -58,6 +78,24 @@ type Config struct {
 	Mux *transport.Mux
 	// Logger receives control-channel logs.
 	Logger hclog.Logger
+	// Flows is the flow set this worker hosts. THE FLOW SET NAMES THE GROUPS:
+	// derivation is the whole mechanism, and there is no separate group list.
+	Flows []string
+	// Peers is ONE address that reaches the other instances — a headless
+	// Service, a service-discovery name, a DNS round-robin over VMs. It carries
+	// the MACHINE_CLUSTER_PEERS value. Unset means the mechanism is absent and a
+	// single-instance run stays zero-config.
+	Peers string
+	// Expect is how many instances this deployment runs, carried by
+	// MACHINE_CLUSTER_EXPECT. It is REQUIRED whenever Peers is set and refused
+	// when it is below one, so a cluster deployment cannot start in an ambiguous
+	// state where a node cannot tell "nobody hosts this flow yet" from "I have
+	// not heard from everyone yet".
+	Expect int
+	// Open opens one flow's ledger. Required whenever Flows is non-empty.
+	Open OpenFunc
+	// Autopilot overrides the promotion thresholds and the reconcile cadence.
+	Autopilot AutopilotTuning
 }
 
 // validate refuses an empty required field BY NAME.
@@ -71,6 +109,17 @@ func (c Config) validate() error {
 	if c.Mux == nil {
 		return fmt.Errorf("%w: Config.Mux", ErrConfigMissing)
 	}
+	if len(c.Flows) > 0 && c.Open == nil {
+		return fmt.Errorf("%w: Config.Open, which opens each flow's ledger", ErrConfigMissing)
+	}
+	// A PEERS ADDRESS WITHOUT AN EXPECTED COUNT IS AN ERROR, NOT A DEFAULT. The
+	// count is what tells a node that has found no group for a flow whether it
+	// has heard from everyone; defaulting it would let a cluster start in the
+	// one state where a wrong answer creates two logs that can never merge.
+	if c.Peers != "" && c.Expect < 1 {
+		return fmt.Errorf("%w: Config.Expect is %d, and a Peers address requires the instance count",
+			ErrConfigRange, c.Expect)
+	}
 	return nil
 }
 
@@ -82,13 +131,34 @@ type Manager struct {
 	link   *transport.MembershipLink
 	peers  *peers
 
+	// admit is the staging call, held as a field for ONE reason: the availability
+	// proof has to be able to run the wrong shape. The mutant it exists to catch
+	// is a join that admits with AddVoter, and a test that could not point this at
+	// the voter form could not show the group losing leadership. Production never
+	// reassigns it, and this package never calls AddVoter — corpus check
+	// a1ddee62cee62199ee99f2c9e2ca718e enforces that as a shape across the module.
+	admit func(r *raft.Raft, id raft.ServerID, addr raft.ServerAddress) raft.IndexFuture
+	// resolve is the discovery seam: one configured address in, every instance
+	// behind it out. It is a field so a test can supply a set DNS cannot express,
+	// several instances on distinct ports of one loopback host.
+	resolve func(ctx context.Context, peers string) ([]string, error)
+
 	// wg covers the serve loop and every handler goroutine, so Close can join
 	// them rather than leaving state to be torn down underneath a live handler.
 	wg sync.WaitGroup
 
+	// pilotCtx bounds every flow's reconcile loop to this manager's lifetime.
+	// Autopilot's Start takes a context and runs until it is canceled, so the
+	// loops cannot be tied to the context of whichever call happened to start
+	// them.
+	pilotCtx    context.Context
+	pilotCancel context.CancelFunc
+
 	mu         sync.Mutex
 	closed     bool
 	inflight   map[net.Conn]struct{}
+	flows      map[string]*ledger.Ledger
+	pilots     map[string]*flowPilot
 	localStats func(flow string) (FlowStats, bool)
 	// onHandlerExit is an OBSERVATION SEAM, called as a handler leaves. The
 	// shutdown gate needs to see that a handler actually exited rather than
@@ -125,6 +195,17 @@ func New(cfg Config) (*Manager, error) {
 		link:     link,
 		peers:    newPeers(link, logger),
 		inflight: map[net.Conn]struct{}{},
+		flows:    map[string]*ledger.Ledger{},
+		pilots:   map[string]*flowPilot{},
+		resolve:  resolvePeers,
+	}
+	m.pilotCtx, m.pilotCancel = context.WithCancel(context.Background())
+	// ADMISSION IS AddNonvoter AND NOTHING ELSE. A joiner is replaying when it
+	// is admitted, and raising quorum to include a member that cannot yet answer
+	// costs the leader its leadership — measured, and not as a stall: the join
+	// call itself returns nil in zero seconds while the NEXT write fails.
+	m.admit = func(r *raft.Raft, id raft.ServerID, addr raft.ServerAddress) raft.IndexFuture {
+		return r.AddNonvoter(id, addr, 0, 0)
 	}
 	m.wg.Add(1)
 	go m.serve()
@@ -239,38 +320,68 @@ func (m *Manager) exchange(conn net.Conn) error {
 func (m *Manager) answer(conn net.Conn, kind msgKind, body []byte) error {
 	switch kind {
 	case msgStats:
-		var req statsRequest
-		if err := decodeMessage(body, &req); err != nil {
-			return err
-		}
-		if err := conn.SetWriteDeadline(time.Now().Add(controlReadTimeout)); err != nil {
-			return err
-		}
-		return writeMessage(conn, msgStatsReply, m.statsReplyFor(req))
-	case msgAnnounce, msgLeave, msgAnnounceReply, msgStatsReply, msgLeaveReply:
+		return m.answerStats(conn, body)
+	case msgAnnounce:
+		return m.answerJoin(conn, body)
+	case msgLeave, msgAnnounceReply, msgStatsReply, msgLeaveReply:
 		return fmt.Errorf("%w: kind %d", ErrUnservedMessage, uint8(kind))
 	default:
 		return fmt.Errorf("%w: kind %d", ErrUnknownMessage, uint8(kind))
 	}
 }
 
+// answerStats serves a stats request from what this node knows about itself.
+func (m *Manager) answerStats(conn net.Conn, body []byte) error {
+	var req statsRequest
+	if err := decodeMessage(body, &req); err != nil {
+		return err
+	}
+	return m.reply(conn, msgStatsReply, m.statsReplyFor(req))
+}
+
+// answerJoin serves an announce.
+func (m *Manager) answerJoin(conn net.Conn, body []byte) error {
+	var req announce
+	if err := decodeMessage(body, &req); err != nil {
+		return err
+	}
+	return m.reply(conn, msgAnnounceReply, m.answerAnnounce(req))
+}
+
+// reply bounds the write in time and sends one message. The write deadline
+// matters for the same reason the read one does: a peer that stops READING must
+// not park a handler either.
+func (*Manager) reply(conn net.Conn, kind msgKind, payload any) error {
+	if err := conn.SetWriteDeadline(time.Now().Add(controlReadTimeout)); err != nil {
+		return err
+	}
+	return writeMessage(conn, kind, payload)
+}
+
 // statsReplyFor answers with what this node knows about itself. A flow it does
 // not host is OMITTED rather than reported as a zero value, which would read as
 // a member at term zero that has never been contacted.
 func (m *Manager) statsReplyFor(req statsRequest) statsReply {
-	m.mu.Lock()
-	fn := m.localStats
-	m.mu.Unlock()
 	out := statsReply{PerFlow: make(map[string]FlowStats, len(req.Flows))}
-	if fn == nil {
-		return out
-	}
 	for _, flow := range req.Flows {
-		if stats, ok := fn(flow); ok {
+		if stats, ok := m.localFlowStats(flow); ok {
 			out.PerFlow[flow] = stats
 		}
 	}
 	return out
+}
+
+// localFlowStats reports what this node knows about ONE of its own flows. It is
+// the one place the installed reporter is read, so the acceptor answering a peer
+// and the promoter answering autopilot see the same value.
+func (m *Manager) localFlowStats(flow string) (FlowStats, bool) {
+	m.mu.Lock()
+	fn := m.localStats
+	m.mu.Unlock()
+	if fn == nil {
+		return FlowStats{}, false
+	}
+	return fn(flow)
 }
 
 // Close shuts the control channel down in a PRESCRIBED ORDER, and each step is
@@ -287,22 +398,58 @@ func (m *Manager) statsReplyFor(req statsRequest) statsReply {
 //
 // It is idempotent.
 func (m *Manager) Close() error {
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
+	conns, flows, already := m.beginClose()
+	if already {
 		return nil
+	}
+	// EVERY RECONCILE LOOP STOPS FIRST. Canceling here is what lets the flow
+	// supervisors below join autopilot's own goroutines, so no reconcile round
+	// can be in flight against a ledger this Close is about to tear down.
+	m.pilotCancel()
+	err := m.link.Close()
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
+	m.wg.Wait()
+	if cerr := closeLedgers(flows); cerr != nil && err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// beginClose marks the manager closed and takes everything Close must release,
+// reporting whether Close had already run.
+func (m *Manager) beginClose() ([]net.Conn, map[string]*ledger.Ledger, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return nil, nil, true
 	}
 	m.closed = true
 	conns := make([]net.Conn, 0, len(m.inflight))
 	for conn := range m.inflight {
 		conns = append(conns, conn)
 	}
+	flows := m.flows
 	m.inflight = map[net.Conn]struct{}{}
-	m.mu.Unlock()
-	err := m.link.Close()
-	for _, conn := range conns {
-		_ = conn.Close()
+	m.flows = map[string]*ledger.Ledger{}
+	m.pilots = map[string]*flowPilot{}
+	return conns, flows, false
+}
+
+// closeLedgers closes every open flow and reports the first failure.
+//
+// IT RUNS LAST, after the handlers have been joined. A handler serving an
+// announce reaches into a flow's raft handle, so closing the ledgers while one
+// was still running would tear that state down underneath it — which is the
+// second of the two defects Close's ordering exists to prevent, and the one that
+// is only safe because the join step preceded it.
+func closeLedgers(flows map[string]*ledger.Ledger) error {
+	var err error
+	for flow, l := range flows {
+		if cerr := l.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("membership: closing the ledger for flow %q failed: %w", flow, cerr)
+		}
 	}
-	m.wg.Wait()
 	return err
 }
