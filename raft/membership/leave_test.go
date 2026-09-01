@@ -3,6 +3,7 @@ package membership
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -239,4 +240,92 @@ func TestOneFlowIDRebindsTwoHundredTimes(t *testing.T) {
 		done++
 	}
 	t.Logf("completed %d rebind cycles in %v", done, time.Since(deadline.Add(-4*time.Minute)))
+}
+
+// TestAddingAFlowThroughSetFlowsOpensAndJoinsIt exercises the ADDED half of
+// SetFlows, which nothing else did: the removal half is driven twice in this
+// file and the addition half was specified and never executed. Step 4.1 states
+// SetFlows computes the difference itself precisely because two call sites
+// computing it is how the added and removed halves drift apart — so leaving one
+// half unexercised is the shape that lets the drift happen unnoticed.
+func TestAddingAFlowThroughSetFlowsOpensAndJoinsIt(t *testing.T) {
+	node := newClusterNode(t, "a-node", []string{"alpha"}, 0)
+	node.start(t)
+	node.awaitLeader(t, "alpha")
+	if _, ok := node.mgr.Ledger("beta"); ok {
+		t.Fatal("CONTROL FAILED: the flow being added is already hosted, so nothing below is observed")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := node.mgr.SetFlows(ctx, []string{"alpha", "beta"}); err != nil {
+		t.Fatalf("SetFlows adding a flow: %v", err)
+	}
+
+	// OPENED: the ledger exists and holds the flow's group id.
+	l, ok := node.mgr.Ledger("beta")
+	if !ok {
+		t.Fatal("the added flow has no open ledger")
+	}
+	if bindable(t, node.mux, "beta") {
+		t.Fatal("the added flow's group id is unbound, so no ledger holds it")
+	}
+	// AND JOINED: with no peer hosting it, the creation rule makes this node the
+	// creator, so the flow must be in a formed group rather than merely open.
+	future := l.Raft().GetConfiguration()
+	if err := future.Error(); err != nil {
+		t.Fatalf("GetConfiguration on the added flow: %v", err)
+	}
+	if len(future.Configuration().Servers) == 0 {
+		t.Fatal("the added flow was opened but never placed: its group has no members")
+	}
+	// The flow it already had is untouched.
+	if _, ok := node.mgr.Ledger("alpha"); !ok {
+		t.Fatal("adding a flow dropped the one already hosted")
+	}
+}
+
+// TestLeaveRefusalsAreNamedPerFlow pins the leave arm's half of the rule the
+// announce arm already carries: a refusal names the flow and the reason. A
+// silent omission is indistinguishable from a lost message, and a departing node
+// that read one as success would close its ledger while the group still carried
+// it — manufacturing exactly the orphan the unconditional close exists to avoid.
+func TestLeaveRefusalsAreNamedPerFlow(t *testing.T) {
+	leader := newClusterNode(t, "a-leader", []string{"alpha"}, 0)
+	leader.start(t)
+	leader.awaitLeader(t, "alpha")
+
+	// A flow this node does not host at all.
+	reply := leader.mgr.answerLeave(leave{Node: "b-gone", Flows: []string{"bravo"}})
+	if len(reply.Removed) != 0 {
+		t.Fatalf("a flow the receiver does not host was reported removed: %v", reply.Removed)
+	}
+	reason, refused := reply.Refused["bravo"]
+	if !refused {
+		t.Fatal("an unhosted flow was omitted from a leave reply rather than refused by name")
+	}
+	if !strings.Contains(reason, "bravo") {
+		t.Fatalf("the refusal %q does not name the flow", reason)
+	}
+
+	// A flow this node hosts but does not LEAD: only the leader can remove.
+	follower := newClusterNode(t, "b-follower", []string{"alpha"}, 2)
+	follower.peering(leader.addr)
+	follower.start(t)
+	awaitKnowsLeader(t, follower, "alpha")
+	followerReply := follower.mgr.answerLeave(leave{Node: "c-other", Flows: []string{"alpha"}})
+	if len(followerReply.Removed) != 0 {
+		t.Fatalf("a non-leader reported a removal it cannot perform: %v", followerReply.Removed)
+	}
+	if reason, refused := followerReply.Refused["alpha"]; !refused || !strings.Contains(reason, "alpha") {
+		t.Fatalf("a non-leader's refusal is missing or unnamed: refused=%v reason=%q", refused, reason)
+	}
+
+	// THE CONTROL: the LEADER does remove, so the refusals above are about the
+	// conditions rather than about an arm that refuses everything.
+	ok := leader.mgr.answerLeave(leave{Node: "b-follower", Flows: []string{"alpha"}})
+	if len(ok.Removed) != 1 || ok.Removed[0] != "alpha" {
+		t.Fatalf("CONTROL FAILED: the leader did not remove a real member: removed=%v refused=%v",
+			ok.Removed, ok.Refused)
+	}
 }

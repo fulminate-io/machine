@@ -64,11 +64,17 @@ func (m *Manager) evictOne(flow string, r *raft.Raft, live []string) {
 		return
 	}
 	servers := future.Configuration().Servers
-	if !m.evictionPermitted(flow, servers, live) {
-		return
-	}
+	// THE VICTIM IS CHOSEN BEFORE THE BOUNDS ARE APPLIED, so bound 2 can charge
+	// the cost this particular removal actually carries. Applying the bounds
+	// first meant subtracting a vote from a victim that might hold none, which
+	// made a stale NONVOTER un-evictable whenever the voter count equalled the
+	// live count — the steady state under ephemeral identity, so stale nonvoters
+	// accumulated without bound.
 	victim, found := absentMember(servers, live)
 	if !found {
+		return
+	}
+	if !m.evictionPermitted(flow, servers, live, victim) {
 		return
 	}
 	if err := r.RemoveServer(victim.ID, 0, 0).Error(); err != nil {
@@ -88,7 +94,7 @@ func (m *Manager) evictOne(flow string, r *raft.Raft, live []string) {
 // strict SUBSET of the live set passed them all and evicted a live follower, and
 // across rounds the one-per-round bound compounded rather than capped — taking a
 // five-voter group to a single voter in four rounds with every member alive.
-func (m *Manager) evictionPermitted(flow string, servers []raft.Server, live []string) bool {
+func (m *Manager) evictionPermitted(flow string, servers []raft.Server, live []string, victim raft.Server) bool {
 	// BOUND 4: never on an empty or failed resolution, and never on one that does
 	// not contain this node. A registry that cannot see us is not a registry we
 	// should be pruning membership from.
@@ -109,9 +115,19 @@ func (m *Manager) evictionPermitted(flow string, servers []raft.Server, live []s
 	// as absent. It also subsumes a separate quorum bound, because a configuration
 	// never reduced below the number of live instances always has a quorum
 	// available among live members.
-	if voters(servers)-1 < len(live) {
+	//
+	// THE VOTE IS SUBTRACTED ONLY WHEN THE VICTIM HOLDS ONE. Removing a nonvoter
+	// costs the group no voting power, so charging it a vote refuses evictions
+	// that were never a risk — and specifically makes a stale nonvoter permanently
+	// un-evictable in the steady state, which is where they accumulate.
+	cost := 0
+	if victim.Suffrage == raft.Voter {
+		cost = 1
+	}
+	if voters(servers)-cost < len(live) {
 		m.logger.Debug("skipping an eviction round: it would shrink the configuration below the live count",
-			"flow", flow, "voters", voters(servers), "resolved", len(live))
+			"flow", flow, "victim", string(victim.ID), "suffrage", victim.Suffrage.String(),
+			"voters", voters(servers), "resolved", len(live))
 		return false
 	}
 	return true

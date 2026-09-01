@@ -222,6 +222,28 @@ func (f *flowPilot) noteHealth(state *autopilotState) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for id, healthy := range state.health {
+		// THE LOCAL NODE IS EXCLUDED UNCONDITIONALLY. Autopilot's published state
+		// carries every member including this one, and it reports every member
+		// unhealthy until it has been stable for ServerStabilizationTime — the
+		// leader included — so without this the leader's own first sighting
+		// publishes SignalPeerUnreachable naming itself. A node reporting itself
+		// unreachable is definitionally reachable, and a consumer reads that
+		// signal to decide a peer's datums may be orphaned, so it would treat the
+		// live leader's own work as orphaned.
+		//
+		// EXCLUDING BEATS SEEDING f.healthy WITH SELF, which was the other
+		// candidate: seeding suppresses only the FIRST sighting, and self marked
+		// unhealthy after having been seen healthy takes the seen-and-changed path
+		// and publishes anyway. The exclusion makes the invariant unconditional —
+		// no path through this loop can publish a peer signal naming the
+		// publishing node.
+		//
+		// IT IS SCOPED TO THE THREE PEER KINDS. SignalMembershipChanged carries
+		// this node's own id BY DESIGN, because it is this node reporting that IT
+		// applied a configuration, which is the every-node half of the seam.
+		if string(id) == f.mgr.cfg.Node {
+			continue
+		}
 		was, seen := f.healthy[id]
 		if seen && was == healthy {
 			continue

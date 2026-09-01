@@ -256,3 +256,70 @@ func TestAFlowNeitherBootstrappedNorReachableIsAnError(t *testing.T) {
 		t.Fatalf("a group was created anyway, with %d servers", len(future.Configuration().Servers))
 	}
 }
+
+// TestARedirectWithNoKnownLeaderIsRefusedByName pins the arm a node reaches when
+// it hosts a flow and knows of no leader for it: it refuses by name rather than
+// inventing an address. This is the path a freshly staged nonvoter occupies
+// before its first AppendEntries, and a redirect naming an empty address would
+// send a joiner nowhere while reading as success.
+func TestARedirectWithNoKnownLeaderIsRefusedByName(t *testing.T) {
+	node := newClusterNode(t, "a-node", nil, 0)
+	// A ledger opened but never placed: it hosts the flow and its group has never
+	// formed, so raft knows no leader.
+	l, err := ledger.Open(ledger.Config{Flow: "orphan", LocalID: node.id, Mux: node.mux})
+	if err != nil {
+		t.Fatalf("opening an unplaced ledger: %v", err)
+	}
+	node.mgr.addFlow("orphan", l)
+
+	reply := node.mgr.answerAnnounce(announce{Node: "b-joiner", Address: "127.0.0.1:1", Flows: []string{"orphan"}})
+	if to, redirected := reply.Redirects["orphan"]; redirected {
+		t.Fatalf("a node that knows no leader redirected to %q: a joiner would be sent nowhere while this "+
+			"read as success", to)
+	}
+	if len(reply.Staged) != 0 {
+		t.Fatalf("a node that leads nothing staged a joiner: %v", reply.Staged)
+	}
+	reason, refused := reply.Refused["orphan"]
+	if !refused {
+		t.Fatal("the flow was neither staged, redirected nor refused: a joiner cannot act on silence")
+	}
+	if !strings.Contains(reason, "orphan") {
+		t.Fatalf("the refusal %q does not name the flow", reason)
+	}
+}
+
+// TestTheLowestIdRuleIsWhatMakesGroupCreationSingleWriter drives the comparison
+// the creation rule turns on. It is the whole reason two workers deploying the
+// same new flow concurrently do not each bootstrap a one-voter group, and those
+// two logs could never merge — so the comparison deserves a test of its own
+// rather than only being exercised through a cluster.
+func TestTheLowestIdRuleIsWhatMakesGroupCreationSingleWriter(t *testing.T) {
+	mgr, _ := testNode(t, "b-middle")
+	for _, tc := range []struct {
+		name    string
+		answers map[string]announceReply
+		want    bool
+	}{
+		{"nobody else answered", map[string]announceReply{}, true},
+		{"this node is lowest", map[string]announceReply{
+			"x": {Node: "c-high"}, "y": {Node: "d-higher"},
+		}, true},
+		{"another node is lower", map[string]announceReply{
+			"x": {Node: "a-low"}, "y": {Node: "c-high"},
+		}, false},
+		{"the lowest is lower by one character", map[string]announceReply{
+			"x": {Node: "b-middl"},
+		}, false},
+		{"an answer that did not identify its sender is ignored", map[string]announceReply{
+			"x": {Node: ""},
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mgr.lowestID(tc.answers); got != tc.want {
+				t.Fatalf("lowestID = %v, want %v: this decides which node creates the group, and both "+
+					"answers being wrong produces two logs that can never merge", got, tc.want)
+			}
+		})
+	}
+}

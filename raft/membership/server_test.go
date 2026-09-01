@@ -6,7 +6,9 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -373,4 +375,57 @@ func TestASilentPeersHandlerIsReapedWithoutClose(t *testing.T) {
 	got := reaped
 	mu.Unlock()
 	t.Logf("reaped %d of %d silent handlers in %v", got, silent, time.Since(start))
+}
+
+// TestAnUnservedOrUndeclaredControlKindIsRefusedByName separates the two
+// refusals the wire vocabulary distinguishes, which mean different things to an
+// operator. A REPLY kind arriving at an acceptor is declared by this build and
+// simply has no arm here; a kind outside the declared set is a peer speaking
+// something this build does not know. Collapsing them would hide a version skew
+// behind a routing bug.
+func TestAnUnservedOrUndeclaredControlKindIsRefusedByName(t *testing.T) {
+	mgr, _ := testNode(t, "a-node")
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	for _, kind := range []msgKind{msgAnnounceReply, msgStatsReply, msgLeaveReply} {
+		err := mgr.answer(server, kind, nil)
+		if !errors.Is(err, ErrUnservedMessage) {
+			t.Fatalf("kind %d: err = %v, want ErrUnservedMessage", uint8(kind), err)
+		}
+		if !strings.Contains(err.Error(), fmt.Sprintf("%d", uint8(kind))) {
+			t.Fatalf("the refusal %q does not name the kind it refused", err)
+		}
+	}
+
+	undeclared := msgKind(200)
+	err := mgr.answer(server, undeclared, nil)
+	if !errors.Is(err, ErrUnknownMessage) {
+		t.Fatalf("an undeclared kind: err = %v, want ErrUnknownMessage — a version skew must stay "+
+			"distinguishable from a kind this build declares but does not serve", err)
+	}
+
+	// THE CONTROL: a kind this node DOES serve is not refused by either sentinel,
+	// so the refusals above are about the kinds rather than about an arm that
+	// refuses everything. The write half fails on an unread pipe, which is not
+	// what is under test here.
+	body, encodeErr := encodeForTest(statsRequest{Flows: []string{"alpha"}})
+	if encodeErr != nil {
+		t.Fatal(encodeErr)
+	}
+	go func() { _, _ = io.Copy(io.Discard, client) }()
+	if err := mgr.answer(server, msgStats, body); errors.Is(err, ErrUnservedMessage) ||
+		errors.Is(err, ErrUnknownMessage) {
+		t.Fatalf("CONTROL FAILED: a served kind was refused as unserved or unknown: %v", err)
+	}
+}
+
+// encodeForTest renders a control message body the way writeMessage does.
+func encodeForTest(payload any) ([]byte, error) {
+	var body bytes.Buffer
+	if err := gob.NewEncoder(&body).Encode(payload); err != nil {
+		return nil, err
+	}
+	return body.Bytes(), nil
 }

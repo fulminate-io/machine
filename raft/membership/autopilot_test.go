@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/raft"
+	autopilot "github.com/hashicorp/raft-autopilot"
 
 	"github.com/whitaker-io/machine/raft/ledger"
 )
@@ -135,4 +136,34 @@ func TestAStagedJoinerIsPromotedOnceCaughtUpAndNotWhileBehind(t *testing.T) {
 			t.Fatalf("the trailing joiner is recorded at suffrage %v, want Nonvoter", got)
 		}
 	})
+}
+
+// TestAFailedMemberIsRecordedOnceRatherThanOnEveryReport pins what
+// RemoveFailedServer owes autopilot: it is called on every reconcile round for
+// as long as a member stays failed, and its contract asks it to return nearly
+// immediately, so it must record rather than act and must not grow its record
+// without bound.
+func TestAFailedMemberIsRecordedOnceRatherThanOnEveryReport(t *testing.T) {
+	mgr, _ := testNode(t, "a-leader")
+	pilot := &flowPilot{mgr: mgr, flow: "alpha", done: make(chan struct{}), healthy: map[raft.ServerID]bool{}}
+
+	for i := 0; i < 5; i++ {
+		pilot.RemoveFailedServer(&autopilot.Server{ID: "b-gone"})
+	}
+	pilot.RemoveFailedServer(&autopilot.Server{ID: "c-gone"})
+
+	pilot.mu.Lock()
+	recorded := append([]raft.ServerID(nil), pilot.failed...)
+	pilot.mu.Unlock()
+	if len(recorded) != 2 {
+		t.Fatalf("recorded %v, want exactly one entry per failed member: five reports of the same member "+
+			"must not accumulate five records", recorded)
+	}
+	seen := map[raft.ServerID]bool{}
+	for _, id := range recorded {
+		seen[id] = true
+	}
+	if !seen["b-gone"] || !seen["c-gone"] {
+		t.Fatalf("recorded %v, want both b-gone and c-gone", recorded)
+	}
 }
