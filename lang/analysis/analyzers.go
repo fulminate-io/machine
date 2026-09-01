@@ -25,4 +25,5 @@ func init() {
 	Register(ErrorRoutingAnalyzer)
 	Register(TypeflowAnalyzer)
 	Register(GuidanceAnalyzer)
+	Register(CheckpointAnchorAnalyzer)
 }

@@ -14,7 +14,7 @@
 // belongs to the language belongs in the analysis core, where the editor and the
 // batch tool both reach it.
 //
-// IT DOES NOT CLAIM MORE THAN THE ANALYZERS DO. Six of the eleven registered
+// IT DOES NOT CLAIM MORE THAN THE ANALYZERS DO. Six of the twelve registered
 // analyzers state a limit in their own Doc, and a clean run is bounded by every
 // one of them: typeflow compares declared spellings and IS NOT TYPE CHECKING,
 // resolving nothing through go/types; state's bare-type check is a denylist of

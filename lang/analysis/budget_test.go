@@ -18,7 +18,7 @@ import (
 // THE BUDGET IS ANCHORED ON MEASUREMENT RATHER THAN INVENTION. One full
 // structural walk of payments.flow costs about 22 nanoseconds and visits 46
 // elements, while a parse plus one walk costs about 12 microseconds — the parse
-// dominates by roughly 500x. Eleven analyzers each doing one walk therefore land
+// dominates by roughly 500x. Twelve analyzers each doing one walk therefore land
 // the whole pass in the same tens-of-microseconds band as the parse it follows,
 // leaving the one-millisecond editor budget with well over an order of magnitude
 // of headroom.

@@ -11,7 +11,7 @@ import (
 )
 
 // captureName is the anonymous analyzer's name. It is never registered, so it
-// cannot collide with the module's own eleven.
+// cannot collide with the module's own twelve.
 const captureName = "lsp-capture"
 
 var (
@@ -113,7 +113,7 @@ func attributable(diags []analysis.Diagnostic, damaged map[string]bool) []analys
 // wants and reads Pass.ResultOf, so the prerequisite ordering stays the
 // driver's. Requiring both analyzers here is what makes a single Run yield the
 // diagnostics, the symbols and the guidance together — calling BuildGuidance
-// separately would run all eleven analyzers a second time for a table this run
+// separately would run all twelve analyzers a second time for a table this run
 // already built.
 func captureAnalyzer(snap *snapshot) *analysis.Analyzer {
 	return &analysis.Analyzer{

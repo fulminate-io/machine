@@ -57,7 +57,7 @@ type Batch struct {
 // use.
 //
 // The walk is SERIAL, which is a measurement rather than a preference: an
-// eleven-analyzer pass over a strawman costs tens of microseconds against a
+// twelve-analyzer pass over a strawman costs tens of microseconds against a
 // parse an order of magnitude larger, so file I/O and parsing dominate and both
 // are per-file and cheap. A worker pool would spend more on coordination than it
 // saves.

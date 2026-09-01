@@ -12,4 +12,4 @@ transform c Step from b
   note """clauses may be split across continuation lines"""
   on error Handle
 sink done Store from c
-  checkpoint
+  checkpoint  idempotent
