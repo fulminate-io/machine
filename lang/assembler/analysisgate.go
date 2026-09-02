@@ -20,16 +20,29 @@ import (
 // takes, calls Gate, and re-keys the answers; every judgement in it belongs to
 // the analysis module, which is the single-owner ruling this package works
 // under.
-func gate(
-	sources []Source, pkgs *loader.Packages, pkgPath string,
-) (facts Facts, refused, disclosed []Diagnostic, err error) {
+// gateResult is the three answers one gate run produces.
+//
+// IT IS A STRUCT RATHER THAN THREE RESULTS BESIDE AN ERROR because the module's
+// linter caps a function at three return results, and two of the three are the
+// same type — an unnamed pair of []Diagnostic at a call site is exactly the
+// confusion a reader cannot resolve without opening this file.
+type gateResult struct {
+	// Facts are the answers this package consumes and never derives.
+	Facts Facts
+	// Refused are the findings that stop the run before anything is written.
+	Refused []Diagnostic
+	// Disclosed are the findings that do not, handed to the caller to print.
+	Disclosed []Diagnostic
+}
+
+func gate(sources []Source, pkgs *loader.Packages, pkgPath string) (gateResult, error) {
 	result, err := analysis.Gate(analysisSources(sources), pkgs, pkgPath)
 	if err != nil {
-		return Facts{}, nil, nil, err
+		return gateResult{}, err
 	}
 
-	refused, disclosed = partition(result.Diagnostics)
-	facts = Facts{
+	refused, disclosed := partition(result.Diagnostics)
+	facts := Facts{
 		Boundary:      boundaryFacts(result.Boundaries),
 		Inferred:      result.Inferred,
 		Registrations: registrationFacts(result.Registrations),
@@ -42,7 +55,7 @@ func gate(
 	refused = append(refused, importDiags...)
 	refused = append(refused, mergeImported(&facts, imported, pkgs, pkgPath)...)
 
-	return facts, refused, disclosed, nil
+	return gateResult{Facts: facts, Refused: refused, Disclosed: disclosed}, nil
 }
 
 // mergeImported puts each resolved import into the facts and derives its
