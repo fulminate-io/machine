@@ -51,25 +51,30 @@ func TestRegistrationAgreesWithRealGobAtInterfacePosition(t *testing.T) {
 		classRefused      = "already-refused"
 	)
 
+	// shape names the three rows that are disclosed BY NAME as well as by class
+	// count. A class count cannot see one row leave a class, and these are exactly
+	// the rows a predicate generalised to "the element is a basic type" gets
+	// wrong: []int and [3]int share an element kind and have OPPOSITE verdicts.
 	rows := []struct {
 		class      string
 		fixture    string
 		underlying bool
 		sample     any
 		wantNeeds  bool
+		shape      string
 	}{
-		{classBootstrapped, "Counter", true, int(1), false},
-		{classBootstrapped, "IntSlice", true, []int{1}, false},
+		{classBootstrapped, "Counter", true, int(1), false, ""},
+		{classBootstrapped, "IntSlice", true, []int{1}, false, "slice-of-basic accepted unregistered ([]int)"},
 
-		{classComposite, "ByType", true, map[string]int{"a": 1}, true},
-		{classComposite, "Seen", true, map[string]bool{"a": true}, true},
-		{classComposite, "IntArray", true, [3]int{1, 2, 3}, true},
-		{classComposite, "NestedSlice", true, [][]int{{1}}, true},
-		{classComposite, "PlainSlice", true, []mirrorPlain{{A: 1}}, true},
+		{classComposite, "ByType", true, map[string]int{"a": 1}, true, ""},
+		{classComposite, "Seen", true, map[string]bool{"a": true}, true, ""},
+		{classComposite, "IntArray", true, [3]int{1, 2, 3}, true, "array-of-basic refused unregistered ([3]int)"},
+		{classComposite, "NestedSlice", true, [][]int{{1}}, true, "nested-slice refused unregistered ([][]int)"},
+		{classComposite, "PlainSlice", true, []mirrorPlain{{A: 1}}, true, ""},
 
-		{classNamed, "Plain", false, mirrorPlain{A: 1}, true},
+		{classNamed, "Plain", false, mirrorPlain{A: 1}, true, ""},
 
-		{classRefused, "Signal", true, nil, false},
+		{classRefused, "Signal", true, nil, false, ""},
 	}
 
 	counts := map[string]int{}
@@ -129,6 +134,11 @@ func TestRegistrationAgreesWithRealGobAtInterfacePosition(t *testing.T) {
 		if needs != refuses {
 			t.Errorf("%s (%s): derivation says needs-registration=%v, real gob refuses=%v — the derivation disagrees with the codec",
 				row.fixture, subject, needs, refuses)
+		} else if row.shape != "" {
+			// Disclosed only on AGREEMENT, and only by the row that proves it, so
+			// deleting the row takes its disclosure with it and a wrong verdict
+			// never reaches the log line.
+			t.Logf("registration shape agrees with gob: %s", row.shape)
 		}
 
 		counts[row.class]++
