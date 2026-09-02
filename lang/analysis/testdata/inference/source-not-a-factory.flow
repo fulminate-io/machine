@@ -1,0 +1,8 @@
+note """inference fixture: two sources whose references resolve CLEANLY and yield something that is not a transport. A source is typed by the datum it delivers, which lives inside machine.EdgeFactory[T]; a reference that hands back the datum itself, or a bare basic value, is a shape the runtime has no transport for. Both are REPORTED at their own position naming what they were constructed from, rather than left silently untyped — an absent entry reads to a consumer exactly like a name nobody asked about. The two differ in the arm they exercise: Score yields a NAMED struct and Clean yields a basic bool."""
+import "example.com/inference/subject/orderpkg/v2"
+
+flow notafactory
+source structured orders.Score
+source basic orders.Clean
+sink keep orders.Store from structured
+sink hold orders.Quarantine from basic

@@ -56,7 +56,7 @@ func DerivePackagePath(dir string) (string, error) {
 // volume on every platform this builds for. Testing for a specific separator
 // would be a second definition of "root" that disagrees with the first one
 // somewhere.
-func enclosingModule(abs string) (string, string, error) {
+func enclosingModule(abs string) (root, module string, err error) {
 	for dir := abs; ; {
 		file := filepath.Join(dir, "go.mod")
 		body, readErr := os.ReadFile(file)
@@ -66,19 +66,21 @@ func enclosingModule(abs string) (string, string, error) {
 			// documented to tolerate unrelated problems in the file. It answers
 			// the EMPTY STRING when it finds no module line, and that empty
 			// string is refused here rather than passed on.
-			module := modfile.ModulePath(body)
-			if module == "" {
-				return "", "", fmt.Errorf("%s declares no module path, so the import path of %s cannot be derived", file, abs)
+			declared := modfile.ModulePath(body)
+			if declared == "" {
+				return "", "", fmt.Errorf(
+					"%s declares no module path, so the import path of %s cannot be derived", file, abs)
 			}
 
-			return dir, module, nil
+			return dir, declared, nil
 		case !errors.Is(readErr, os.ErrNotExist):
 			return "", "", fmt.Errorf("reading %s: %w", file, readErr)
 		}
 
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return "", "", fmt.Errorf("no go.mod encloses %s, so the import path of the generated package cannot be derived", abs)
+			return "", "", fmt.Errorf(
+				"no go.mod encloses %s, so the import path of the generated package cannot be derived", abs)
 		}
 		dir = parent
 	}

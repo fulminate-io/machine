@@ -20,14 +20,16 @@ import (
 // takes, calls Gate, and re-keys the answers; every judgement in it belongs to
 // the analysis module, which is the single-owner ruling this package works
 // under.
-func gate(sources []Source, pkgs *loader.Packages, pkgPath string) (Facts, []Diagnostic, []Diagnostic, error) {
+func gate(
+	sources []Source, pkgs *loader.Packages, pkgPath string,
+) (facts Facts, refused, disclosed []Diagnostic, err error) {
 	result, err := analysis.Gate(analysisSources(sources), pkgs, pkgPath)
 	if err != nil {
 		return Facts{}, nil, nil, err
 	}
 
-	refused, disclosed := partition(result.Diagnostics)
-	facts := Facts{
+	refused, disclosed = partition(result.Diagnostics)
+	facts = Facts{
 		Boundary:      boundaryFacts(result.Boundaries),
 		Inferred:      result.Inferred,
 		Registrations: registrationFacts(result.Registrations),

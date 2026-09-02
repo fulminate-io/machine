@@ -1,0 +1,7 @@
+note """A flow the graph builder REFUSES, so a consumer importing it learns the problem is in the module it imported rather than in the file it is writing. Its sink consumes a name no statement produces."""
+import "example.com/nowhere"
+
+func Keep(f machine.Frame[Order]) Order { return f.Value() }
+
+flow Broken (Order) -> ok Order
+sink done Keep from nothingproducesthis
