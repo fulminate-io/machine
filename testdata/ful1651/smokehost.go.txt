@@ -6,19 +6,126 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
+	"github.com/hashicorp/raft"
+	machine "github.com/whitaker-io/machine/v4"
+	"github.com/whitaker-io/machine/raft/checkpoint"
 	"github.com/whitaker-io/machine/raft/ledger"
 	"github.com/whitaker-io/machine/raft/membership"
+	"github.com/whitaker-io/machine/raft/recovery"
 	"github.com/whitaker-io/machine/raft/transport"
 )
+
+// mirrorResolvePeers is a BYTE-FOR-BYTE MIRROR of the landed
+// membership.resolvePeers (raft/membership/config.go:32) — same SplitHostPort,
+// same net.DefaultResolver.LookupHost, same JoinHostPort, same sort. It exists
+// because Manager.resolveLive is unexported and step 4.3's isolation must report
+// what the eviction round SAW, not what a differently-written resolver returns.
+//
+// A MIRROR IS A CLAIM AND IT IS DISCLOSED AS ONE: if the landed resolver ever
+// stops agreeing with this copy, this probe reports the wrong live set and the
+// isolation it produces is wrong with it. The probe therefore never asserts —
+// it only records, beside the group's real committed configuration, which the
+// harness reads through the public Manager.Membership.
+func mirrorResolvePeers(ctx context.Context, peers string) ([]string, error) {
+	host, port, err := net.SplitHostPort(peers)
+	if err != nil {
+		return nil, err
+	}
+	found, err := net.DefaultResolver.LookupHost(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(found))
+	for _, addr := range found {
+		out = append(out, net.JoinHostPort(addr, port))
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func containsAddr(live []string, addr string) bool {
+	for _, item := range live {
+		if item == addr {
+			return true
+		}
+	}
+	return false
+}
+
+// evictArm names WHICH branch of the landed eviction round this node's current
+// state would take, computed from the same inputs the round reads.
+//
+// WHY THIS IS THE DELIVERABLE OF STEP 4.3 RATHER THAN A CONVENIENCE. Four of the
+// round's exits produce NO LOG LINE AT ALL — not the leader, no absent member,
+// bound 4's empty-or-self-missing resolution, and a failed GetConfiguration —
+// so an observer watching the logs cannot tell a round that ran and declined
+// from a round that never ran. Two more exits log only at Debug. A rolling
+// update that leaves dead voters in the configuration with no eviction line is
+// therefore consistent with at least four different mechanisms, which is exactly
+// why three runs of the same command produced three outcomes and none of them
+// named a cause.
+//
+// THE ARMS, in the order evictRound and evictOne take them:
+//   not-leader           evictRound, r.State() != raft.Leader          (silent)
+//   resolve-failed       evictRound, resolveLive returned an error     (Warn)
+//   no-absent-member     evictOne, absentMember found nothing          (silent)
+//   bound4-empty         evictionPermitted, len(live) == 0             (silent)
+//   bound4-self-missing  evictionPermitted, live lacks this advertise  (silent)
+//   bound1-incomplete    evictionPermitted, len(live) < Expect         (Debug)
+//   bound2-below-live    evictionPermitted, voters-cost < len(live)    (Debug)
+//   would-evict          all bounds pass; RemoveServer would be called (Warn)
+func evictArm(servers []raft.Server, live []string, advertise string, expect int) (string, string) {
+	victim := ""
+	suffrage := ""
+	found := false
+	for _, s := range servers {
+		if !containsAddr(live, string(s.Address)) {
+			victim = string(s.ID)
+			suffrage = s.Suffrage.String()
+			found = true
+			break
+		}
+	}
+	if !found {
+		return "no-absent-member", ""
+	}
+	if len(live) == 0 {
+		return "bound4-empty", victim
+	}
+	if !containsAddr(live, advertise) {
+		return "bound4-self-missing", victim
+	}
+	if expect > 0 && len(live) < expect {
+		return "bound1-incomplete", victim
+	}
+	voters := 0
+	for _, s := range servers {
+		if s.Suffrage == raft.Voter {
+			voters++
+		}
+	}
+	cost := 0
+	if suffrage == raft.Voter.String() {
+		cost = 1
+	}
+	if voters-cost < len(live) {
+		return "bound2-below-live", victim
+	}
+	return "would-evict", victim
+}
 
 func main() {
 	logger := hclog.New(&hclog.LoggerOptions{
@@ -135,6 +242,13 @@ func main() {
 
 	logger.Info("SMOKEHOST-UP", "node", node, "flow", flow, "advertise", advertise, "expect", expect)
 
+	// STEP 4.4 ONLY. Nothing but the recovery observation sets MACHINE_FLOW_RUN,
+	// so every other phase-4 step runs the harness exactly as steps 4.1 through
+	// 4.3 observed it.
+	if os.Getenv("MACHINE_FLOW_RUN") != "" {
+		runRecoveryFlow(ctx, logger, manager, flow, node)
+	}
+
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
 	for {
@@ -152,6 +266,164 @@ func main() {
 				out += fmt.Sprintf("%s/%s ", s.ID, s.Suffrage)
 			}
 			logger.Info("SMOKEHOST-STATE", "node", node, "flow", flow, "members", out)
+
+			// STEP 4.3'S ISOLATION PROBE. It reports which branch of the landed
+			// eviction round this node's state would take, on the LEADER only,
+			// because the round itself returns on a non-leader before logging
+			// anything. Four of the round's exits are silent, so without this a
+			// rolling update that leaves dead voters behind is consistent with
+			// several different mechanisms and names none of them.
+			//
+			// IT OBSERVES AND NEVER ACTS. Nothing here calls RemoveServer or
+			// mutates membership; the landed code remains the only thing that
+			// evicts. The line is prefixed SMOKEHOST- so the fail-silent leg's
+			// recorder excludes it with the rest of the harness's own output.
+			l, ok := manager.Ledger(flow)
+			if !ok {
+				continue
+			}
+			state := l.Raft().State().String()
+			if l.Raft().State() != raft.Leader {
+				logger.Info("SMOKEHOST-EVICTPROBE", "node", node, "flow", flow,
+					"state", state, "arm", "not-leader")
+				continue
+			}
+			live, err := mirrorResolvePeers(ctx, peers)
+			if err != nil {
+				logger.Info("SMOKEHOST-EVICTPROBE", "node", node, "flow", flow,
+					"state", state, "arm", "resolve-failed", "error", err)
+				continue
+			}
+			arm, victim := evictArm(cfg.Servers, live, advertise, expect)
+			logger.Info("SMOKEHOST-EVICTPROBE", "node", node, "flow", flow,
+				"state", state, "arm", arm, "victim", victim,
+				"resolved", len(live), "expect", expect,
+				"self_in_resolution", containsAddr(live, advertise),
+				"live", fmt.Sprintf("%v", live), "members", out)
 		}
 	}
+}
+
+// runRecoveryFlow builds a Machine whose journal IS the landed recovery detector,
+// wires the flow flowc generated from recover.flow, and serves the small control
+// surface the recovery recorder drives.
+//
+// WHY THE HARNESS RUNS THE FLOW AT ALL. Carry-in (e) is about a CHECKPOINTED FLOW
+// surviving a real pod deletion. Every recovery leg in lane E is verified against
+// real multi-node raft groups, but always with the worker killed as a goroutine. A
+// killed pod differs: the process, its memory, its transport connections and its
+// raft node all go at once, and the leader learns of it through membership rather
+// than through a closed channel. Nothing short of running the real flow in the real
+// pod exercises that.
+//
+// THE JOURNAL IS THE REAL ONE. recovery.New(ledger, manager, flow) returns the
+// landed Detector, which satisfies machine.Journal with Checkpoint, Claim, Retire
+// and Orphans, and the machine's own resume loop consumes Orphans per checkpointed
+// worker. The harness adds no recovery logic of its own and could not: the point is
+// to observe the landed code, not to reimplement it.
+func runRecoveryFlow(ctx context.Context, logger hclog.Logger, manager *membership.Manager, flow, node string) {
+	l, ok := manager.Ledger(flow)
+	if !ok {
+		logger.Error("SMOKEHOST-FLOW-NOJOURNAL", "flow", flow)
+		return
+	}
+	det := recovery.New(l, manager, flow)
+	m := machine.New("smokehost-"+flow, machine.OptionJournal(det))
+	ingests, err := WireRecover(m)
+	if err != nil {
+		logger.Error("SMOKEHOST-FLOW-WIRE-FAILED", "flow", flow, "error", err)
+		return
+	}
+	if err := m.Start(ctx); err != nil {
+		logger.Error("SMOKEHOST-FLOW-START-FAILED", "flow", flow, "error", err)
+		return
+	}
+	logger.Info("SMOKEHOST-FLOW-UP", "node", node, "flow", flow, "localid", det.LocalID())
+
+	mux := http.NewServeMux()
+
+	// /hold makes THIS pod park the next datum its checkpointed node receives, so
+	// a checkpoint record exists with a live owner when the pod is deleted.
+	mux.HandleFunc("/hold", func(w http.ResponseWriter, r *http.Request) {
+		gate.Set()
+		logger.Info("SMOKEHOST-FLOW-HOLD", "node", node)
+		fmt.Fprintln(w, "holding")
+	})
+
+	// /release unblocks whatever this pod is parking.
+	mux.HandleFunc("/release", func(w http.ResponseWriter, r *http.Request) {
+		gate.Release()
+		logger.Info("SMOKEHOST-FLOW-RELEASE", "node", node)
+		fmt.Fprintln(w, "released")
+	})
+
+	// /ingest pushes one datum through the GENERATED package's exported typed
+	// ingest — the same surface step 3.1 observed, here on a real pod.
+	mux.HandleFunc("/ingest", func(w http.ResponseWriter, r *http.Request) {
+		id := r.URL.Query().Get("id")
+		if id == "" {
+			http.Error(w, "id is required", http.StatusBadRequest)
+			return
+		}
+		if err := ingests.Ingest(r.Context(), Job{ID: id}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		logger.Info("SMOKEHOST-FLOW-INGEST", "node", node, "id", id)
+		fmt.Fprintln(w, "ingested", id)
+	})
+
+	// /recovery reports, for every checkpoint the flow's journal holds, who the
+	// record says owns it and WHO THE LEDGER SAYS HOLDS THE CLAIM.
+	//
+	// THE CLAIMANT IS READ THROUGH Ledger.Claimant AND NEVER FROM ANYTHING THE
+	// RECORDER WROTE. That accessor is the only way to observe claim state at all:
+	// claims are kept apart from journaled values so Get's reply stays a truthful
+	// set entry, which means a held claim is INVISIBLE through Get. The key is the
+	// CLAIM PATH rather than the bare datum, because the fsm keys its claim map by
+	// the appended entry's Path and the detector appends at checkpoint.ClaimPath.
+	mux.HandleFunc("/recovery", func(w http.ResponseWriter, r *http.Request) {
+		entries, err := l.List(r.Context(), "checkpoint/")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		type row struct {
+			Datum    string `json:"datum"`
+			Claimant string `json:"claimant"`
+			Held     bool   `json:"held"`
+		}
+		out := make([]row, 0, len(entries))
+		for _, e := range entries {
+			datum := strings.TrimPrefix(e.Path, "checkpoint/")
+			owner, held, err := l.Claimant(r.Context(), checkpoint.ClaimPath(datum))
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			out = append(out, row{Datum: datum, Claimant: owner, Held: held})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(out)
+	})
+
+	// /health lets the recorder pick the leader without parsing logs.
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		state := "unknown"
+		if lg, ok := manager.Ledger(flow); ok {
+			state = lg.Raft().State().String()
+		}
+		fmt.Fprintf(w, "node=%s state=%s holding=%t\n", node, state, gate.Held())
+	})
+
+	srv := &http.Server{Addr: ":8080", Handler: mux}
+	go func() {
+		<-ctx.Done()
+		_ = srv.Close()
+	}()
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("SMOKEHOST-FLOW-HTTP-FAILED", "error", err)
+		}
+	}()
 }

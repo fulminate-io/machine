@@ -1,0 +1,21 @@
+flow Recover
+note """
+Step 4.4's fixture: the flow whose datum must survive its owning pod's deletion.
+
+THE TRANSFORM IS THE WHOLE POINT. It carries a checkpoint clause so a record is
+journaled for every datum that reaches it, and it is marked idempotent so the
+record anchors on ARRIVAL rather than completion. Arrival is what makes recovery
+observable end to end: resume hands the record back to this same node on the
+SURVIVING pod, which runs it again and carries the datum through to the sink, so
+the sink's token proves the datum COMPLETED rather than that a record moved.
+
+A completion anchor would prove much less here. It would re-inject the node's
+output into the successors without re-running the node, which is correct for a
+non-idempotent node and is not the shape carry-in (e) asks about.
+"""
+on error Alert
+source ingest Feed()
+transform hold Hold from ingest
+  checkpoint machine.GobCodec[Job]{}
+  idempotent
+sink finish Done from hold
