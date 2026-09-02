@@ -5,6 +5,7 @@
 package analysis
 
 import (
+	"errors"
 	"fmt"
 	"go/token"
 	"go/types"
@@ -118,7 +119,7 @@ func (e *environment) eval(spelling string) (types.Type, error) {
 	}
 
 	if evaluated.Type == nil || evaluated.Type == types.Typ[types.Invalid] {
-		return nil, fmt.Errorf("the reference %s resolves to no type", spelling)
+		return nil, errors.New("the reference " + spelling + " resolves to no type")
 	}
 
 	e.memo[spelling] = evaluated.Type
