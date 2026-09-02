@@ -1,0 +1,113 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"sync"
+
+	machine "github.com/whitaker-io/machine/v4"
+)
+
+// Order is the payload the embedded-subflow fixture carries.
+type Order struct {
+	ID   string
+	Seen int
+	Tags []string
+}
+
+// packetCount is how many data the TRANSPORT pushes. It is deliberately ONE
+// FEWER than the count the token asserts: main pushes the remaining datum
+// in-process through the exported ingest, so the token is reached only if that
+// ingest actually delivered into the running graph.
+const packetCount = 2
+
+// Feed is the source transport. It pushes a fixed number of packets when the
+// machine starts.
+func Feed() machine.EdgeFactory[Order] {
+	return func(node string, report machine.Report) (machine.Edge[Order], error) {
+		return &feedEdge{node: node, ch: make(chan machine.Packet[Order], packetCount)}, nil
+	}
+}
+
+type feedEdge struct {
+	node string
+	ch   chan machine.Packet[Order]
+	once sync.Once
+}
+
+func (e *feedEdge) Start(ctx context.Context) error {
+	e.once.Do(func() {
+		for i := range packetCount {
+			packet, err := machine.RebuildPacket(machine.FrameData{
+				ID:     fmt.Sprintf("datum-%d", i),
+				Source: e.node,
+				Node:   e.node,
+			}, Order{ID: fmt.Sprintf("order-%d", i), Tags: []string{"a"}})
+			if err != nil {
+				return
+			}
+			e.ch <- packet
+		}
+	})
+
+	return nil
+}
+
+func (e *feedEdge) Send(ctx context.Context, packet machine.Packet[Order]) error {
+	select {
+	case e.ch <- packet:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (e *feedEdge) Receive() <-chan machine.Packet[Order] { return e.ch }
+
+func (e *feedEdge) Close() error { return nil }
+
+// counted is how many data Count has stamped. It is a plain counter rather than
+// a state cell because this fixture's subject is the EMBEDDED SUBFLOW, and a
+// state handle would put a second thing under test in the same program.
+var (
+	countMu sync.Mutex
+	counted int
+)
+
+// Count stamps each datum with the number seen so far, so the sink's token
+// reports how many reached it THROUGH the embedded subflow.
+func Count(f machine.Frame[Order]) Order {
+	countMu.Lock()
+	counted++
+	seen := counted
+	countMu.Unlock()
+
+	out := f.Value()
+	out.Seen = seen
+
+	return out
+}
+
+// Interesting is the SUBFLOW's predicate. Everything is interesting, so every
+// datum leaves the subflow on its ok output and reaches the sink.
+func Interesting(f machine.Frame[Order]) bool { return f.Value().ID != "" }
+
+// done is closed once the token has been printed, so main can exit on the datum
+// rather than on a timer.
+var done = make(chan struct{})
+
+var emitOnce sync.Once
+
+// Report is the sink. It prints the LOCKED TOKEN from the fixture's own code on
+// the third datum, which is reachable only through the embedded subflow.
+func Report(f machine.Frame[Order]) Order {
+	v := f.Value()
+	if v.Seen == packetCount+1 {
+		emitOnce.Do(func() {
+			fmt.Printf("flow-embed: processed=%d\n", v.Seen)
+			close(done)
+		})
+	}
+
+	return v
+}

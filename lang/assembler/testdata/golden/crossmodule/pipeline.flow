@@ -1,0 +1,16 @@
+note """
+The CROSS-MODULE emission path, pinned by the golden set rather than only by the
+end-to-end run. Three things about the emitted file are the point, and each is
+invisible in a run that merely succeeds: the upstream flow's funcs are SPLICED in
+(Screenable is declared here though nothing in this file wrote it), the flow-only
+import is DROPPED (no Go name here is qualified with it, so emitting it would
+produce an unused import), and the imported flow gets NO wiring function of its
+own -- only WireCrossmodule appears.
+"""
+import "example.com/upstream"
+
+flow crossmodule
+source ingest Poll()
+use s upstream.Screen from ingest -> ok, bad
+sink store Store from ok
+drop bad

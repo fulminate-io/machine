@@ -22,8 +22,18 @@ const nameSep = "."
 // derivable from one flow. The boundary is lang/analysis's export, supplied by
 // the driver; an ABSENT entry means no fact was exported, which is refused rather
 // than read as an empty output set.
-func lowerFile(programs []*Program, boundary map[string]Boundary, cfg Config) ([]*Plan, []Diagnostic) {
-	deps := make(map[string]*Program, len(programs))
+//
+// THE IMPORTED SET JOINS THE DEPENDENCIES AND STAYS OUT OF THE PLAN LOOP. A flow
+// resolved from another module is available to inline exactly as a local one is,
+// and is never lowered into a plan of its own: the dependency's own build
+// generates its wiring.
+func lowerFile(
+	programs []*Program, imported map[string]*Program, boundary map[string]Boundary, cfg Config,
+) ([]*Plan, []Diagnostic) {
+	deps := make(map[string]*Program, len(programs)+len(imported))
+	for ref, p := range imported {
+		deps[ref] = p
+	}
 	for _, p := range programs {
 		deps[p.Name] = p
 	}
@@ -106,12 +116,18 @@ func (l *lowering) addHandle(kind HandleKind, instance, name, spelling string) {
 // references. It also gives two instances independent state handles for free.
 func (l *lowering) use(n Node) {
 	s, ok := n.Stmt.(ast.UseStmt)
-	if !ok || len(s.Flow) != 1 {
+	if !ok || len(s.Flow) == 0 {
 		return
 	}
-	dep, resolved := l.deps[s.Flow[0].Name]
+	// THE REFERENCE IS THE KEY, WHATEVER ITS SHAPE. A local flow is keyed by its
+	// name and a cross-module one by the dotted reference the author wrote, and
+	// everything past this lookup — bindingsAgree, reconcile, resolveBindings,
+	// inline — is identical for the two. That sameness IS the ruling: a
+	// cross-module use is bound by name exactly as a local one is.
+	ref := dottedRef(identNames(s.Flow))
+	dep, resolved := l.deps[ref]
 	if !resolved {
-		l.diagf(n.Start, n.Stop, "the use of %q names a flow this file does not declare", s.Flow[0].Name)
+		l.diagf(n.Start, n.Stop, "the use of %q names a flow this file does not declare", ref)
 
 		return
 	}

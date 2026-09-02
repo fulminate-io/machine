@@ -1,0 +1,23 @@
+note """
+The end-to-end fixture for an EMBEDDED SUBFLOW. Until this one the assembler's
+end-to-end programs carried no `use` at all, which is half of why a signature-
+carrying subflow could emit a wiring function reading an unbound `in` and reach a
+shipped command: the goldens did not compile a `use` and the run fixtures did not
+run one.
+
+THE TOKEN IS REACHED ONLY THROUGH THE EMBEDDED BODY. Every datum passes the
+subflow's branch on its way to the sink, so a `use` that generated but routed
+nothing prints nothing. The count is three: the transport delivers two and the
+host pushes the third through the exported ingest, so an ingest that is merely
+typed leaves the flow one short.
+"""
+
+flow screening (Order) -> ok Order, bad Order
+branch triage Interesting from in -> ok, bad
+
+flow embedded
+source ingest Feed()
+transform count Count from ingest
+use screen screening from count -> ok, bad
+sink emit Report from ok
+drop bad

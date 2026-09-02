@@ -1,0 +1,5 @@
+# The per-node input types the driver would supply. The imported flow's own node
+# carries the instance-qualified name the inlining gives it.
+ingest=Order
+s.check=Order
+store=Order

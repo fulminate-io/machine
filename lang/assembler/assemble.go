@@ -54,6 +54,13 @@ type Facts struct {
 	// Registrations are the gob registrations the generated package must emit,
 	// deduplicated by spelling and sorted by it.
 	Registrations []Registration
+	// Imported are the flows resolved out of other modules, keyed by the
+	// REFERENCE the author wrote.
+	//
+	// AN IMPORTED FLOW IS AVAILABLE TO INLINE AND IS NEVER LOWERED INTO A PLAN OF
+	// ITS OWN. The dependency's own build generates its wiring; emitting a second
+	// copy here would declare it twice in a program that already has one.
+	Imported map[string]*Program
 }
 
 // Registration is one gob.Register call the generated package emits.
@@ -114,7 +121,7 @@ func assembleOne(source Source, cfg Config, facts Facts) (Generated, []Diagnosti
 	for _, p := range programs {
 		p.InputTypes = nodeTypes(p, facts)
 	}
-	plans, lowerDiags := lowerFile(programs, facts.Boundary, cfg)
+	plans, lowerDiags := lowerFile(programs, facts.Imported, facts.Boundary, cfg)
 	if len(lowerDiags) != 0 {
 		return Generated{}, lowerDiags
 	}

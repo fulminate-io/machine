@@ -19,12 +19,23 @@ const refusedDir = "testdata/refused"
 
 // refusalReason is one live member of the closed refusal set.
 //
-// MEMBER NUMBERS ARE THE PLAN'S AND THEY ARE STABLE. Member 1 is a deliberate
-// gap: it was the `checkpoint` refusal, retired once the runtime gained a
-// checkpoint mechanism, and its slot is kept rather than reused so the sibling
-// steps that cite members by number keep meaning what they said. A retired
-// member declares no reason and owes no fixture, which is why this table starts
-// at 2.
+// MEMBER NUMBERS ARE THE PLAN'S AND THEY ARE STABLE. There are now TWO deliberate
+// gaps, and neither slot is ever reused, so the sibling steps that cite members by
+// number keep meaning what they said.
+//
+// MEMBER 1 was the `checkpoint` refusal, retired once the runtime gained a
+// checkpoint mechanism.
+//
+// MEMBER 3 was the dotted-`use` refusal — "names a flow in another module;
+// cross-module flow references are not resolved here" — retired by the ruling
+// that has the assembler resolve a cross-module reference through the loader's
+// Packages.ResolveFlow and feed the resolved flow's boundary into the same
+// by-name binding a local `use` already has. What was a refusal fixture is now a
+// valid one: testdata/crossmodule carries the two-module tree the resolution
+// runs over.
+//
+// A retired member declares no reason and owes no fixture, which is why this
+// table starts at 2 and skips 3.
 type refusalReason struct {
 	member   int
 	fixture  string
@@ -36,7 +47,6 @@ type refusalReason struct {
 // fixture in the directory belongs to a member.
 var liveRefusals = []refusalReason{
 	{2, "loop-label-with-no-sender", "is never sent to"},
-	{3, "dotted-use-reference", "names a flow in another module"},
 	{4, "recursive-use-chain", "uses itself through"},
 	{5, "output-never-consumed", "which nothing in this flow consumes"},
 	{6, "duplicate-node-name", "node names are unique within a flow"},
@@ -128,17 +138,20 @@ func TestRefusedConstructsAreClosedAndPositioned(t *testing.T) {
 	}
 }
 
-// TestRefusalMemberOneIsARetiredGap pins the numbering rule.
+// TestRefusalMemberOneIsARetiredGap pins the numbering rule, for BOTH gaps.
 //
-// Member 1 was the `checkpoint` refusal and is RETIRED — the clause is lowered
-// now, not refused. Its slot is kept because three sibling steps cite members by
-// number, and renumbering would silently re-point them. This test is what makes
-// that a checked fact rather than a comment: it fails if the table ever starts at
-// 1, which is what a well-meaning tidy-up would do.
+// Member 1 was the `checkpoint` refusal and member 3 was the dotted-`use` one;
+// both are RETIRED — each construct is handled now, not refused. Their slots are
+// kept because sibling steps cite members by number, and renumbering would
+// silently re-point them. This test is what makes that a checked fact rather than
+// a comment: it fails if either slot is ever reclaimed, which is what a
+// well-meaning tidy-up would do.
 func TestRefusalMemberOneIsARetiredGap(t *testing.T) {
+	retired := map[int]string{1: "the checkpoint refusal", 3: "the dotted-use refusal"}
 	for _, reason := range liveRefusals {
-		if reason.member == 1 {
-			t.Fatalf("member 1 is a retired slot and must stay empty; %q claims it", reason.fixture)
+		if was, gap := retired[reason.member]; gap {
+			t.Fatalf("member %d is a retired slot (%s) and must stay empty; %q claims it",
+				reason.member, was, reason.fixture)
 		}
 	}
 	if liveRefusals[0].member != 2 {
