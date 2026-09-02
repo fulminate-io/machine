@@ -94,6 +94,11 @@ const memoSep = "\x00"
 // caller. This walk knows where inside the type the problem is — `.Inner.C` —
 // and cannot know which declaration named that type. The caller knows that, and
 // stamps the source position itself.
+//
+// DO NOT CONFUSE Finding.Path WITH Diagnostic.Path. They share a name and mean
+// different things: this one is a FIELD CHAIN inside a type, while
+// Diagnostic.Path is a FILESYSTEM PATH naming a source file. A consumer
+// rendering one of these against a source location composes the two.
 type Finding struct {
 	Path   string
 	Type   string
