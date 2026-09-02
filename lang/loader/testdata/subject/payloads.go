@@ -72,3 +72,21 @@ type Rec struct {
 	A    int
 	C    chan int
 }
+
+// Collections exercises the container arms of the walk: a slice, a fixed array,
+// a map value and a map KEY each hiding the same silent-drop class. Without it
+// those arms are specified behaviour with no fixture, and a walk that forgot to
+// descend into containers would look correct.
+type Collections struct {
+	Chans  []chan int
+	Fixed  [2]chan int
+	ByName map[string]chan int
+	Keyed  map[chan int]string
+}
+
+// NoFields carries nothing the codec is allowed to see. gob refuses such a
+// struct outright rather than encoding it partially, which is a different
+// outcome from a dropped field and gets its own reason.
+type NoFields struct {
+	hidden int
+}

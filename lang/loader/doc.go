@@ -18,6 +18,15 @@
 // keeps both true while giving every consumer one implementation to call
 // instead of one each.
 //
+// LOADING IS THE EXPENSIVE OPERATION IN THIS WHOLE TOOLCHAIN — seconds, not
+// microseconds — so Load is called ONCE per generation run, over every package
+// together, and never once per node, once per file or once per type. This
+// module holds no process-global cache, which makes the lifetime of a load the
+// CALLER's to decide: a long-lived consumer such as a language server keeps its
+// own *Packages and calls Load again when go.mod changes. A caller that loads
+// per unit of work turns a one-off cost into a per-unit one and will feel it
+// immediately at interactive speeds.
+//
 // THE DEPENDENCY DIRECTION IS ONE-WAY. This module imports lang/ast and
 // golang.org/x/tools and nothing else from this repository. It must never
 // import lang/analysis, lang/lint or lang/lsp: analysis depends on the loader

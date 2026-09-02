@@ -420,14 +420,21 @@ jobs:
 
       # The floor is the coverage the suite actually achieves, so a change that
       # drops below it fails here rather than surfacing later in a coverage
-      # report. PLACEHOLDER: the value below is not yet a measurement. It is
-      # replaced by the number this module's own suite achieves, measured once
-      # the suite exists, for the reason every job above records — a floor
-      # copied from a sibling describes that sibling's shape and not this one.
+      # report. It was MEASURED against this suite rather than copied from any
+      # job above: lang/ast reaches 100 because the marker methods sealing its
+      # AST have empty bodies and contribute no statements, and a module that
+      # drives the Go toolchain has its own profile again. What sits below the
+      # number here is one class, and it is not worth a fixture each: the arms
+      # that fire only when the environment fails underneath the module — a
+      # package set the toolchain cannot load at all, a directory that refuses
+      # mid-walk, a .flow file the walk found and the OS then would not read —
+      # plus the type-alias arm of the derivation walk, which needs a dependency
+      # that exports one. Every arm expressing a RULE of this module is covered,
+      # including each container shape the walk descends into.
       - name: Enforce coverage floor
         working-directory: lang/loader
         env:
-          COVERAGE_FLOOR: "1"
+          COVERAGE_FLOOR: "96"
         run: |
           total=$(go tool cover -func=coverage.out | awk '$1 == "total:" { print $NF }')
           test -n "$total" || { echo "coverage.out yielded no total line"; exit 1; }

@@ -58,6 +58,8 @@ func TestTheDerivationDisagreesWithGobOnlyWhereGobIsSilent(t *testing.T) {
 		{"Nested", SiteConcrete, 2, "the drops are buried one level down, so a top-level-only walk misses them"},
 		{"Escaped", SiteConcrete, 0, "the hatch owns the bytes, so the chan beneath it is not a drop"},
 		{"Escaped", SiteInterface, 1, "THE HATCH DOES NOT EXEMPT REGISTRATION"},
+		{"Collections", SiteConcrete, 4, "a slice, an array, a map value and a map KEY each hide the same drop"},
+		{"NoFields", SiteConcrete, 1, "a struct the codec is allowed to see nothing of is refused outright"},
 	} {
 		typ, err := loaded.Resolve(subjectPath, probe.name)
 		if err != nil {
