@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/whitaker-io/machine/lang/ast"
+	"github.com/whitaker-io/machine/lang/loader"
 )
 
 // updateGolden rewrites the checked-in expectations instead of comparing them.
@@ -37,6 +38,9 @@ type goldenCase struct {
 	// read from an OPTIONAL boundary.txt. A fixture carrying no `use` needs
 	// none, which is why the file is optional rather than empty-but-required.
 	boundary map[string]Boundary
+	// upstream is an OPTIONAL second module directory a cross-module `use`
+	// reaches, holding its own go.mod and .flow files.
+	upstream string
 }
 
 // goldenCases loads every fixture directory, refusing an empty read.
@@ -60,6 +64,7 @@ func goldenCases(t *testing.T) []goldenCase {
 			types:    readTypes(t, filepath.Join(dir, "types.txt")),
 			support:  readGoldenFile(t, filepath.Join(dir, "support.go.txt")),
 			boundary: readBoundary(t, filepath.Join(dir, "boundary.txt")),
+			upstream: optionalDir(filepath.Join(dir, "upstream")),
 		})
 	}
 	if len(cases) < 3 {
@@ -157,6 +162,87 @@ func splitNames(names string) []string {
 	return out
 }
 
+// optionalDir answers the path when it names a directory, and the empty string
+// otherwise.
+func optionalDir(path string) string {
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		return path
+	}
+
+	return ""
+}
+
+// fixtureResolver answers a dotted reference out of a fixture's own upstream
+// directory, standing in for the LOADER and for nothing else.
+//
+// THE DOUBLE REPLACES A DEPENDENCY, NOT THE CODE UNDER TEST. What a golden pins
+// is this package's half of a cross-module `use` — reading the resolved file,
+// renaming the declaration, building its graph, splicing its funcs and dropping
+// the flow-only import — and every one of those runs through the production
+// resolveImportsWith below. Only the import-path-to-module lookup, which is
+// lang/loader's and is proven end to end by its own criterion, is supplied here,
+// so a golden case does not have to stand up a package load.
+func fixtureResolver(dir string) flowResolver {
+	return func(_, name string, at ast.Position, from string) (loader.Flow, *loader.Diagnostic) {
+		paths, err := filepath.Glob(filepath.Join(dir, "*.flow"))
+		if err != nil {
+			return loader.Flow{}, &loader.Diagnostic{Path: from, Pos: at, End: at, Message: err.Error()}
+		}
+		for _, path := range paths {
+			body, readErr := os.ReadFile(path)
+			if readErr != nil {
+				continue
+			}
+			if declaresFlow(body, name) {
+				return loader.Flow{Name: name, File: path, Pos: at}, nil
+			}
+		}
+
+		return loader.Flow{}, &loader.Diagnostic{Path: from, Pos: at, End: at,
+			Message: "no flow named " + name + " in " + dir}
+	}
+}
+
+// declaresFlow reports whether a .flow source declares a flow by name.
+func declaresFlow(body []byte, name string) bool {
+	file, err := ast.Parse(body)
+	if err != nil || file == nil {
+		return false
+	}
+	for _, decl := range file.Decls {
+		if flow, ok := decl.(ast.FlowDecl); ok && flow.Name.Name == name {
+			return true
+		}
+	}
+
+	return false
+}
+
+// resolveGoldenImports resolves a case's cross-module references, or answers
+// nothing when the case declares no upstream module.
+func resolveGoldenImports(t *testing.T, c goldenCase, source Source) map[string]*Program {
+	t.Helper()
+	if c.upstream == "" {
+		return nil
+	}
+
+	imported, diags := resolveImportsWith([]Source{source}, fixtureResolver(c.upstream))
+	if len(diags) != 0 {
+		t.Fatalf("%s: the cross-module references must resolve clean:\n%s",
+			c.name, strings.Join(messagesOf(diags), "\n"))
+	}
+	if len(imported) == 0 {
+		t.Fatalf("CONTROL FAILED: %s declares an upstream module but resolved no cross-module reference", c.name)
+	}
+
+	out := make(map[string]*Program, len(imported))
+	for _, one := range imported {
+		out[one.Ref] = one.Program
+	}
+
+	return out
+}
+
 // generateCase runs the whole pipeline over one fixture.
 func generateCase(t *testing.T, c goldenCase) Generated {
 	t.Helper()
@@ -164,22 +250,31 @@ func generateCase(t *testing.T, c goldenCase) Generated {
 	if err != nil {
 		t.Fatalf("%s: the fixture must parse clean: %v", c.name, err)
 	}
+	// THE IMPORTS RESOLVE BEFORE THE GRAPH IS BUILT, because resolving splices
+	// the dependency's funcs into this file's declarations and drops an import
+	// that served only a flow reference — both of which the build and the
+	// emission then see.
+	imported := resolveGoldenImports(t, c, Source{Path: "pipeline.flow", Src: []byte(c.source), File: file})
 	programs, buildDiags := buildFile(file)
 	if len(buildDiags) != 0 {
 		t.Fatalf("%s: the fixture must build clean:\n%s", c.name, strings.Join(messagesOf(buildDiags), "\n"))
 	}
+	// EVERY DECLARED FACT IS SEEDED FIRST, including one keyed by a cross-module
+	// REFERENCE. An imported flow is not among this file's programs, so a map
+	// built only from those would leave its boundary absent — which the lowering
+	// correctly refuses, since an absent fact is not an empty one.
 	boundary := map[string]Boundary{}
+	for flow, declared := range c.boundary {
+		boundary[flow] = declared
+	}
 	for _, p := range programs {
 		p.InputTypes = c.types
-		if declared, ok := c.boundary[p.Name]; ok {
-			boundary[p.Name] = declared
-
-			continue
+		if _, declared := boundary[p.Name]; !declared {
+			boundary[p.Name] = Boundary{}
 		}
-		boundary[p.Name] = Boundary{}
 	}
 	cfg := Config{Package: "generated", Qualifier: "acme"}
-	plans, lowerDiags := lowerFile(programs, boundary, cfg)
+	plans, lowerDiags := lowerFile(programs, imported, boundary, cfg)
 	if len(lowerDiags) != 0 {
 		t.Fatalf("%s: the fixture must lower clean:\n%s", c.name, strings.Join(messagesOf(lowerDiags), "\n"))
 	}

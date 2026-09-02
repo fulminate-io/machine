@@ -1,0 +1,18 @@
+note """
+The INVERSION of what used to be refusal member 3. A dotted `use` named a flow in
+another module and was refused by design; the ruling has the assembler resolve
+one through the loader's Packages.ResolveFlow and bind the resolved flow's
+outputs BY NAME, exactly as a local `use` already does.
+
+The consumer reaches the upstream module by a go.mod replace, so this fixture
+needs no network and no module cache. Its `import` serves only the flow
+reference: no Go name in this file is qualified with it, which is why the
+generated file must NOT carry that import.
+"""
+import "example.com/upstream"
+
+flow main
+source ingest Feed()
+use s upstream.Screen from ingest -> ok, bad
+sink emit Report from ok
+sink audit Audit from bad

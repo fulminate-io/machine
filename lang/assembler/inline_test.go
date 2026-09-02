@@ -59,7 +59,7 @@ func assembleFile(t *testing.T, src string, boundary map[string]Boundary) (plans
 			"extra": "OkResult", "first.check": "Order", "second.check": "Order",
 		}
 	}
-	plans, lowered = lowerFile(programs, boundary, Config{Package: "generated", Qualifier: "acme"})
+	plans, lowered = lowerFile(programs, nil, boundary, Config{Package: "generated", Qualifier: "acme"})
 
 	return plans, build, lowered
 }

@@ -6,6 +6,7 @@ package assembler
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/whitaker-io/machine/lang/analysis"
 	"github.com/whitaker-io/machine/lang/loader"
@@ -32,7 +33,80 @@ func gate(sources []Source, pkgs *loader.Packages, pkgPath string) (Facts, []Dia
 		Registrations: registrationFacts(result.Registrations),
 	}
 
+	// THE CROSS-MODULE RESOLUTION RUNS AFTER THE RUN'S OWN ANALYSIS and before
+	// anything is lowered, because an imported flow is a dependency of the
+	// lowering and its refusals belong to the same gate.
+	imported, importDiags := resolveImports(sources, pkgs)
+	refused = append(refused, importDiags...)
+	refused = append(refused, mergeImported(&facts, imported, pkgs, pkgPath)...)
+
 	return facts, refused, disclosed, nil
+}
+
+// mergeImported puts each resolved import into the facts and derives its
+// boundary through the SAME analysis gate the run's own sources went through.
+//
+// A RE-KEY IS A MAPPING AND THE DERIVATION STAYS lang/analysis'S. The dependency's
+// own source is run through Gate to obtain its boundary, and that answer is then
+// re-keyed to the REFERENCE the consumer wrote — which is the key everything
+// downstream already uses.
+//
+// THE DEPENDENCY RUN'S REFUSALS ARE CARRIED INTO THE RUN'S OWN, with the
+// dependency's path. Generating against a boundary derived from a file the
+// analyzers object to is exactly the silence this contract removes.
+//
+// PERF SHAPE: one extra analysis run per DISTINCT imported flow, bounded by the
+// number of dotted references in the run and sharing the single package load. No
+// extra load, and analysis is microseconds against a load measured in seconds.
+func mergeImported(
+	facts *Facts, imported []Imported, pkgs *loader.Packages, pkgPath string,
+) []Diagnostic {
+	if len(imported) == 0 {
+		return nil
+	}
+
+	var diags []Diagnostic
+	facts.Imported = make(map[string]*Program, len(imported))
+	for _, one := range imported {
+		facts.Imported[one.Ref] = one.Program
+
+		result, err := analysis.Gate(analysisSources([]Source{one.Source}), pkgs, pkgPath)
+		if err != nil {
+			diags = append(diags, Diagnostic{Path: one.Source.Path,
+				Message: "the imported flow " + one.Ref + " could not be analyzed: " + err.Error()})
+
+			continue
+		}
+
+		refused, _ := partition(result.Diagnostics)
+		diags = append(diags, refused...)
+		rekeyBoundary(facts, one, result.Boundaries)
+	}
+
+	return diags
+}
+
+// rekeyBoundary records the dependency's own exported boundary under the
+// reference the consumer wrote.
+//
+// THE DEPENDENCY'S DECLARATION WAS RENAMED TO THE REFERENCE before its graph was
+// built, so the fact it exported is already keyed by the reference; the fallback
+// to the flow's own trailing name covers a dependency whose analysis keyed it
+// differently, and an absent fact is left ABSENT rather than entered empty.
+func rekeyBoundary(facts *Facts, one Imported, boundaries *analysis.Boundaries) {
+	names, ok := boundaries.Names(one.Ref)
+	if !ok {
+		if at := strings.LastIndex(one.Ref, "."); at >= 0 {
+			names, ok = boundaries.Names(one.Ref[at+1:])
+		}
+	}
+	if !ok {
+		return
+	}
+	if facts.Boundary == nil {
+		facts.Boundary = map[string]Boundary{}
+	}
+	facts.Boundary[one.Ref] = Boundary{Outputs: names}
 }
 
 // registrationFacts re-keys the derivation's registration table into this

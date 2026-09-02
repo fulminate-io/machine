@@ -85,7 +85,7 @@ func generateWithTypes(t *testing.T, src, support string, types map[string]strin
 		boundary[p.Name] = Boundary{}
 	}
 	cfg := Config{Package: "generated", Qualifier: "acme"}
-	plans, lowerDiags := lowerFile(programs, boundary, cfg)
+	plans, lowerDiags := lowerFile(programs, nil, boundary, cfg)
 	if len(lowerDiags) != 0 {
 		t.Fatalf("the fixture must lower clean:\n%s", strings.Join(messagesOf(lowerDiags), "\n"))
 	}
@@ -143,7 +143,7 @@ func TestUnsynthesizableCloneIsRefusedBeforeTypeResolution(t *testing.T) {
 			p.InputTypes = map[string]string{"ingest": "Order", "fan": "Order", "kept": "Order", "lost": "Order"}
 		}
 		cfg := Config{Package: "generated", Qualifier: "acme"}
-		plans, _ := lowerFile(programs, map[string]Boundary{"split": {}}, cfg)
+		plans, _ := lowerFile(programs, nil, map[string]Boundary{"split": {}}, cfg)
 
 		_, diags := Generate(Request{File: file, Programs: programs, Plans: plans, Config: cfg, Source: "pipeline.flow"})
 		if len(diags) == 0 {

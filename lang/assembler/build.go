@@ -108,6 +108,11 @@ func refuseRecursiveUse(file *ast.File, programs []*Program) []Diagnostic {
 }
 
 // useGraph maps each flow to the flows it embeds with a `use` statement.
+//
+// IT RECORDS THE RENDERED REFERENCE rather than only a single-part name, so the
+// recursive-use refusal still sees a cycle that crosses a module edge. A
+// cross-module chain that closes on itself would otherwise inline forever with
+// nothing reporting it.
 func useGraph(programs []*Program) map[string][]string {
 	uses := make(map[string][]string, len(programs))
 	for _, program := range programs {
@@ -115,8 +120,8 @@ func useGraph(programs []*Program) map[string][]string {
 			if n.Kind != KindUse {
 				continue
 			}
-			if s, ok := n.Stmt.(ast.UseStmt); ok && len(s.Flow) == 1 {
-				uses[program.Name] = append(uses[program.Name], s.Flow[0].Name)
+			if s, ok := n.Stmt.(ast.UseStmt); ok && len(s.Flow) > 0 {
+				uses[program.Name] = append(uses[program.Name], dottedRef(identNames(s.Flow)))
 			}
 		}
 	}
@@ -132,7 +137,7 @@ func reachesItself(start string, uses map[string][]string) (string, bool) {
 	walk = func(at string, path []string) (string, bool) {
 		for _, next := range uses[at] {
 			if next == start {
-				return renderPath(append(path, next)), true
+				return renderChain(append(path, next)), true
 			}
 			if seen[next] {
 				continue
@@ -149,8 +154,20 @@ func reachesItself(start string, uses map[string][]string) (string, bool) {
 	return walk(start, nil)
 }
 
-// renderPath renders a use chain for a diagnostic.
-func renderPath(path []string) string {
+// renderChain renders a use CHAIN for a diagnostic, joining its hops with an
+// arrow.
+//
+// IT HAS EXACTLY ONE CONSUMER — the recursive-use refusal, which renders
+// `alpha uses itself through beta -> alpha`. There the arrow means a HOP and
+// reads correctly, so it is confined here rather than deleted.
+//
+// A use REFERENCE goes through dottedRef instead, and the two are SEPARATE
+// FUNCTIONS rather than one taking a separator argument on purpose: a future
+// message must not be able to pick the wrong render by reaching for the nearest
+// helper. That is not hypothetical — this function used to serve both, and a
+// diagnostic about `upstream.Screen` printed `the use of "upstream -> Screen"`,
+// quoting a string that appears nowhere in the author's source.
+func renderChain(path []string) string {
 	out := ""
 	for i, name := range path {
 		if i > 0 {
@@ -263,7 +280,6 @@ func (b *builder) collect(stmt ast.Stmt) {
 	case ast.SinkStmt:
 		b.addNode(node(s, KindSink, s.Name.Name, nameLists{in: fromNames(s.Clauses), out: nil}, s.Clauses))
 	case ast.UseStmt:
-		b.refuseDottedFlowRef(s)
 		b.addNode(node(s, KindUse, s.Instance.Name,
 			nameLists{in: fromNames(s.Clauses), out: identNames(s.Bindings)}, s.Clauses))
 	default:
@@ -397,21 +413,6 @@ func (b *builder) resolveNonProducer(n *Node, in string, position int) {
 		return
 	}
 	b.diagf(n.Start, n.Stop, "%q merges %q, which no statement in this flow produces", n.Name, in)
-}
-
-// refuseDottedFlowRef refuses a `use` naming a flow through a dotted path.
-//
-// A dotted reference names a flow in ANOTHER MODULE, and resolving one is
-// lang/loader's surface rather than this package's. It is refused with the
-// reference named rather than resolved through some path invented here, because
-// a second resolution mechanism is how two answers to one question appear.
-func (b *builder) refuseDottedFlowRef(s ast.UseStmt) {
-	if len(s.Flow) <= 1 {
-		return
-	}
-	ref := renderPath(identNames(s.Flow))
-	b.diagf(s.Start, s.Stop,
-		"the use of %q names a flow in another module; cross-module flow references are not resolved here", ref)
 }
 
 // reportUnconsumedOutputs refuses a published name nothing reads.

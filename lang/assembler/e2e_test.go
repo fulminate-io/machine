@@ -19,6 +19,69 @@ import (
 // makes this a proof that data moved rather than that a file was written.
 const e2eToken = "flow-e2e: processed=3"
 
+// THE SUBJECT OF EVERY END-TO-END TEST IN THIS FILE IS THE SHIPPED BINARY.
+//
+// They used to construct a Driver in process with PackagePath and Boundary
+// already set, which proved the generate-build-run path FOR THE LIBRARY and
+// never for the command — and the two differed by exactly the wiring a user
+// depends on. The shipped flowc registers four flags and set neither field, so
+// every flow with a typed source failed with "needs its payload type" while
+// every one of these tests stayed green. Driving the binary with nothing but the
+// flags a user already had is what closes that gap; the fixtures, the host mains
+// and the token assertions are unchanged.
+
+// flowcBinary builds the shipped command into a scratch directory and answers
+// its path.
+//
+// It is built per test rather than once for the package: the Go build cache makes
+// every build after the first a link, and a per-test binary keeps the cleanup
+// t.TempDir already does.
+func flowcBinary(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "flowc")
+	cmd := exec.Command("go", "build", "-o", path, "./cmd/flowc")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("the shipped flowc binary does not build: %v\n%s", err, out)
+	}
+
+	return path
+}
+
+// generateWithFlowc runs the shipped binary in dir with the four flags a user
+// has, and NOTHING else.
+//
+// No -pkgpath and no injected facts: the package path is derived from the output
+// directory's enclosing go.mod, and every analysis fact comes from the binary's
+// own pre-generation gate. That is the whole point of driving the command.
+func generateWithFlowc(t *testing.T, dir, qualifier string) {
+	t.Helper()
+	cmd := exec.Command(flowcBinary(t), "-in", ".", "-out", ".", "-package", "main", "-qualifier", qualifier)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("the shipped flowc refused the fixture (%v):\n%s", err, out)
+	}
+}
+
+// stageModule writes a scratch module wired to the local machine checkout.
+func stageModule(t *testing.T, dir, module string, files map[string]string) {
+	t.Helper()
+	root := machineRoot(t)
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+	}
+	write("go.mod", "module "+module+"\n\ngo 1.27\n")
+	write("go.work", "go 1.27\n\nuse (\n\t.\n\t"+root+"\n)\n")
+	if sum, err := os.ReadFile(filepath.Join(root, "go.sum")); err == nil {
+		write("go.work.sum", string(sum))
+	}
+	for name, body := range files {
+		write(name, body)
+	}
+}
+
 // TestEndToEndPipelineRunsOnTheRuntime is the ticket's central claim, proved by
 // RUNNING rather than by inspection.
 //
@@ -36,37 +99,17 @@ const e2eToken = "flow-e2e: processed=3"
 // EXPECT THIS TO BE THE SLOWEST TEST IN THE MODULE: it runs a full build and then
 // the binary.
 func TestEndToEndPipelineRunsOnTheRuntime(t *testing.T) {
-	root := machineRoot(t)
 	dir := t.TempDir()
 
-	flowSrc := readFixtureFile(t, filepath.Join("testdata", "e2e", "pipeline.flow"))
-	feed := readFixtureFile(t, filepath.Join("testdata", "e2e", "feed.go.txt"))
+	stageModule(t, dir, "flowe2e", map[string]string{
+		"feed.go":       readFixtureFile(t, filepath.Join("testdata", "e2e", "feed.go.txt")),
+		"pipeline.flow": readFixtureFile(t, filepath.Join("testdata", "e2e", "pipeline.flow")),
+		"main.go":       e2eMain,
+	})
 
-	write := func(name, body string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
-			t.Fatalf("writing %s: %v", name, err)
-		}
-	}
-	write("go.mod", "module flowe2e\n\ngo 1.27\n")
-	write("go.work", "go 1.27\n\nuse (\n\t.\n\t"+root+"\n)\n")
-	if sum, err := os.ReadFile(filepath.Join(root, "go.sum")); err == nil {
-		write("go.work.sum", string(sum))
-	}
-	write("feed.go", feed)
-	write("pipeline.flow", flowSrc)
-	write("main.go", e2eMain)
-
-	// GENERATE THROUGH THE REAL DRIVER, into the same directory, exactly as flowc
-	// does.
-	driver := &Driver{
-		Config:      Config{Package: "main", Qualifier: "flowe2e"},
-		PackagePath: "flowe2e",
-		Boundary:    map[string]Boundary{},
-	}
-	if err := driver.Generate(dir, dir); err != nil {
-		t.Fatalf("generation failed: %v", err)
-	}
+	// GENERATE THROUGH THE SHIPPED BINARY, into the same directory, with the four
+	// flags a user has.
+	generateWithFlowc(t, dir, "flowe2e")
 
 	generated, err := os.ReadFile(filepath.Join(dir, "pipeline.flow.go"))
 	if err != nil {
@@ -118,35 +161,15 @@ const loopToken = "flow-loop: attempts=3"
 // EXPECT THIS TO BE SLOW for the same reason the first one is: it runs a full
 // build and then the binary.
 func TestEndToEndTerminatingLoopAndSendRunOnTheRuntime(t *testing.T) {
-	root := machineRoot(t)
 	dir := t.TempDir()
 
-	flowSrc := readFixtureFile(t, filepath.Join("testdata", "e2e", "looped.flow"))
-	feed := readFixtureFile(t, filepath.Join("testdata", "e2e", "loopfeed.go.txt"))
+	stageModule(t, dir, "flowloop", map[string]string{
+		"feed.go":     readFixtureFile(t, filepath.Join("testdata", "e2e", "loopfeed.go.txt")),
+		"looped.flow": readFixtureFile(t, filepath.Join("testdata", "e2e", "looped.flow")),
+		"main.go":     loopMain,
+	})
 
-	write := func(name, body string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
-			t.Fatalf("writing %s: %v", name, err)
-		}
-	}
-	write("go.mod", "module flowloop\n\ngo 1.27\n")
-	write("go.work", "go 1.27\n\nuse (\n\t.\n\t"+root+"\n)\n")
-	if sum, err := os.ReadFile(filepath.Join(root, "go.sum")); err == nil {
-		write("go.work.sum", string(sum))
-	}
-	write("feed.go", feed)
-	write("looped.flow", flowSrc)
-	write("main.go", loopMain)
-
-	driver := &Driver{
-		Config:      Config{Package: "main", Qualifier: "flowloop"},
-		PackagePath: "flowloop",
-		Boundary:    map[string]Boundary{},
-	}
-	if err := driver.Generate(dir, dir); err != nil {
-		t.Fatalf("generation failed: %v", err)
-	}
+	generateWithFlowc(t, dir, "flowloop")
 
 	generated, err := os.ReadFile(filepath.Join(dir, "looped.flow.go"))
 	if err != nil {
@@ -179,6 +202,111 @@ func TestEndToEndTerminatingLoopAndSendRunOnTheRuntime(t *testing.T) {
 	t.Logf("the generated flow looped, re-entered through Send and left the loop: %s",
 		strings.TrimSpace(got))
 }
+
+// embedToken is what the EMBEDDED-SUBFLOW fixture's sink prints once a datum has
+// travelled through the subflow's body.
+const embedToken = "flow-embed: processed=3"
+
+// TestEndToEndEmbeddedSubflowRunsOnTheRuntime is the third end-to-end leg, and it
+// exists because the other two drive no `use` at all.
+//
+// WHAT THE OTHERS LEAVE UNPROVEN. Until this fixture the assembler's end-to-end
+// programs carried no `use`, and its goldens compiled none either. That is the
+// whole of why a signature-carrying subflow could emit a wiring function whose
+// body read an unbound `in` — `undefined: in` — and reach a shipped command: no
+// gate in this module ever compiled the emission path for one, let alone ran it.
+//
+// THE TOKEN IS REACHABLE ONLY THROUGH THE EMBEDDED BODY. Every datum passes the
+// subflow's branch on its way to the sink, so a `use` that generated cleanly and
+// routed nothing prints nothing and this reds. The count is three because the
+// transport delivers two and the host pushes the third through the exported
+// ingest, so the leg also fails if the ingest is typed but never wired.
+//
+// AND IT NEEDS NO BOUNDARY FROM THE HARNESS. The subflow's bindable outputs come
+// from the binary's own pre-generation gate; supplying them here would put the
+// test back to proving the library.
+func TestEndToEndEmbeddedSubflowRunsOnTheRuntime(t *testing.T) {
+	dir := t.TempDir()
+
+	stageModule(t, dir, "flowembed", map[string]string{
+		"feed.go":       readFixtureFile(t, filepath.Join("testdata", "e2e", "embedfeed.go.txt")),
+		"embedded.flow": readFixtureFile(t, filepath.Join("testdata", "e2e", "embedded.flow")),
+		"main.go":       embedMain,
+	})
+
+	generateWithFlowc(t, dir, "flowembed")
+
+	generated, err := os.ReadFile(filepath.Join(dir, "embedded.flow.go"))
+	if err != nil {
+		t.Fatalf("the binary wrote no generated file: %v", err)
+	}
+
+	// THE SUBFLOW GETS NO WIRING FUNCTION OF ITS OWN. This is not the run
+	// assertion — the stdout token below is — but it names WHICH property the run
+	// depended on, so a regression that started emitting one again fails here with
+	// a message about the wiring function rather than only as a compile error.
+	if strings.Contains(string(generated), "func WireScreening(") {
+		t.Fatalf("a signature-carrying subflow was given a wiring function of its own, "+
+			"which reads an unbound in:\n%s", generated)
+	}
+
+	cmd := exec.Command("go", "run", "-buildvcs=false", ".")
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("the generated program did not build and run: %v\n%s\n--- generated ---\n%s",
+			err, output, generated)
+	}
+
+	got := string(output)
+	if !strings.Contains(got, embedToken) {
+		t.Fatalf("the program ran but no datum reached the sink through the embedded subflow: "+
+			"its stdout does not carry %q.\n%s\n--- generated ---\n%s", embedToken, got, generated)
+	}
+	t.Logf("a datum travelled through the embedded subflow to the sink: %s", strings.TrimSpace(got))
+}
+
+// embedMain is e2eMain for the embedded-subflow fixture: same shape, different
+// Wire function and machine name.
+const embedMain = `package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"time"
+
+	machine "github.com/whitaker-io/machine/v4"
+)
+
+func main() {
+	m := machine.New("flow-embed")
+	ingests, err := WireEmbedded(m)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "wiring:", err)
+		os.Exit(1)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := m.Start(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "start:", err)
+		os.Exit(1)
+	}
+
+	if err := ingests.Ingest(ctx, Order{ID: "order-pushed", Tags: []string{"a"}}); err != nil {
+		fmt.Fprintln(os.Stderr, "push:", err)
+		os.Exit(1)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		fmt.Fprintln(os.Stderr, "no datum reached the sink through the embedded subflow")
+		os.Exit(1)
+	}
+}
+`
 
 // readFixtureFile reads one e2e fixture, refusing an empty one.
 func readFixtureFile(t *testing.T, path string) string {

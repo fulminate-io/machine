@@ -1,0 +1,4 @@
+func Screenable(f machine.Frame[Order]) bool { return f.Value().ID != "" }
+
+flow Screen (Order) -> ok Order, bad Order
+branch check Screenable from in -> ok, bad

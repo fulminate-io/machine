@@ -18,41 +18,25 @@ import (
 const pushToken = "flow-push: delivered=2"
 
 // stagePushedFixture writes the pushed fixture into a temp module, generates it
-// through the real driver and returns the directory.
+// THROUGH THE SHIPPED BINARY and returns the directory.
 //
 // Both legs below stage the SAME module, so the only thing that differs between
 // a passing build and a failing one is the pushed value's type.
+//
+// IT DRIVES THE BINARY FOR THE SAME REASON THE OTHER END-TO-END FIXTURES DO. This
+// leg's claim is about the ingest field a USER's generated file carries, and the
+// user runs flowc with four flags; a Driver constructed here with PackagePath and
+// Boundary already set proved that claim about a code path they never reach.
 func stagePushedFixture(t *testing.T, mainBody string) string {
 	t.Helper()
-	root := machineRoot(t)
 	dir := t.TempDir()
 
-	flowSrc := readFixtureFile(t, filepath.Join("testdata", "e2e", "pushed.flow"))
-	feed := readFixtureFile(t, filepath.Join("testdata", "e2e", "pushfeed.go.txt"))
-
-	write := func(name, body string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
-			t.Fatalf("writing %s: %v", name, err)
-		}
-	}
-	write("go.mod", "module flowpush\n\ngo 1.27\n")
-	write("go.work", "go 1.27\n\nuse (\n\t.\n\t"+root+"\n)\n")
-	if sum, err := os.ReadFile(filepath.Join(root, "go.sum")); err == nil {
-		write("go.work.sum", string(sum))
-	}
-	write("feed.go", feed)
-	write("pushed.flow", flowSrc)
-	write("main.go", mainBody)
-
-	driver := &Driver{
-		Config:      Config{Package: "main", Qualifier: "flowpush"},
-		PackagePath: "flowpush",
-		Boundary:    map[string]Boundary{},
-	}
-	if err := driver.Generate(dir, dir); err != nil {
-		t.Fatalf("generation failed: %v", err)
-	}
+	stageModule(t, dir, "flowpush", map[string]string{
+		"feed.go":     readFixtureFile(t, filepath.Join("testdata", "e2e", "pushfeed.go.txt")),
+		"pushed.flow": readFixtureFile(t, filepath.Join("testdata", "e2e", "pushed.flow")),
+		"main.go":     mainBody,
+	})
+	generateWithFlowc(t, dir, "flowpush")
 
 	return dir
 }

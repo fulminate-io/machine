@@ -1,0 +1,14 @@
+package generated
+
+import machine "github.com/whitaker-io/machine/v4"
+
+// Order is the payload. It is declared HERE, in the consumer, because the
+// upstream flow's spliced body is compiled in this package rather than in the
+// module it came from.
+type Order struct {
+	ID string
+}
+
+func Poll() machine.EdgeFactory[Order] { return machine.Channel[Order](0) }
+
+func Store(f machine.Frame[Order]) Order { return f.Value() }

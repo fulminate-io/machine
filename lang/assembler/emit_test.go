@@ -30,7 +30,7 @@ func generateOf(t *testing.T, src string, types map[string]string, boundary map[
 		p.InputTypes = types
 	}
 	cfg := Config{Package: "generated", Qualifier: "acme"}
-	plans, lowerDiags := lowerFile(programs, boundary, cfg)
+	plans, lowerDiags := lowerFile(programs, nil, boundary, cfg)
 	if len(lowerDiags) != 0 {
 		t.Fatalf("the fixture must lower clean:\n%s", strings.Join(messagesOf(lowerDiags), "\n"))
 	}

@@ -1,0 +1,3 @@
+# The bindable-output fact lang/analysis exports for the imported flow, keyed by
+# the REFERENCE the consumer wrote -- which is what mergeImported re-keys it to.
+upstream.Screen=ok,bad
