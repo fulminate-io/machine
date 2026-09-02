@@ -57,7 +57,7 @@ func TestInferenceBudget(t *testing.T) {
 
 	// THE SECOND CONTROL: one clean run BEFORE the timer starts. A loop whose
 	// every iteration failed would otherwise report a very fast mean.
-	table, _, err := BuildInferredTypes([]Source{src}, pkgs)
+	table, _, err := BuildInferredTypes([]Source{src}, pkgs, "")
 	if err != nil {
 		t.Fatalf("CONTROL FAILED: the budget input does not infer clean: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestInferenceBudget(t *testing.T) {
 
 	start := time.Now()
 	for range inferenceIterations {
-		if _, _, err := BuildInferredTypes([]Source{src}, pkgs); err != nil {
+		if _, _, err := BuildInferredTypes([]Source{src}, pkgs, ""); err != nil {
 			t.Fatalf("an inference failed midway through the measurement: %v", err)
 		}
 	}
@@ -168,7 +168,7 @@ func TestADependencyEditRetypesASignatureLessConsumer(t *testing.T) {
 	if oerr != nil {
 		t.Fatalf("the copied fixture module did not load: %v", oerr)
 	}
-	first, _, ferr := BuildInferredTypes([]Source{src}, original)
+	first, _, ferr := BuildInferredTypes([]Source{src}, original, "")
 	if ferr != nil {
 		t.Fatalf("the first inference failed: %v", ferr)
 	}
@@ -198,7 +198,7 @@ func TestADependencyEditRetypesASignatureLessConsumer(t *testing.T) {
 	if rlerr != nil {
 		t.Fatalf("the edited fixture module did not load: %v", rlerr)
 	}
-	second, _, serr := BuildInferredTypes([]Source{src}, retyped)
+	second, _, serr := BuildInferredTypes([]Source{src}, retyped, "")
 	if serr != nil {
 		t.Fatalf("the second inference failed: %v", serr)
 	}

@@ -1,0 +1,9 @@
+flow screening (Order) -> ok Order, bad Order
+branch triage Interesting from in -> ok, bad
+
+flow embedded
+source ingest Poll()
+transform count Count from ingest
+use screen screening from count -> ok, bad
+sink store Store from ok
+drop bad

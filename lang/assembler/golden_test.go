@@ -33,6 +33,10 @@ type goldenCase struct {
 	source  string
 	types   map[string]string
 	support string
+	// boundary is the per-flow bindable-output fact the driver would supply,
+	// read from an OPTIONAL boundary.txt. A fixture carrying no `use` needs
+	// none, which is why the file is optional rather than empty-but-required.
+	boundary map[string]Boundary
 }
 
 // goldenCases loads every fixture directory, refusing an empty read.
@@ -50,11 +54,12 @@ func goldenCases(t *testing.T) []goldenCase {
 		}
 		dir := filepath.Join(goldenDir, entry.Name())
 		cases = append(cases, goldenCase{
-			name:    entry.Name(),
-			dir:     dir,
-			source:  readGoldenFile(t, filepath.Join(dir, "pipeline.flow")),
-			types:   readTypes(t, filepath.Join(dir, "types.txt")),
-			support: readGoldenFile(t, filepath.Join(dir, "support.go.txt")),
+			name:     entry.Name(),
+			dir:      dir,
+			source:   readGoldenFile(t, filepath.Join(dir, "pipeline.flow")),
+			types:    readTypes(t, filepath.Join(dir, "types.txt")),
+			support:  readGoldenFile(t, filepath.Join(dir, "support.go.txt")),
+			boundary: readBoundary(t, filepath.Join(dir, "boundary.txt")),
 		})
 	}
 	if len(cases) < 3 {
@@ -101,6 +106,57 @@ func readTypes(t *testing.T, path string) map[string]string {
 	return out
 }
 
+// readBoundary parses the OPTIONAL per-flow bindable-output fact.
+//
+// AN ABSENT FILE IS NO FACT AT ALL, which is a different thing from a fact with
+// no names — the distinction lang/analysis's Boundaries preserves and this package
+// refuses on. A fixture carrying no `use` needs no file; one carrying a `use`
+// declares what analysis would have exported for the flow it embeds.
+//
+// Each line is `flow=out1,out2`, and a flow with no bindable names is written
+// `flow=` so a case can state the empty fact deliberately.
+func readBoundary(t *testing.T, path string) map[string]Boundary {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		t.Fatalf("reading %s: %v", path, err)
+	}
+
+	out := map[string]Boundary{}
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		flow, names, ok := strings.Cut(line, "=")
+		if !ok {
+			t.Fatalf("%s: %q is not a flow=out1,out2 line", path, line)
+		}
+		out[strings.TrimSpace(flow)] = Boundary{Outputs: splitNames(names)}
+	}
+	if len(out) == 0 {
+		t.Fatalf("CONTROL FAILED: %s exists and declares no boundary at all", path)
+	}
+
+	return out
+}
+
+// splitNames splits a comma-separated binding list, answering nil for an empty
+// one rather than a slice holding one empty name.
+func splitNames(names string) []string {
+	var out []string
+	for _, name := range strings.Split(names, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			out = append(out, name)
+		}
+	}
+
+	return out
+}
+
 // generateCase runs the whole pipeline over one fixture.
 func generateCase(t *testing.T, c goldenCase) Generated {
 	t.Helper()
@@ -115,6 +171,11 @@ func generateCase(t *testing.T, c goldenCase) Generated {
 	boundary := map[string]Boundary{}
 	for _, p := range programs {
 		p.InputTypes = c.types
+		if declared, ok := c.boundary[p.Name]; ok {
+			boundary[p.Name] = declared
+
+			continue
+		}
 		boundary[p.Name] = Boundary{}
 	}
 	cfg := Config{Package: "generated", Qualifier: "acme"}

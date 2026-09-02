@@ -31,6 +31,7 @@ var (
 	errNoGraph         = errors.New("the flowgraph analyzer produced no graph")
 	errNoGraphs        = errors.New("the flowgraph analyzer produced no graph set")
 	errNoInferredTypes = errors.New("the type inference analyzer produced no table")
+	errNoRegistrations = errors.New("the serialization analyzer produced no registration table")
 	errNoPackages      = errors.New("analysis needs a loaded package set, and none was supplied")
 	errFileMismatch    = errors.New("the symbol tables and the derived graphs cover different numbers of files")
 )

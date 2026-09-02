@@ -20,7 +20,7 @@ func TestInferenceRefusalArms(t *testing.T) {
 	src := loadSource(t, filepath.Join(inferenceDir, "Screening.flow"))
 
 	t.Run("BuildInferredTypes refuses a nil package set", func(t *testing.T) {
-		table, diags, err := BuildInferredTypes([]Source{src}, nil)
+		table, diags, err := BuildInferredTypes([]Source{src}, nil, "")
 		if err == nil {
 			t.Fatal("BuildInferredTypes accepted a nil package set")
 		}
@@ -34,7 +34,7 @@ func TestInferenceRefusalArms(t *testing.T) {
 
 	t.Run("a source carrying no parsed tree is refused by the driver", func(t *testing.T) {
 		untreed := Source{Path: "notree.flow", Src: src.Src}
-		if _, _, err := BuildInferredTypes([]Source{untreed}, loadInferenceSubject(t)); err == nil {
+		if _, _, err := BuildInferredTypes([]Source{untreed}, loadInferenceSubject(t), ""); err == nil {
 			t.Fatal("a source with no parsed tree was accepted")
 		}
 	})
@@ -42,13 +42,13 @@ func TestInferenceRefusalArms(t *testing.T) {
 	// THE CONSTRUCTED ANALYZER REFUSES TOO, not just the convenience entry point:
 	// TypeInferenceAnalyzer is exported and a caller may hand it straight to Run.
 	t.Run("the analyzer itself refuses a nil package set", func(t *testing.T) {
-		if _, err := Run([]Source{src}, []*Analyzer{TypeInferenceAnalyzer(nil)}); err == nil {
+		if _, err := Run([]Source{src}, []*Analyzer{TypeInferenceAnalyzer(nil, "")}); err == nil {
 			t.Fatal("the constructed analyzer accepted a nil package set")
 		}
 	})
 
 	t.Run("a missing symbols result is a stop", func(t *testing.T) {
-		if _, err := runInference(&Pass{ResultOf: map[*Analyzer]any{}}, loadInferenceSubject(t)); err == nil {
+		if _, err := runInference(&Pass{ResultOf: map[*Analyzer]any{}}, loadInferenceSubject(t), ""); err == nil {
 			t.Fatal("the inference ran without a symbols result")
 		} else if !errors.Is(err, errNoSymbols) {
 			t.Errorf("the refusal is %v, want errNoSymbols", err)
@@ -57,7 +57,7 @@ func TestInferenceRefusalArms(t *testing.T) {
 
 	t.Run("a missing flowgraph result is a stop", func(t *testing.T) {
 		pass := &Pass{ResultOf: map[*Analyzer]any{SymbolsAnalyzer: &SymbolTable{}}}
-		if _, err := runInference(pass, loadInferenceSubject(t)); err == nil {
+		if _, err := runInference(pass, loadInferenceSubject(t), ""); err == nil {
 			t.Fatal("the inference ran without a flowgraph result")
 		} else if !errors.Is(err, errNoGraphs) {
 			t.Errorf("the refusal is %v, want errNoGraphs", err)

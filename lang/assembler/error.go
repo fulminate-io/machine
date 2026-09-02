@@ -22,13 +22,19 @@ import (
 // counts BYTES rather than runes, which is what lets an editor map an offset
 // without re-scanning the line.
 //
-// This is a DIFFERENT type from loader.Diagnostic, which adds a Path: a loader
-// reports across a package set and has to say which file, while this package is
-// handed one flow's statements at a time and the driver knows the file.
+// PATH IS EMPTY FOR A REFUSAL THIS PACKAGE RAISED, and non-empty for one that
+// crossed in from somewhere else. The earlier reading — that this type needs no
+// Path because "this package is handed one flow's statements at a time and the
+// driver knows the file" — was true of this package's own refusals and is not
+// true of an analysis finding, which crosses a whole run of files. Two files'
+// parsed trees both start at offset zero, so a position alone cannot name one.
 type Diagnostic struct {
 	Pos     ast.Position
 	End     ast.Position
 	Message string
+	// Path is the file the diagnostic is about, EMPTY when this package raised
+	// it and the caller's own file name is the right answer.
+	Path string
 }
 
 // Error carries every problem found in one assembly run, together with whatever

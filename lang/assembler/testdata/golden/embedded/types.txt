@@ -1,0 +1,6 @@
+# The per-node input types the driver would supply. The embedded subflow's own
+# node carries the instance-qualified name the inlining gives it.
+ingest=Order
+count=Order
+screen.triage=Order
+store=Order
