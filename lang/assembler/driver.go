@@ -182,21 +182,21 @@ func (d *Driver) facts(sources []Source, pkgs *loader.Packages, pkgPath string) 
 		return Facts{Boundary: d.Boundary, Inferred: d.Inferred}, nil, nil
 	}
 
-	facts, refused, disclosed, err := gate(sources, pkgs, pkgPath)
+	result, err := gate(sources, pkgs, pkgPath)
 	if err != nil {
 		return Facts{}, nil, err
 	}
-	if d.Disclose != nil && len(disclosed) != 0 {
-		d.Disclose(disclosed)
+	if d.Disclose != nil && len(result.Disclosed) != 0 {
+		d.Disclose(result.Disclosed)
 	}
 	if d.Boundary != nil {
-		facts.Boundary = d.Boundary
+		result.Facts.Boundary = d.Boundary
 	}
 	if d.Inferred != nil {
-		facts.Inferred = d.Inferred
+		result.Facts.Inferred = d.Inferred
 	}
 
-	return facts, refused, nil
+	return result.Facts, result.Refused, nil
 }
 
 // packagePath answers the import path the generated files belong to.
