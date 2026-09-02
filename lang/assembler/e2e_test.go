@@ -205,7 +205,7 @@ func TestEndToEndTerminatingLoopAndSendRunOnTheRuntime(t *testing.T) {
 }
 
 // embedToken is what the EMBEDDED-SUBFLOW fixture's sink prints once a datum has
-// travelled through the subflow's body.
+// traveled through the subflow's body.
 const embedToken = "flow-embed: processed=3"
 
 // TestEndToEndEmbeddedSubflowRunsOnTheRuntime is the third end-to-end leg, and it
@@ -264,7 +264,7 @@ func TestEndToEndEmbeddedSubflowRunsOnTheRuntime(t *testing.T) {
 		t.Fatalf("the program ran but no datum reached the sink through the embedded subflow: "+
 			"its stdout does not carry %q.\n%s\n--- generated ---\n%s", embedToken, got, generated)
 	}
-	t.Logf("a datum travelled through the embedded subflow to the sink: %s", strings.TrimSpace(got))
+	t.Logf("a datum traveled through the embedded subflow to the sink: %s", strings.TrimSpace(got))
 }
 
 // embedMain is e2eMain for the embedded-subflow fixture: same shape, different
