@@ -45,7 +45,32 @@ const (
 	// ReasonNeedsRegistration is a named type in an interface slot, which the
 	// decoder cannot reconstruct until its name is registered.
 	ReasonNeedsRegistration
+	// ReasonDepthExceeded is the walk refusing to descend further, because it
+	// passed MaxDepth frames without finishing. It is a statement about the
+	// WALK rather than about the type: a type that provokes it is not
+	// necessarily unserializable, it is one this derivation declined to decide.
+	ReasonDepthExceeded
 )
+
+// MaxDepth is the walk's frame ceiling.
+//
+// IT IS EXPORTED BECAUSE A CONSUMER TURNING A ReasonDepthExceeded FINDING INTO A
+// DIAGNOSTIC MUST BE ABLE TO NAME THE BOUND IT WAS REFUSED BY. A ceiling that
+// constrains a caller and that the caller cannot read is half a contract.
+//
+// THE DIMENSION IS WALK FRAMES — the recursion depth of the walk itself — because
+// that is the quantity which grows without bound. It is NOT struct-nesting
+// depth, and the ratio between the two is a property of this file's recursion
+// structure rather than of the language, so it is deliberately not stated here:
+// if the recursion changes, the margin is RE-MEASURED in frames rather than
+// re-derived from an assumed ratio.
+//
+// The value is roughly 64x the deepest walk any real type in this repository's
+// corpus produces. Permissive is the correct direction: the ceiling exists to
+// bound a RUNAWAY, not to police legitimate depth, so a generous bound costs
+// microseconds while a tight one would refuse a type somebody legitimately
+// wrote.
+const MaxDepth = 256
 
 // Reason is why a type is not cleanly serializable at the site it was asked
 // about.
@@ -81,18 +106,26 @@ type Finding struct {
 // key's shape load-bearing rather than an implementation detail.
 type Deriver struct {
 	memo map[string][]Finding
+
+	// ceiling is the frame bound this Deriver enforces, MaxDepth in every
+	// production path. It is a field rather than a bare constant reference so
+	// that the module's own tests can measure a fixture's NATURAL depth with the
+	// bound lifted — which is what proves an over-ceiling fixture genuinely
+	// exceeds the bound rather than merely reaching it. It is unexported, so no
+	// consumer can weaken the ceiling.
+	ceiling int
 }
 
 // NewDeriver returns a Deriver with an empty memo.
 func NewDeriver() *Deriver {
-	return &Deriver{memo: map[string][]Finding{}}
+	return &Deriver{memo: map[string][]Finding{}, ceiling: MaxDepth}
 }
 
 // Serializable reports every reason typ is not cleanly serializable at site,
 // with a path to each problem inside the type. An empty result means the type is
 // clean AT THAT SITE.
 func (d *Deriver) Serializable(typ types.Type, site Site) []Finding {
-	return d.walk(typ, site)
+	return d.walk(typ, site, 1)
 }
 
 // walk is the memoized entry to the family split.
@@ -113,7 +146,15 @@ func (d *Deriver) Serializable(typ types.Type, site Site) []Finding {
 // Paths in a memoized result are relative to the type that was walked. Callers
 // that descend into a field prefix them, which is what keeps one cached answer
 // correct at every place the type appears.
-func (d *Deriver) walk(typ types.Type, site Site) []Finding {
+func (d *Deriver) walk(typ types.Type, site Site, depth int) []Finding {
+	// THE CEILING IS CHECKED BEFORE THE MEMO KEY IS STORED, deliberately. A
+	// depth-limited answer is a property of the WALK, not of the type, so
+	// memoizing it would poison the memo for a later query about the same type
+	// reached at a shallower depth.
+	if depth > d.ceiling {
+		return []Finding{{Type: typ.String(), Reason: ReasonDepthExceeded}}
+	}
+
 	key := typ.String() + memoSep + strconv.Itoa(int(site))
 	if found, ok := d.memo[key]; ok {
 		return found
@@ -125,15 +166,15 @@ func (d *Deriver) walk(typ types.Type, site Site) []Finding {
 
 	switch shape := typ.(type) {
 	case *types.Alias:
-		found = d.walk(types.Unalias(shape), site)
+		found = d.walk(types.Unalias(shape), site, depth+1)
 	case *types.Pointer:
-		found = d.walk(shape.Elem(), site)
+		found = d.walk(shape.Elem(), site, depth+1)
 	case *types.Interface:
 		found = []Finding{{Type: typ.String(), Reason: ReasonNeedsRegistration}}
 	case *types.Named:
-		found = d.named(shape, site)
+		found = d.named(shape, site, depth)
 	default:
-		found = d.concrete(typ)
+		found = d.concrete(typ, depth)
 	}
 
 	d.memo[key] = found
@@ -154,7 +195,7 @@ func (d *Deriver) walk(typ types.Type, site Site) []Finding {
 // WHAT THE HATCH DOES SUPPRESS is the STRUCTURAL walk of the type it sits on: a
 // type that supplies its own GobEncode owns its bytes, so a chan field beneath
 // it is no longer a drop. That is the only thing it suppresses.
-func (d *Deriver) named(typ *types.Named, site Site) []Finding {
+func (d *Deriver) named(typ *types.Named, site Site, depth int) []Finding {
 	var found []Finding
 
 	if site == SiteInterface {
@@ -165,7 +206,7 @@ func (d *Deriver) named(typ *types.Named, site Site) []Finding {
 		return found
 	}
 
-	return append(found, d.concrete(typ.Underlying())...)
+	return append(found, d.concrete(typ.Underlying(), depth)...)
 }
 
 // concrete handles the shapes whose answer does not depend on the site.
@@ -175,18 +216,18 @@ func (d *Deriver) named(typ *types.Named, site Site) []Finding {
 // field that IS interface-typed reaches the Interface arm of walk on its own
 // account. Descending at SiteConcrete is therefore the accurate statement, not a
 // simplification.
-func (d *Deriver) concrete(typ types.Type) []Finding {
+func (d *Deriver) concrete(typ types.Type, depth int) []Finding {
 	switch shape := typ.(type) {
 	case *types.Struct:
-		return d.structFields(shape)
+		return d.structFields(shape, depth)
 	case *types.Slice:
-		return prefixPath(d.walk(shape.Elem(), SiteConcrete), "[]")
+		return prefixPath(d.walk(shape.Elem(), SiteConcrete, depth+1), "[]")
 	case *types.Array:
-		return prefixPath(d.walk(shape.Elem(), SiteConcrete), "[]")
+		return prefixPath(d.walk(shape.Elem(), SiteConcrete, depth+1), "[]")
 	case *types.Map:
-		keys := prefixPath(d.walk(shape.Key(), SiteConcrete), "[key]")
+		keys := prefixPath(d.walk(shape.Key(), SiteConcrete, depth+1), "[key]")
 
-		return append(keys, prefixPath(d.walk(shape.Elem(), SiteConcrete), "[value]")...)
+		return append(keys, prefixPath(d.walk(shape.Elem(), SiteConcrete, depth+1), "[value]")...)
 	case *types.Chan, *types.Signature:
 		return []Finding{{Type: typ.String(), Reason: ReasonSilentDrop}}
 	default:
@@ -197,7 +238,7 @@ func (d *Deriver) concrete(typ types.Type) []Finding {
 // structFields walks only the EXPORTED fields, because those are the only ones
 // the codec carries, and reports a struct that has none — such a struct is not
 // partially encodable, it is refused outright by the codec.
-func (d *Deriver) structFields(typ *types.Struct) []Finding {
+func (d *Deriver) structFields(typ *types.Struct, depth int) []Finding {
 	var (
 		found    []Finding
 		exported int
@@ -211,7 +252,7 @@ func (d *Deriver) structFields(typ *types.Struct) []Finding {
 
 		exported++
 
-		found = append(found, prefixPath(d.walk(field.Type(), SiteConcrete), "."+field.Name())...)
+		found = append(found, prefixPath(d.walk(field.Type(), SiteConcrete, depth+1), "."+field.Name())...)
 	}
 
 	if exported == 0 {

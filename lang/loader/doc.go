@@ -33,6 +33,20 @@
 // for its go/types deepening, and an edge in the other direction would make
 // that a cycle.
 //
+// THE DERIVATION IS DEPTH-BOUNDED, AND THE BOUND IS PART OF THE CONTRACT. The
+// serializability walk refuses past MaxDepth frames with ReasonDepthExceeded
+// rather than descending until the runtime kills the process, so a pathological
+// type is a named diagnostic instead of a crash carrying no clue which type
+// caused it. MaxDepth is exported because a consumer rendering that finding has
+// to be able to name the bound it was refused by.
+//
+// CONSUMER CONSEQUENCE, STATED RATHER THAN LEFT TO BE DISCOVERED:
+// ReasonDepthExceeded widens the Reason enum, and this repository enables the
+// `exhaustive` linter. A consumer that switches on Reason WITHOUT a default arm
+// becomes non-exhaustive the moment it picks up this value and will fail its own
+// lint; one carrying a default arm is unaffected, since the configuration treats
+// a default as exhaustive. Nothing inside this module switches on Reason.
+//
 // WHAT IT DOES NOT DO IS AS LOAD-BEARING AS WHAT IT DOES. This package resolves
 // and refuses; it infers nothing. A flow whose declaration carries no signature
 // is resolved without complaint and without a type claim of any kind — deciding
