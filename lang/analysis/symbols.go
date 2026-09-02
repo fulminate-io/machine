@@ -56,6 +56,12 @@ type ImportRef struct {
 // maps a name to the statements REFERENCING it. Reads and Writes are the same
 // shape over the reads and writes clauses, which name vars and state fields
 // rather than flow-graph names.
+//
+// Input is the DECLARED TYPE SPELLING of the payload the implicit `in` carries,
+// and it is tabled beside Outputs because the two are the same kind of fact: a
+// signature declares both halves of a flow's boundary. It is the zero GoSpan
+// when HasSignature is false, since a flow without a header declares no input
+// type for this table to carry.
 type FlowSymbols struct {
 	Name         string
 	Pos          ast.Position
@@ -70,6 +76,7 @@ type FlowSymbols struct {
 	State        map[string]ast.StateField
 	OnError      *ast.OnErrorDecl
 	Outputs      []ast.FlowOutput
+	Input        ast.GoSpan
 	HasSignature bool
 	Bad          []ast.BadStmt
 }
@@ -231,14 +238,23 @@ func typeName(n ast.Node) string {
 	return reflect.TypeOf(n).String()
 }
 
-// signature records a flow's declared outputs and the implicit input its body
-// consumes when a signature is present.
+// signature records a flow's declared outputs, the DECLARED TYPE its implicit
+// input carries, and the implicit input name its body consumes when a signature
+// is present.
+//
+// THE INPUT SPAN IS TABLED ALONGSIDE THE OUTPUTS because the declared input is a
+// boundary type exactly as a declared output is: node.go states that implicit
+// checkpoints at flow ingress exist regardless of any clause, so the input
+// crosses a codec on every run. A table carrying only the outputs would let a
+// consumer examine two thirds of what a signature declares while looking
+// complete.
 func (c *symbolCollector) signature(sig *ast.FlowSignature) {
 	if sig == nil {
 		return
 	}
 	c.flow.HasSignature = true
 	c.flow.Outputs = sig.Outputs
+	c.flow.Input = sig.Input
 	c.produce(signatureStmt, ast.Ident{Name: implicitInput, NamePos: sig.Start})
 }
 

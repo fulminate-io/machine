@@ -1,0 +1,7 @@
+note """serialization fixture: a flow declaring NO signature. It has no declared input and no declared outputs, so the contract examines neither and guesses neither — what such a flow carries is inference over the flow graph, which is a different analyzer's subject. The state entry is still examined, which is the control that keeps this from passing on an empty run."""
+flow Screening
+state {
+  tally Plain
+}
+source ingest Listen
+sink store Save from ingest

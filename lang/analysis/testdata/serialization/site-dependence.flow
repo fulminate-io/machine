@@ -1,0 +1,7 @@
+note """serialization fixture: ONE Go type declared at BOTH sites in one flow. The state entry tally is a cross-datum shared value the ledger encodes through an interface slot, while the declared output ok rides a checkpointed packet whose payload is typed. The same spelling therefore needs registration at one site and not the other, while the structural refusal holds at both. A contract answering a single boolean per type cannot produce this pair."""
+flow Screening (Mixed) -> ok Mixed
+state {
+  tally Mixed
+}
+transform ok Compute from in
+sink store Save from ok

@@ -6,6 +6,7 @@ package analysis
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -36,6 +37,15 @@ type factKey struct {
 // A Requires cycle is returned as an error naming the analyzers in it, and no
 // analyzer runs. An analyzer returning an error aborts the run under its own
 // name; a partial result is not returned alongside a failure.
+//
+// THAT ABORT WRAPS THE ANALYZER'S OWN ERROR RATHER THAN QUOTING IT, and the
+// distinction is invisible in the message and load-bearing for a caller. Joining
+// the analyzer's name onto rerr.Error() reads exactly like a wrap and silently
+// ends the error chain, so a sentinel an analyzer refuses with — errNoPackages,
+// say — answers errors.Is TRUE when the analyzer is called directly and FALSE
+// through this driver, which is where the analysis is actually consumed. The %w
+// verb makes the two boundaries agree; the rendered message is byte-identical
+// either way.
 func Run(srcs []Source, analyzers []*Analyzer) ([]Diagnostic, error) {
 	if err := checkSources(srcs); err != nil {
 		return nil, err
@@ -60,7 +70,7 @@ func Run(srcs []Source, analyzers []*Analyzer) ([]Diagnostic, error) {
 		}
 		res, rerr := a.Run(pass)
 		if rerr != nil {
-			return nil, errors.New("analysis: analyzer " + a.Name + " failed: " + rerr.Error())
+			return nil, fmt.Errorf("analysis: analyzer %s failed: %w", a.Name, rerr)
 		}
 		results[a] = res
 	}

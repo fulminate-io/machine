@@ -1,0 +1,7 @@
+note """serialization fixture: a declared spelling that names no Go type at all. Skipping it would make a typo read as a clean declaration, which is exactly the silence this contract exists to remove, so it is REPORTED by name instead."""
+flow Screening
+state {
+  tally NoSuchTypeHere
+}
+source ingest Listen
+sink store Save from ingest

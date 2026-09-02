@@ -1,0 +1,7 @@
+note """serialization fixture: the gob escape hatch. Escaped supplies GobEncode on its value receiver and GobDecode on its pointer, over a struct that carries a chan. The hatch suppresses the STRUCTURAL walk of the type it sits on — the chan is no longer a drop, because the type owns its own bytes — and suppresses NOTHING about registration, so the state entry still needs one."""
+flow Screening (Escaped) -> ok Escaped
+state {
+  tally Escaped
+}
+transform ok Compute from in
+sink store Save from ok

@@ -14,15 +14,23 @@ import "errors"
 // without its dependants following; an analysis that silently produced no
 // findings under either condition would report a clean program.
 // errNoPackages and errFileMismatch are refusals of a different kind: the first
-// is a caller handing the inference no package set, and the second is the symbol
+// is a caller handing an analysis no package set, and the second is the symbol
 // tables and the derived graphs disagreeing about how many files the run held.
 // Neither is recoverable by guessing, and pairing a flow with another file's
 // graph would type it against the wrong imports.
+//
+// errNoPackages IS SHARED BY EVERY ANALYSIS THAT NEEDS LOADED PACKAGES, and its
+// text is deliberately NEUTRAL for that reason. One condition gets one sentinel:
+// a second variable would produce a byte-identical message while breaking
+// errors.Is for a caller comparing the two, which is the worst of both. Each
+// analyzer WRAPS it at its own refusal site — "type inference: %w",
+// "serialization derivation: %w" — so errors.Is holds across all of them while
+// the message still names the analysis that stopped.
 var (
 	errNoSymbols       = errors.New("the symbols analyzer produced no table")
 	errNoGraph         = errors.New("the flowgraph analyzer produced no graph")
 	errNoGraphs        = errors.New("the flowgraph analyzer produced no graph set")
 	errNoInferredTypes = errors.New("the type inference analyzer produced no table")
-	errNoPackages      = errors.New("type inference needs a loaded package set, and none was supplied")
+	errNoPackages      = errors.New("analysis needs a loaded package set, and none was supplied")
 	errFileMismatch    = errors.New("the symbol tables and the derived graphs cover different numbers of files")
 )

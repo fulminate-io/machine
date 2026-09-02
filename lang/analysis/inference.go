@@ -498,7 +498,7 @@ func (t *InferredTypes) Flows() []string { return t.order }
 // error, which a caller cannot tell from a run that inferred nothing.
 func BuildInferredTypes(srcs []Source, pkgs *loader.Packages) (*InferredTypes, []Diagnostic, error) {
 	if pkgs == nil {
-		return nil, nil, errNoPackages
+		return nil, nil, fmt.Errorf("type inference: %w", errNoPackages)
 	}
 
 	var table *InferredTypes
@@ -539,7 +539,7 @@ func BuildInferredTypes(srcs []Source, pkgs *loader.Packages) (*InferredTypes, [
 // degraded lane rather than an answer.
 func runInference(p *Pass, pkgs *loader.Packages) (any, error) {
 	if pkgs == nil {
-		return nil, errNoPackages
+		return nil, fmt.Errorf("type inference: %w", errNoPackages)
 	}
 
 	symbols, ok := p.ResultOf[SymbolsAnalyzer].(*SymbolTable)

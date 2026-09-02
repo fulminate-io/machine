@@ -1,0 +1,7 @@
+note """serialization fixture: the problem two levels inside the declared type. Nested declares an Inner of type Mixed, so the field chain the derivation reports is .Inner.C rather than .C — which is what a diagnostic has to carry for an author to find the field, since the declaration names only Nested."""
+flow Nesting
+state {
+  holder Nested
+}
+source ingest Listen
+sink store Save from ingest
