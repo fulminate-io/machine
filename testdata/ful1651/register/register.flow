@@ -1,0 +1,13 @@
+flow Register
+note """
+The REGISTRATION fixture, carry-in (h)'s second half. It declares a plain named
+struct as a flow var, which makes it a frame stack key the codec carries at an
+interface site. Nothing here is refusable: the point is that generation
+SUCCEEDS and the generated package registers the type.
+"""
+var memo Memo
+on error Alert
+source ingest Feed()
+transform tally Count from ingest
+  reads memo  writes memo
+sink emit Report from tally

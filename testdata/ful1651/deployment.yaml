@@ -1,0 +1,74 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ful1651-smoke
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: smoke-peers
+  namespace: ful1651-smoke
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: smokehost
+  ports:
+    - name: mux
+      port: 7946
+      targetPort: 7946
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: smoke-secret
+  namespace: ful1651-smoke
+stringData:
+  token: "s3cr3t-probe"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: smokehost
+  namespace: ful1651-smoke
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: smokehost
+  template:
+    metadata:
+      labels:
+        app: smokehost
+    spec:
+      terminationGracePeriodSeconds: 2
+      containers:
+        - name: smokehost
+          image: ful1651/smokehost:smoke
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 7946
+          env:
+            - name: MACHINE_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: MACHINE_ADVERTISE
+              value: "$(POD_IP):7946"
+            - name: MACHINE_BIND
+              value: "0.0.0.0:7946"
+            - name: MACHINE_FLOW
+              value: "smoke"
+            - name: MACHINE_CLUSTER_PEERS
+              value: "smoke-peers.ful1651-smoke.svc.cluster.local:7946"
+            - name: MACHINE_CLUSTER_EXPECT
+              value: "3"
+            - name: MACHINE_CLUSTER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: smoke-secret
+                  key: token

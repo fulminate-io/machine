@@ -1,0 +1,26 @@
+import "strings"
+
+flow Smoke
+note """
+The phase-2 smoke run fixture.
+"""
+state {
+  processed int
+}
+var attempt int
+on error Alert
+source ingest Feed()
+transform tally Count from ingest
+  reads attempt, processed  writes attempt, processed
+  checkpoint machine.GobCodec[Order]{}
+  idempotent
+switch route from tally on strings.ToLower(tally.Kind) over Feed() {
+  "card", "wallet" -> billable
+  else -> other
+}
+tee fan from billable -> reported, audited
+sink emit Report from reported
+sink audit Audit from audited
+loop retry
+transform redo Backoff from other, retry
+send redo -> retry

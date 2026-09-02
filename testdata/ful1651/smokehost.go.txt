@@ -1,0 +1,157 @@
+// Command smokehost is the FUL-1651 phase-2 smoke harness. It maps the three
+// documented cluster env vars onto the landed raft packages and runs the flow
+// group, so the smoke observes the real discovery, bootstrap, eviction and
+// recovery code paths rather than a reimplementation of them.
+package main
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
+	"time"
+
+	"github.com/hashicorp/go-hclog"
+	"github.com/whitaker-io/machine/raft/ledger"
+	"github.com/whitaker-io/machine/raft/membership"
+	"github.com/whitaker-io/machine/raft/transport"
+)
+
+func main() {
+	logger := hclog.New(&hclog.LoggerOptions{
+		Name: "smokehost", Level: hclog.Debug, Output: os.Stdout,
+	})
+
+	node := os.Getenv("MACHINE_NODE_ID")
+	advertise := os.Getenv("MACHINE_ADVERTISE")
+	bind := os.Getenv("MACHINE_BIND")
+	flow := os.Getenv("MACHINE_FLOW")
+	peers := os.Getenv("MACHINE_CLUSTER_PEERS")
+	secret := os.Getenv("MACHINE_CLUSTER_SECRET")
+	// LEDGER_ID exists ONLY to drive the diverged-identity shape: when it is set
+	// and differs from MACHINE_NODE_ID, the ledger reports one id and
+	// membership.Config.Node carries another, which is the disagreement
+	// ErrIdentityDiverged refuses.
+	ledgerID := os.Getenv("MACHINE_LEDGER_ID")
+	if ledgerID == "" {
+		ledgerID = node
+	}
+	expect := 0
+	if v := os.Getenv("MACHINE_CLUSTER_EXPECT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "smokehost: MACHINE_CLUSTER_EXPECT:", err)
+			os.Exit(2)
+		}
+		expect = n
+	}
+
+	addr, err := net.ResolveTCPAddr("tcp", advertise)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "smokehost: advertise:", err)
+		os.Exit(2)
+	}
+	mux, err := transport.New(transport.Config{
+		BindAddr:  bind,
+		Advertise: addr,
+		Logger:    logger.Named("mux"),
+		Tokens:    []transport.Token{transport.Token(secret)},
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "smokehost: mux:", err)
+		os.Exit(2)
+	}
+	defer mux.Close()
+
+	manager, err := membership.New(membership.Config{
+		Node:      node,
+		Advertise: advertise,
+		Mux:       mux,
+		Logger:    logger.Named("membership"),
+		Flows:     []string{flow},
+		Peers:     peers,
+		Expect:    expect,
+		Open: func(f string) (*ledger.Ledger, error) {
+			return ledger.Open(ledger.Config{
+				Flow: f, LocalID: ledgerID, Mux: mux, Logger: logger.Named("ledger"),
+			})
+		},
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "smokehost: membership.New:", err)
+		os.Exit(2)
+	}
+
+	// THE PROMOTER CANNOT SEE A JOINER CATCH UP WITHOUT THIS. Every node answers
+	// for itself over the control channel, and flowPilot.FetchServerStats reads
+	// exactly this callback; a host that omits it leaves every staged nonvoter
+	// permanently unpromoted, which reads as a promotion defect and is not one.
+	//
+	// MACHINE_DISABLE_LOCAL_STATS EXISTS ONLY TO DRIVE THAT SHAPE DELIBERATELY.
+	// The smoke's fail-silent leg needs a fleet that omits the callback so it can
+	// record what the promoter says, if anything, when its stats are absent.
+	if os.Getenv("MACHINE_DISABLE_LOCAL_STATS") != "" {
+		logger.Warn("SMOKEHOST-NO-LOCAL-STATS", "node", node,
+			"note", "the local stats callback is deliberately not installed")
+	} else {
+		manager.SetLocalStats(func(f string) (membership.FlowStats, bool) {
+			l, ok := manager.Ledger(f)
+			if !ok {
+				return membership.FlowStats{}, false
+			}
+			r := l.Raft()
+			st := r.Stats()
+			parse := func(k string) uint64 {
+				n, _ := strconv.ParseUint(st[k], 10, 64)
+				return n
+			}
+			lc := time.Duration(0)
+			if d, err := time.ParseDuration(st["last_contact"]); err == nil {
+				lc = d
+			}
+			return membership.FlowStats{
+				Term:        parse("term"),
+				LastIndex:   parse("last_log_index"),
+				LastContact: lc,
+				Voter:       st["state"] != "",
+				Leader:      r.State() == 2,
+			}, true
+		})
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if err := manager.Start(ctx); err != nil {
+		// THE REFUSAL IS PRINTED VERBATIM AND THE PROCESS EXITS NON-ZERO. The
+		// diverged-identity leg reads this line.
+		fmt.Fprintln(os.Stderr, "smokehost: start:", err)
+		os.Exit(3)
+	}
+	defer manager.Close()
+
+	logger.Info("SMOKEHOST-UP", "node", node, "flow", flow, "advertise", advertise, "expect", expect)
+
+	tick := time.NewTicker(2 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			cfg, _, ok := manager.Membership(flow)
+			if !ok {
+				logger.Info("SMOKEHOST-STATE", "node", node, "flow", flow, "members", "none")
+				continue
+			}
+			out := ""
+			for _, s := range cfg.Servers {
+				out += fmt.Sprintf("%s/%s ", s.ID, s.Suffrage)
+			}
+			logger.Info("SMOKEHOST-STATE", "node", node, "flow", flow, "members", out)
+		}
+	}
+}

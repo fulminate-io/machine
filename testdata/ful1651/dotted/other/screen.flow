@@ -1,0 +1,4 @@
+func Clean(f machine.Frame[Order]) bool { return f.Value().Kind != "" }
+
+flow Screen (Order) -> ok Order, bad Order
+branch triage Clean from in -> ok, bad

@@ -1,0 +1,16 @@
+import scr "acme.example/screening"
+
+flow Dotted
+note """
+The CROSS-MODULE IMPORT fixture. Its `use` names a flow in the sibling module
+under other/, which is the reference ticket step (4) asks the smoke to resolve
+and activate through the loader. The assembler follow-up resolves it through
+Packages.ResolveFlow into the same by-name binding a local `use` gets, so what
+the smoke observes here is a program that RUNS with a datum crossing the
+imported flow.
+"""
+on error Alert
+source ingest Feed()
+use screen scr.Screen from ingest -> ok, bad
+sink emit Report from ok
+drop bad

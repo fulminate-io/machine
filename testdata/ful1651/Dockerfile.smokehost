@@ -1,0 +1,10 @@
+FROM golang:1.27 AS build
+WORKDIR /src
+COPY . .
+WORKDIR /src/raft
+RUN mkdir -p cmd/smokehost && cp /src/testdata/ful1651/smokehost.go.txt cmd/smokehost/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -o /out/smokehost ./cmd/smokehost
+
+FROM gcr.io/distroless/static-debian12
+COPY --from=build /out/smokehost /smokehost
+ENTRYPOINT ["/smokehost"]
