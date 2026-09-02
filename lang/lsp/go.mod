@@ -15,3 +15,5 @@ require github.com/go-json-experiment/json v0.0.0-20260623181947-01eb4420fa68 //
 replace github.com/whitaker-io/machine/lang/analysis => ../analysis
 
 replace github.com/whitaker-io/machine/lang/ast => ../ast
+
+replace github.com/whitaker-io/machine/lang/loader => ../loader

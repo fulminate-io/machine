@@ -10,3 +10,5 @@ require (
 replace github.com/whitaker-io/machine/lang/analysis => ../analysis
 
 replace github.com/whitaker-io/machine/lang/ast => ../ast
+
+replace github.com/whitaker-io/machine/lang/loader => ../loader

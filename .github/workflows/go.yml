@@ -168,10 +168,10 @@ jobs:
 
   # lang/analysis is a separate module for the same reason lang/ast is: a
   # root-scoped `go list ./...` prints only the root package, so without a job of
-  # its own it would rot invisibly. It carries no cache-dependency-path because a
-  # dependency-free module has no go.sum — lang/ast arrives through a local
-  # replace — and pointing the cache at a file that does not exist fails the job
-  # rather than missing the cache.
+  # its own it would rot invisibly. It carries a cache-dependency-path because the
+  # module HAS a go.sum: lang/analysis requires lang/loader, which brings
+  # golang.org/x/tools with it, so the cache is pointed at that file exactly as
+  # the lang-loader and lang-lsp jobs point at theirs.
   lang-analysis:
     name: lang/analysis
     runs-on: ubuntu-latest
@@ -180,6 +180,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: 'lang/analysis/go.mod'
+          cache-dependency-path: 'lang/analysis/go.sum'
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
@@ -272,13 +273,13 @@ jobs:
 
   # lang/lint is a separate module for the same reason the lang and edge modules
   # are: a root-scoped `go list ./...` prints only the root package, so without a
-  # job of its own it would rot invisibly. It carries no cache-dependency-path
-  # because a dependency-free module has no go.sum — lang/analysis and lang/ast
-  # both arrive through local replaces — and pointing the cache at a file that
-  # does not exist fails the job rather than missing the cache. Every step that
-  # runs a command carries working-directory lang/lint, because one that does not
-  # would build, test or measure the root module and report a green about the
-  # wrong code entirely.
+  # job of its own it would rot invisibly. It carries a cache-dependency-path
+  # because the module HAS a go.sum: lang/analysis requires lang/loader, which
+  # brings golang.org/x/tools with it, and lang/lint consumes lang/analysis, so
+  # the cache is pointed at that file exactly as the lang-loader and lang-lsp jobs
+  # point at theirs. Every step that runs a command carries working-directory
+  # lang/lint, because one that does not would build, test or measure the root
+  # module and report a green about the wrong code entirely.
   lang-lint:
     name: lang/lint
     runs-on: ubuntu-latest
@@ -287,6 +288,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: 'lang/lint/go.mod'
+          cache-dependency-path: 'lang/lint/go.sum'
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
