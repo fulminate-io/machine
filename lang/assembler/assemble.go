@@ -28,6 +28,10 @@ type Source struct {
 	// Path is the file's path, used for the generated file's source stamp and
 	// for rendering diagnostics.
 	Path string
+	// Src is the file's bytes. The analysis module carries them alongside the
+	// tree because its analyzers read them, so the bridge to it has nothing to
+	// re-read from disk.
+	Src []byte
 	// File is the parsed source.
 	File *ast.File
 }
@@ -47,6 +51,24 @@ type Facts struct {
 	Types *Types
 	// Inferred is the analysis type table, or nil.
 	Inferred Inference
+	// Registrations are the gob registrations the generated package must emit,
+	// deduplicated by spelling and sorted by it.
+	Registrations []Registration
+}
+
+// Registration is one gob.Register call the generated package emits.
+//
+// IT CARRIES THE SPELLING THE AUTHOR WROTE, not the identity the derivation
+// named. The derivation's identity is a go/types string and is not Go source; the
+// spelling is text that already compiles in the package the .flow sits beside,
+// which is the package the registration is emitted into.
+type Registration struct {
+	// Spelling is the Go type as the author wrote it.
+	Spelling string
+	// Flow and Name are the declaration that made the registration necessary,
+	// kept so a wrong emission can be traced back to what asked for it.
+	Flow string
+	Name string
 }
 
 // Assemble turns parsed .flow sources into generated Go.
@@ -100,6 +122,7 @@ func assembleOne(source Source, cfg Config, facts Facts) (Generated, []Diagnosti
 	return Generate(Request{
 		File: source.File, Programs: programs, Plans: plans,
 		Config: cfg, Source: source.Path, Types: facts.Types,
+		Registrations: facts.Registrations,
 	})
 }
 
@@ -206,9 +229,21 @@ func boundaryTypes(p *Program, facts Facts) map[string]string {
 	}
 	for _, n := range p.Nodes {
 		for _, name := range n.Outputs {
-			if typ, ok := facts.Inferred.Name(p.Name, name); ok {
-				out[n.Name] = typ.String()
+			typ, ok := facts.Inferred.Name(p.Name, name)
+			if !ok {
+				continue
 			}
+			// AN INFERRED TYPE IS SPELLED AS GO SOURCE, THROUGH THE RENDERER THIS
+			// PACKAGE ALREADY HAS. types.Type.String renders a named type by its
+			// full import path, so a type declared in the generated package comes
+			// back as example.com/app.Order and splicing it produces a file that
+			// does not parse. Types.spell answers exactly this question for
+			// PayloadOfRef, under a qualifier returning the empty string for the
+			// generated package; a second renderer for one rule is a duplicate.
+			if facts.Types == nil {
+				continue
+			}
+			out[n.Name] = facts.Types.spell(typ)
 		}
 	}
 

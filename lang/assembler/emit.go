@@ -32,6 +32,9 @@ type Request struct {
 	Source string
 	// Types is the loaded package set's view, or nil when none was loaded.
 	Types *Types
+	// Registrations are the gob registrations this file's package must emit,
+	// already deduplicated and sorted by the driver.
+	Registrations []Registration
 }
 
 // generatedMarker is line 1 of every emitted file, exactly.
@@ -82,14 +85,22 @@ func Generate(req Request) (Generated, []Diagnostic) {
 	}
 	e.header(source)
 	e.packageClause(cfg, plans)
-	e.imports(file, plans)
+	e.imports(file, plans, req.Registrations)
 	e.writeln(preamble)
 	e.synthesized()
 	e.verbatimFuncs(file)
 	e.declarations(file)
+	e.registrations(req.Registrations)
 	// The synthesis slice is built per PROGRAM in the same order the plans are,
 	// so a plan takes the derivation belonging to its own flow.
+	//
+	// AN EMBEDDED PLAN IS SKIPPED WHOLE — no wiring function, no ingest struct, no
+	// handle declarations. It is a signature-carrying flow, which is inlined into
+	// its consumers; wiring one on its own emits a body reading an unbound `in`.
 	for i, plan := range plans {
+		if plan.Embedded {
+			continue
+		}
 		var s *synthesis
 		if i < len(e.synth) {
 			s = e.synth[i]
@@ -134,10 +145,18 @@ func (e *emitter) synthesize(req Request) []Diagnostic {
 	return e.diags
 }
 
-// anyPlanCheckpoints reports whether any flow in the file carries a checkpoint.
+// anyPlanCheckpoints reports whether any EMITTED flow in the file carries a
+// checkpoint.
+//
+// IT ASKS ABOUT THE EMITTED SET RATHER THAN THE LOWERED ONE, because its single
+// consumer is the conditional "fmt" import and only a wiring function uses fmt.
+// An embedded plan gets no wiring function, so counting one here would import fmt
+// for a file that never references it — and an unused import does not compile. A
+// checkpoint inside an embedded flow still reaches this answer through the
+// CONSUMER whose plan inlined it.
 func anyPlanCheckpoints(plans []*Plan) bool {
 	for _, plan := range plans {
-		if planCheckpoints(plan) {
+		if !plan.Embedded && planCheckpoints(plan) {
 			return true
 		}
 	}
@@ -245,10 +264,19 @@ func flowNames(plans []*Plan) string {
 //
 // fmt IS CONDITIONAL. It is needed only by the Wire-time journal refusal, which
 // only a checkpointing flow emits, and an unused import does not compile.
-func (e *emitter) imports(file *ast.File, plans []*Plan) {
+//
+// encoding/gob IS CONDITIONAL ON THE SAME TERMS, and for the same reason: it is
+// referenced only by the registration init below, so a file needing no
+// registration carries neither an empty init nor an unused import.
+func (e *emitter) imports(file *ast.File, plans []*Plan, regs []Registration) {
 	e.writeln("import (")
-	if anyPlanCheckpoints(plans) {
-		e.writeln("\t\"fmt\"")
+	if anyPlanCheckpoints(plans) || len(regs) > 0 {
+		if len(regs) > 0 {
+			e.writeln("\t\"encoding/gob\"")
+		}
+		if anyPlanCheckpoints(plans) {
+			e.writeln("\t\"fmt\"")
+		}
 		e.writeln("")
 	}
 	e.writeln("\t" + runtimeImport)
@@ -277,6 +305,36 @@ func quotedPath(path string) string {
 	}
 
 	return `"` + path + `"`
+}
+
+// registrations writes the gob registrations the serialization derivation
+// required, one per line inside a single init.
+//
+// AN init RATHER THAN A Wire PREAMBLE, and the difference is observable. A
+// registration is a property of the PACKAGE: the same type may cross a boundary
+// in two flows, a host may wire one flow and decode a checkpoint written by
+// another, and gob consults its registry the first time it meets an interface
+// slot rather than when anything was wired. An init runs once at package load
+// whatever the host calls; a preamble registers only what the host happened to
+// wire, which is a registry that depends on call order.
+//
+// THE VALUE IS *new(T) RATHER THAN T{}, because a declared spelling is not always
+// a composite-literal shape — a pointer, a slice of a named type and a generic
+// instantiation are all legal declarations and only one of them takes braces.
+func (e *emitter) registrations(regs []Registration) {
+	if len(regs) == 0 {
+		return
+	}
+
+	e.writeln("// init registers every type the serialization derivation found at an interface")
+	e.writeln("// site, so the gob decoder can reconstruct it by name. It runs once at package")
+	e.writeln("// load, whatever the host wires and in whatever order.")
+	e.writeln("func init() {")
+	for _, reg := range regs {
+		e.writeln("\tgob.Register(*new(" + reg.Spelling + "))")
+	}
+	e.writeln("}")
+	e.writeln("")
 }
 
 // verbatimFuncs writes the func declarations the .flow source carried, pasted

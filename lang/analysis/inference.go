@@ -18,37 +18,53 @@ import (
 	"github.com/whitaker-io/machine/lang/loader"
 )
 
-// environment is one FLOW FILE's import set expressed as a Go scope a spelling
-// can be evaluated in.
+// environment is the pair of REAL SCOPES one flow file's spellings are evaluated
+// in: the package the generated code joins, and the flow file's own import set.
 //
-// THE PROBLEM IT SOLVES: a flow file's Go reference must be evaluated under THAT
-// FILE'S imports, and no Go package with that import set exists anywhere on disk.
-// Resolving `stripe.IsPayment` against the package that DECLARES stripe refuses
-// with `undefined: stripe`, because inside its own package a package name is not
-// in scope. The route that works is to build a synthetic package holding one
-// types.PkgName per import the flow file declared, and evaluate the verbatim
-// spelling there.
+// THE FIRST SCOPE IS THE ORDINARY SHAPE. A .flow's commonest reference is a BARE
+// name for a Go func declared beside it, and that func lives in the package the
+// generated file joins. Nothing but that package's own scope holds it, which is
+// why evaluating only against the file's imports reported every such reference
+// undefined.
+//
+// THE SECOND SCOPE SOLVES A DIFFERENT PROBLEM, and it is why both are kept: a
+// flow file's QUALIFIED reference must be evaluated under THAT FILE'S imports,
+// and no Go package with that import set exists anywhere on disk. Resolving
+// `stripe.IsPayment` against the package that DECLARES stripe refuses with
+// `undefined: stripe`, because inside its own package a package name is not in
+// scope. The route that works is a synthetic package holding one types.PkgName
+// per import the flow file declared. A .flow may also import a module the Go
+// package beside it does not, so this is a DIFFERENT REAL SCOPE rather than a
+// weaker one.
+//
+// THERE IS NO THIRD, EMPTY SCOPE. When neither holds the name the reference is
+// refused naming BOTH attempts, rather than falling back to a scope that can only
+// answer for the universe.
 //
 // One environment is built per FILE rather than per node: construction costs
 // ~692ns against a ~1.7µs simple evaluation, and the memo makes repeated
 // spellings free — the corpus repeats them heavily.
 type environment struct {
-	pkg  *types.Package
-	fset *token.FileSet
-	memo map[string]types.Type
+	pkgs    *loader.Packages
+	pkgPath string
+	pkg     *types.Package
+	fset    *token.FileSet
+	memo    map[string]types.Type
 }
 
-// newEnvironment builds one file's evaluation scope from its import declarations.
+// newEnvironment builds one file's two evaluation scopes.
 //
 // An import naming a package the loader never loaded, or one whose scope declares
 // nothing, binds NOTHING rather than binding a guess: the reference that needed it
 // then refuses by name downstream, which is a reported refusal instead of a wrong
 // type presented as an answer.
-func newEnvironment(pkgs *loader.Packages, file *FileSymbols) *environment {
+func newEnvironment(pkgs *loader.Packages, pkgPath string, file *FileSymbols) *environment {
 	env := &environment{
-		pkg:  types.NewPackage(syntheticPath, syntheticName),
-		fset: token.NewFileSet(),
-		memo: map[string]types.Type{},
+		pkgs:    pkgs,
+		pkgPath: pkgPath,
+		pkg:     types.NewPackage(syntheticPath, syntheticName),
+		fset:    token.NewFileSet(),
+		memo:    map[string]types.Type{},
 	}
 
 	for _, imp := range file.Imports {
@@ -103,27 +119,64 @@ func packageOf(pkgs *loader.Packages, path string) (*types.Package, bool) {
 	return obj.Pkg(), true
 }
 
-// eval resolves one verbatim spelling in this file's environment, memoized.
+// eval resolves one verbatim spelling in this file's two real scopes, memoized.
 //
-// BOTH REFUSALS NAME THE SPELLING and neither hands back a type beside a nil
-// error. types.Eval reports an invalid type for a spelling it cannot make sense
-// of, and a caller cannot tell that shape from a real answer — which is what
-// makes returning it a defect rather than a convenience.
+// THE REAL PACKAGE IS ASKED FIRST, through the loader's own Packages.Resolve —
+// the single go/types owner. Resolve evaluates at each file's scope of that
+// package, so a qualified spelling reaches that package's own imports too, and it
+// REFUSES AN AMBIGUITY rather than picking one. Only when that does not answer is
+// the .flow file's own import scope asked.
+//
+// A REFUSAL NAMES BOTH ATTEMPTS and never hands back a type beside a nil error.
+// types.Eval reports an invalid type for a spelling it cannot make sense of, and
+// a caller cannot tell that shape from a real answer — which is what makes
+// returning it a defect rather than a convenience.
 func (e *environment) eval(spelling string) (types.Type, error) {
 	if hit, ok := e.memo[spelling]; ok {
 		return hit, nil
 	}
 
+	resolved, pkgErr := e.inPackage(spelling)
+	if pkgErr == nil {
+		e.memo[spelling] = resolved
+
+		return resolved, nil
+	}
+
+	evaluated, importErr := e.inImports(spelling)
+	if importErr != nil {
+		return nil, fmt.Errorf("the reference %s does not resolve: in package %s, %w; in the file's own imports, %v",
+			spelling, e.pkgPath, pkgErr, importErr)
+	}
+
+	e.memo[spelling] = evaluated
+
+	return evaluated, nil
+}
+
+// inPackage resolves a spelling in the package the generated code joins.
+//
+// A NIL PACKAGE SET OR AN EMPTY PATH IS A REFUSAL, not a skip: the caller's next
+// attempt is a real scope too, and both failures are reported together.
+func (e *environment) inPackage(spelling string) (types.Type, error) {
+	if e.pkgs == nil || e.pkgPath == "" {
+		return nil, errors.New("no package set was supplied to resolve it against")
+	}
+
+	return e.pkgs.Resolve(e.pkgPath, spelling)
+}
+
+// inImports resolves a spelling in the synthetic package holding the .flow file's
+// own imports.
+func (e *environment) inImports(spelling string) (types.Type, error) {
 	evaluated, err := types.Eval(e.fset, e.pkg, token.NoPos, spelling)
 	if err != nil {
-		return nil, fmt.Errorf("the reference %s does not resolve: %w", spelling, err)
+		return nil, err
 	}
 
 	if evaluated.Type == nil || evaluated.Type == types.Typ[types.Invalid] {
-		return nil, errors.New("the reference " + spelling + " resolves to no type")
+		return nil, errors.New("it resolves to no type")
 	}
-
-	e.memo[spelling] = evaluated.Type
 
 	return evaluated.Type, nil
 }
@@ -287,7 +340,13 @@ func (in *inference) typeFor(node *GraphNode) (types.Type, bool) {
 	resolved, resolvable := in.resolved(node)
 
 	switch node.Kind {
-	case kindSource, kindTransform:
+	case kindSource:
+		if !resolvable {
+			return nil, false
+		}
+
+		return in.sourcePayload(node, carried(resolved))
+	case kindTransform:
 		if !resolvable {
 			return nil, false
 		}
@@ -298,6 +357,69 @@ func (in *inference) typeFor(node *GraphNode) (types.Type, bool) {
 	default:
 		return in.passedThrough(node)
 	}
+}
+
+// sourcePayload is the DATUM a source delivers, which is what the table records
+// for it.
+//
+// A SOURCE IS TYPED BY WHAT FLOWS, NOT BY WHAT CONSTRUCTS THE TRANSPORT. The
+// transport factory's type is an artifact of construction — the runtime calls the
+// factory once and nothing downstream ever receives one — so machine.EdgeFactory[T]
+// is unwrapped to T and the table keeps ONE meaning per name: the datum type.
+// Recording the factory type instead makes a source and its own transform read as
+// a type disagreement, which is exactly what the fan-in check then reports.
+//
+// AN EXPRESSION THAT IS NOT AN EdgeFactory INSTANTIATION IS REPORTED at its own
+// position, naming what it was constructed from. It is never left silently
+// untyped: a source the runtime has no transport for is a defect the author wants
+// told about, and an absent entry reads to a consumer exactly like a name nobody
+// asked about.
+func (in *inference) sourcePayload(node *GraphNode, yielded types.Type) (types.Type, bool) {
+	if yielded == nil {
+		return nil, false
+	}
+
+	payload, ok := edgeFactoryPayload(yielded)
+	if !ok {
+		in.refuse(node, errors.New("a source delivers the datum inside its transport, and "+
+			types.TypeString(yielded, nil)+" is not a "+machinePath+"."+edgeFactoryName+" instantiation"))
+
+		return nil, false
+	}
+
+	return payload, true
+}
+
+// machinePath and edgeFactoryName identify the runtime's transport factory.
+const (
+	machinePath     = "github.com/whitaker-io/machine/v4"
+	edgeFactoryName = "EdgeFactory"
+)
+
+// edgeFactoryPayload unwraps machine.EdgeFactory[T] to T.
+//
+// THE MATCH IS ON THE DECLARED OBJECT — package path and name — rather than on
+// the type's shape or its spelling, and both alternatives are wrong in a way that
+// compiles. EdgeFactory is declared as a FUNC TYPE, so a structural match would
+// accept any func of that shape from anywhere; a text match on the rendered name
+// would accept an EdgeFactory declared in some other package entirely.
+func edgeFactoryPayload(typ types.Type) (types.Type, bool) {
+	named, ok := types.Unalias(typ).(*types.Named)
+	if !ok {
+		return nil, false
+	}
+
+	obj := named.Obj()
+	if obj == nil || obj.Name() != edgeFactoryName || obj.Pkg() == nil || obj.Pkg().Path() != machinePath {
+		return nil, false
+	}
+
+	args := named.TypeArgs()
+	if args == nil || args.Len() != 1 {
+		return nil, false
+	}
+
+	return args.At(0), true
 }
 
 // resolved evaluates a node's reference when it carries one, reporting a refusal.
@@ -442,12 +564,16 @@ const inferenceDoc = "typeinference resolves every node's Go reference to a real
 // needs is owned by the caller above both modules, and loader.Load is seconds of
 // work called ONCE per generation run. All() therefore still returns twelve, and
 // the shipped-roster test pins that.
-func TypeInferenceAnalyzer(pkgs *loader.Packages) *Analyzer {
+// pkgPath names the package every bare reference is resolved against, which is
+// the package the generated code joins — matching SerializationAnalyzer's second
+// argument exactly, so the two constructed analyzers cannot disagree about the
+// scope they read in.
+func TypeInferenceAnalyzer(pkgs *loader.Packages, pkgPath string) *Analyzer {
 	return &Analyzer{
 		Name:       inferenceName,
 		Doc:        inferenceDoc,
 		Requires:   []*Analyzer{SymbolsAnalyzer, FlowgraphAnalyzer},
-		Run:        func(p *Pass) (any, error) { return runInference(p, pkgs) },
+		Run:        func(p *Pass) (any, error) { return runInference(p, pkgs, pkgPath) },
 		ResultType: reflect.TypeOf((*InferredTypes)(nil)),
 	}
 }
@@ -497,14 +623,16 @@ func (t *InferredTypes) Flows() []string { return t.order }
 //
 // A NIL PACKAGE SET IS REFUSED rather than yielding an empty table beside a nil
 // error, which a caller cannot tell from a run that inferred nothing.
-func BuildInferredTypes(srcs []Source, pkgs *loader.Packages) (*InferredTypes, []Diagnostic, error) {
+// IT TAKES THE SAME pkgPath THE CONSTRUCTOR DOES, so the two entry points into
+// this analysis cannot disagree about which package a bare reference resolves in.
+func BuildInferredTypes(srcs []Source, pkgs *loader.Packages, pkgPath string) (*InferredTypes, []Diagnostic, error) {
 	if pkgs == nil {
 		return nil, nil, fmt.Errorf("type inference: %w", errNoPackages)
 	}
 
 	var table *InferredTypes
 
-	inference := TypeInferenceAnalyzer(pkgs)
+	inference := TypeInferenceAnalyzer(pkgs, pkgPath)
 	capture := &Analyzer{
 		Name:     "typeinference-capture",
 		Doc:      "captures the inferred type table out of one driver run",
@@ -538,7 +666,7 @@ func BuildInferredTypes(srcs []Source, pkgs *loader.Packages) (*InferredTypes, [
 // TypeInferenceAnalyzer is exported and a caller may hand the constructed
 // analyzer straight to Run. Inferring nothing quietly would be a silently
 // degraded lane rather than an answer.
-func runInference(p *Pass, pkgs *loader.Packages) (any, error) {
+func runInference(p *Pass, pkgs *loader.Packages, pkgPath string) (any, error) {
 	if pkgs == nil {
 		return nil, fmt.Errorf("type inference: %w", errNoPackages)
 	}
@@ -559,10 +687,21 @@ func runInference(p *Pass, pkgs *loader.Packages) (any, error) {
 
 	table := &InferredTypes{flows: map[string]map[string]types.Type{}}
 	for f := range symbols.Files {
-		inferFile(p, pkgs, fileRun{symbols: &symbols.Files[f], graphs: &graphs.Files[f]}, table)
+		inferFile(p, scope{pkgs: pkgs, pkgPath: pkgPath},
+			fileRun{symbols: &symbols.Files[f], graphs: &graphs.Files[f]}, table)
 	}
 
 	return table, nil
+}
+
+// scope pairs the loaded package set with the package path every bare reference
+// resolves against.
+//
+// The two travel together everywhere and the pinned linter caps a signature at
+// five arguments, so they are one value rather than two.
+type scope struct {
+	pkgs    *loader.Packages
+	pkgPath string
 }
 
 // fileRun pairs one file's symbol table with its derived graphs.
@@ -576,8 +715,8 @@ type fileRun struct {
 }
 
 // inferFile builds one environment for the file and infers each of its flows.
-func inferFile(p *Pass, pkgs *loader.Packages, file fileRun, table *InferredTypes) {
-	env := newEnvironment(pkgs, file.symbols)
+func inferFile(p *Pass, in scope, file fileRun, table *InferredTypes) {
+	env := newEnvironment(in.pkgs, in.pkgPath, file.symbols)
 
 	for i := range file.symbols.Flows {
 		flow := &file.symbols.Flows[i]

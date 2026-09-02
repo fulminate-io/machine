@@ -1,0 +1,4 @@
+# The bindable-output fact lang/analysis exports for the embedded subflow. The
+# `use` in this fixture binds both names, so both are declared here; the
+# consuming flow needs no entry because nothing embeds it.
+screening=ok,bad

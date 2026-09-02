@@ -101,7 +101,7 @@ func TestTheAnalyzerRefusesWithoutAPackageSet(t *testing.T) {
 		analyzer *Analyzer
 	}{
 		{"serialization", SerializationAnalyzer(nil, serializationPkg)},
-		{"type inference", TypeInferenceAnalyzer(nil)},
+		{"type inference", TypeInferenceAnalyzer(nil, "")},
 	}
 
 	for _, one := range refusals {

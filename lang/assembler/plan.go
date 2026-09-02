@@ -151,6 +151,24 @@ type Plan struct {
 	// Ingests are the typed ingest closures Wire returns, one per source
 	// statement, in the source's own declaration order.
 	Ingests []Ingest
+	// Embedded marks a flow that is INLINED INTO ITS CONSUMERS AND NEVER WIRED
+	// ON ITS OWN, which is every flow declaring a signature.
+	//
+	// IT IS SET BECAUSE THE ALTERNATIVE DOES NOT COMPILE. A signature-carrying
+	// flow's body consumes an implicit `in`, and that datum has no producer in
+	// the flow's own graph — nothing inside it declares the name. A standalone
+	// wiring function for one therefore emits a body reading a free `in`, and
+	// the generated package fails to compile with `undefined: in`. The flow is
+	// still LOWERED, so its own diagnostics are still produced; only its
+	// emission is skipped.
+	//
+	// WHY NOT A Wire THAT TAKES ITS INPUT: inline.go's landed rationale is that a
+	// function per subflow would have to SPELL each output's Go type in its
+	// signature, which this package does not know. A signature-carrying flow does
+	// declare those types, so that alternative is constructible — it was weighed
+	// and rejected, because it adds a second exported shape to the generated
+	// contract for a flow whose only reachable use is to be embedded.
+	Embedded bool
 }
 
 // Ingest is one source statement's exported ingest closure.

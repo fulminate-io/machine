@@ -61,8 +61,18 @@ type Driver struct {
 	// Boundary is the per-flow bindable-output fact.
 	Boundary map[string]Boundary
 	// PackagePath is the import path of the package the generated files belong
-	// to, which is the scope every type spelling is resolved in.
+	// to, which is the scope every type spelling is resolved in. EMPTY selects
+	// the derivation from the output directory's enclosing go.mod.
 	PackagePath string
+	// Disclose receives the analysis findings that do NOT refuse the run.
+	//
+	// A LIBRARY CALLER LEAVING IT NIL IS CHOOSING NOT TO SEE THEM, and nothing
+	// else in this package reads them. They are handed out rather than dropped
+	// because the analyzers already paid to compute them; they are handed out
+	// rather than refused on because the module's own vocabulary calls a warning
+	// "suspicious but not provably wrong" and a hint "an observation an author
+	// may reasonably ignore", and refusing on those refuses legal programs.
+	Disclose func(diags []Diagnostic)
 	// Observe reports the live count of concurrent file emissions, so the
 	// declared ceiling is OBSERVABLE rather than asserted. Production passes nil.
 	Observe func(live int)
@@ -73,6 +83,12 @@ type Driver struct {
 // THE ORDER IS THE COST MODEL. Per-file work is concurrent and bounded; the
 // package load is ONE call for the whole run; then the facts are read, then one
 // synthesis and emission pass, then one atomic rename.
+//
+// THE ANALYSIS GATE RUNS BETWEEN THE LOAD AND THE EMISSION, and it is the same
+// contract runChecks carries one step earlier: a refusal returns before anything
+// is staged. What it refuses on is analysis's SeverityError alone; findings below
+// that line reach Disclose rather than the exit status, because refusing on a
+// warning or a hint would refuse programs the language calls legal.
 //
 // REGENERATION IS ALWAYS WHOLE. Every previously generated file in the output
 // directory is removed before the new set is put in place, so a deleted .flow
@@ -93,17 +109,34 @@ func (d *Driver) Generate(inputDir, outputDir string) error {
 	if diags := d.runChecks(sources); len(diags) != 0 {
 		return &Error{Diagnostics: diags}
 	}
-
-	pkgs, err := d.load(inputDir)
+	// THE OUTPUT DIRECTORY IS CREATED BEFORE THE PATH IS DERIVED, because the
+	// derivation reads it: a first run into a directory that does not exist yet
+	// would otherwise have nothing to walk upward from. commit creates it too and
+	// MkdirAll is idempotent, so this hoist adds a directory and removes nothing.
+	if mkErr := os.MkdirAll(outputDir, 0o750); mkErr != nil {
+		return fmt.Errorf("creating %s: %w", outputDir, mkErr)
+	}
+	pkgPath, err := d.packagePath(outputDir)
 	if err != nil {
 		return err
 	}
-	facts := Facts{
-		Boundary: d.Boundary,
-		Inferred: d.Inferred,
+
+	pkgs, err := d.load(inputDir, loadPatterns(pkgPath, sources))
+	if err != nil {
+		return err
+	}
+	facts, refused, err := d.facts(sources, pkgs, pkgPath)
+	if err != nil {
+		return err
+	}
+	// THE REFUSAL IS BEFORE ANY FILE IS WRITTEN, which is the contract runChecks
+	// already carries and the reason neither can move after emission: a rejected
+	// program left on disk compiles.
+	if len(refused) != 0 {
+		return &Error{Diagnostics: refused}
 	}
 	if pkgs != nil {
-		facts.Types = NewTypes(pkgs, d.PackagePath, map[int]ast.Position{})
+		facts.Types = NewTypes(pkgs, pkgPath, map[int]ast.Position{})
 	}
 
 	generated, err := d.emitAll(sources, facts)
@@ -112,6 +145,135 @@ func (d *Driver) Generate(inputDir, outputDir string) error {
 	}
 
 	return d.commit(outputDir, generated)
+}
+
+// facts gathers the answers this package consumes and never derives.
+//
+// A NIL PACKAGE SET ANSWERS WITH THE CALLER'S OWN FACTS and no diagnostics. That
+// is what keeps a test driving the Driver with a counting loader working: it has
+// no packages to analyze and supplies the one fact its rule is about.
+//
+// OTHERWISE THE ANALYSIS RUN ANSWERS, AND A CALLER-SUPPLIED FACT WINS PER FACT. A
+// non-nil Boundary replaces the gate's boundary map and a non-nil Inferred
+// replaces its table, each independently. A test injects ONE fact to drive ONE
+// rule; production injects nothing and every fact comes from the single run.
+func (d *Driver) facts(sources []Source, pkgs *loader.Packages, pkgPath string) (Facts, []Diagnostic, error) {
+	if pkgs == nil {
+		return Facts{Boundary: d.Boundary, Inferred: d.Inferred}, nil, nil
+	}
+
+	facts, refused, disclosed, err := gate(sources, pkgs, pkgPath)
+	if err != nil {
+		return Facts{}, nil, err
+	}
+	if d.Disclose != nil && len(disclosed) != 0 {
+		d.Disclose(disclosed)
+	}
+	if d.Boundary != nil {
+		facts.Boundary = d.Boundary
+	}
+	if d.Inferred != nil {
+		facts.Inferred = d.Inferred
+	}
+
+	return facts, refused, nil
+}
+
+// packagePath answers the import path the generated files belong to.
+//
+// A CALLER WHO SAYS WHICH PACKAGE IT IS GENERATING IS BELIEVED, and everything
+// else derives. Production sets nothing and the derivation answers; a test, and
+// the -pkgpath flag, exist for the case the derivation cannot serve — generating
+// into a directory whose enclosing module is not the one the generated code will
+// be compiled in.
+//
+// IT READS THE OUTPUT DIRECTORY, because PackagePath is the import path of the
+// package the generated files belong to and that is where they are written. For
+// flowc's own defaults, and for every fixture in this repository, the input and
+// output directories are the same one.
+//
+// THE RESULT IS RETURNED RATHER THAN WRITTEN BACK to the field, so a Driver
+// reused across two output directories does not carry the first one's answer
+// into the second.
+func (d *Driver) packagePath(outputDir string) (string, error) {
+	if d.PackagePath != "" {
+		return d.PackagePath, nil
+	}
+
+	return DerivePackagePath(outputDir)
+}
+
+// loadPatterns names everything the run's SINGLE load has to resolve.
+//
+// THREE THINGS, and each was observed missing before it was added:
+//
+//   - "./..." — the packages under the load root, which is where the Go symbols a
+//     flow references live.
+//   - THE GENERATED PACKAGE ITSELF. When the output directory is not the input
+//     one, "./..." rooted at the input directory does not reach the package the
+//     generated files belong to, and Resolve then refuses by name.
+//   - EVERY MODULE A .flow IMPORTS. A cross-module `use` names a flow in a module
+//     the consumer's GO code need not import at all, so "./..." indexes no package
+//     belonging to it and ResolveFlow refuses with `no loaded package has a module
+//     for import path ...` — a refusal that reads like a missing flow and is
+//     actually a missing load.
+//
+// THIS WIDENS ONE CALL RATHER THAN ADDING ONE. Loading is the seconds-scale
+// operation in this toolchain and the run still performs exactly one load.
+func loadPatterns(pkgPath string, sources []Source) []string {
+	patterns := []string{"./..."}
+	seen := map[string]bool{"./...": true}
+	add := func(pattern string) {
+		if pattern == "" || seen[pattern] {
+			return
+		}
+		seen[pattern] = true
+		patterns = append(patterns, pattern)
+	}
+	add(pkgPath)
+	for _, source := range sources {
+		for _, path := range importPaths(source.File) {
+			add(path)
+		}
+	}
+
+	return patterns
+}
+
+// importPaths maps each of a file's import QUALIFIERS to the path it names.
+//
+// THE QUALIFIER IS THE ALIAS WHEN ONE IS WRITTEN and the last segment of the path
+// otherwise, which is Go's own rule. Two callers need this mapping and they need
+// the same one: the load names every imported module as a pattern, and a dotted
+// `use` resolves its qualifier to the module the reference reaches.
+//
+// The parser keeps an import path WITH its quotes, so they are stripped here
+// rather than at each call site.
+func importPaths(file *ast.File) map[string]string {
+	out := map[string]string{}
+	if file == nil {
+		return out
+	}
+	for _, decl := range file.Decls {
+		imp, ok := decl.(ast.ImportDecl)
+		if !ok {
+			continue
+		}
+		path := strings.Trim(imp.Path, `"`)
+		if path == "" {
+			continue
+		}
+		qualifier := path
+		if at := strings.LastIndex(qualifier, "/"); at >= 0 {
+			qualifier = qualifier[at+1:]
+		}
+		if imp.Alias != nil {
+			qualifier = imp.Alias.Name
+		}
+		out[qualifier] = path
+	}
+
+	return out
 }
 
 // runChecks runs the pre-generation gate.
@@ -134,12 +296,17 @@ func (d *Driver) runChecks(sources []Source) []Diagnostic {
 // cache and says so — the lifetime of a load belongs to the caller — and this
 // driver is that caller. Loading is the seconds-scale operation in this
 // toolchain, so a per-unit call turns a one-off cost into a per-unit one.
-func (d *Driver) load(dir string) (*loader.Packages, error) {
+//
+// THE ROOT IS THE INPUT DIRECTORY, and that is measured rather than preferred:
+// the Go symbols a flow references live beside the .flow, and rooting the load at
+// the OUTPUT directory instead indexes no package at all when the two differ.
+// What the output directory contributes is a PATTERN, not a root.
+func (d *Driver) load(dir string, patterns []string) (*loader.Packages, error) {
 	load := d.Load
 	if load == nil {
 		load = loader.Load
 	}
-	pkgs, err := load(dir, []string{"./..."})
+	pkgs, err := load(dir, patterns)
 	if err != nil {
 		return nil, fmt.Errorf("loading the package set under %s: %w", dir, err)
 	}
@@ -170,7 +337,7 @@ func (*Driver) discover(dir string) ([]Source, error) {
 		if parseErr != nil {
 			return nil, fmt.Errorf("%s: %w", path, parseErr)
 		}
-		sources = append(sources, Source{Path: entry.Name(), File: file})
+		sources = append(sources, Source{Path: entry.Name(), Src: body, File: file})
 	}
 	// A STABLE ORDER, so a run over one directory produces one result.
 	sort.Slice(sources, func(i, j int) bool { return sources[i].Path < sources[j].Path })
@@ -305,6 +472,15 @@ func removeGenerated(dir string) error {
 // that way deliberately, so an editor maps an offset without re-scanning the
 // line. Do not "fix" it to runes when rendering: every consumer downstream reads
 // it as bytes.
+//
+// A NON-EMPTY d.Path WINS OVER THE CALLER'S file. A refusal this package raised
+// carries no Path and the caller's name is right; one that crossed in from the
+// analysis gate names the file that caused it, which may be any file in the run
+// or a dependency in another module entirely.
 func Render(file string, d Diagnostic) string {
+	if d.Path != "" {
+		file = d.Path
+	}
+
 	return fmt.Sprintf("%s:%d:%d: %s", file, d.Pos.Line, d.Pos.Col, d.Message)
 }

@@ -50,7 +50,7 @@ func inferFixture(t *testing.T, name string) (*InferredTypes, []Diagnostic) {
 
 	src := loadSource(t, filepath.Join(inferenceDir, name))
 
-	table, diags, err := BuildInferredTypes([]Source{src}, loadInferenceSubject(t))
+	table, diags, err := BuildInferredTypes([]Source{src}, loadInferenceSubject(t), "")
 	if err != nil {
 		t.Fatalf("the inference over %s failed: %v", name, err)
 	}
@@ -263,7 +263,7 @@ func TestShippedRosterIsExactlyTheTwelveRegisteredAnalyzersInOrder(t *testing.T)
 func TestBuildInferredTypesRefusesANilPackageSet(t *testing.T) {
 	src := loadSource(t, filepath.Join(inferenceDir, "Screening.flow"))
 
-	table, diags, err := BuildInferredTypes([]Source{src}, nil)
+	table, diags, err := BuildInferredTypes([]Source{src}, nil, "")
 	if err == nil {
 		t.Fatal("BuildInferredTypes accepted a nil package set instead of refusing it")
 	}

@@ -8,6 +8,8 @@
 // actually exercised rather than accidentally agreeing with a guess.
 package orders
 
+import machine "github.com/whitaker-io/machine/v4"
+
 // Order is what a flow ingests.
 type Order struct {
 	ID string
@@ -27,12 +29,17 @@ type Receipt struct {
 // Listen is the generic instantiation shape: a flow names it as
 // Listen[Order](":8080"), which is a CALL that has already been applied, so the
 // reference's type is the value it yields rather than a signature.
-func Listen[T any](addr string) T {
-	var zero T
-
+//
+// IT RETURNS THE TRANSPORT FACTORY RATHER THAN THE DATUM, which is the only shape
+// the runtime has a source for. A source's inferred type is the datum INSIDE its
+// factory, so this yields machine.EdgeFactory[T] and the inference unwraps it
+// back to T — leaving every assertion over this fixture reading orders.Order, as
+// it always did. Returning T directly declared a source the runtime has no
+// transport for and the assembler cannot generate from.
+func Listen[T any](addr string) machine.EdgeFactory[T] {
 	_ = addr
 
-	return zero
+	return func(string, machine.Report) (machine.Edge[T], error) { return nil, nil }
 }
 
 // Score is the ordinary two-result shape, whose second result is an error and is

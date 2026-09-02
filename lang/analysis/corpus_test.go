@@ -132,7 +132,7 @@ func TestAnalyzerDocsCarryTheirDisclosures(t *testing.T) {
 	// disclosures entirely while every other gate stayed green — which is exactly
 	// the silent gap this one exists to close. nil is safe: only Doc is read here,
 	// and it is a constant.
-	inference := TypeInferenceAnalyzer(nil)
+	inference := TypeInferenceAnalyzer(nil, "")
 	registered[inference.Name] = inference
 
 	// THE CONTROL. A registry-driven gate is exactly the shape that passes

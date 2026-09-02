@@ -48,6 +48,10 @@ func lowerProgram(
 	l := newLowering(p, cfg)
 	l.deps = deps
 	l.boundary = boundary
+	// A DECLARED SIGNATURE MAKES A FLOW EMBEDDED-ONLY. Its body consumes an
+	// implicit `in` that nothing in its own graph produces, so it is inlined into
+	// its consumers and never given a wiring function of its own.
+	l.plan.Embedded = p.Signature != nil
 	l.collectHandles(p, "")
 	if p.OnError != nil {
 		l.plan.OnError = p.OnError.Handler.Text
