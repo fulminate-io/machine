@@ -31,9 +31,12 @@ sink done audit.Store from charge
 ```
 
 `import`, `const`, `param` and `func` are file-level declarations. `note`,
-`state`, `var` and a flow-level `on error` belong to a flow and must appear
-**before its first statement**; after a statement, a line beginning with `note`
-or `on` is that statement's own clause.
+`state`, `var` and a flow-level `on error` belong to a flow. A `note` or an
+`on error` must come **before the flow's first statement** to be read as the
+flow's own: written after one, a line opening with `note` or `on` is that
+statement's clause instead. `state` and `var` carry no such rule — the parser
+accepts them anywhere in the body and attaches them to the flow wherever they
+sit — but by convention they are written at the top, as every file here is.
 
 A `func` is a declaration, not a node: it is legal anywhere at file level, it is
 hoisted, and a statement reaches it by bare name.
