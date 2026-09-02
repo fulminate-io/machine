@@ -161,6 +161,16 @@ type Program struct {
 	Nodes []Node
 	// Edges are the derived connections between them.
 	Edges []Edge
+	// InputTypes maps a node name to the Go type spelling of its input, supplied
+	// by the DRIVER rather than derived here.
+	//
+	// The generator needs it in exactly two places and derives it in neither: the
+	// explicit type argument on an idempotent marker, and the successor type a
+	// completion-anchored checkpoint's codec family is re-instantiated at. Both
+	// come from cross-module type inference that lives above this package, so
+	// this map is how that fact arrives. An absent entry is reported, never
+	// guessed.
+	InputTypes map[string]string
 	// Start and Stop span the flow declaration.
 	Start ast.Position
 	Stop  ast.Position

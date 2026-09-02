@@ -319,3 +319,10 @@ func TestGraphWalksEveryStatementShape(t *testing.T) {
 		t.Errorf("the graph holds %d nodes (%v), want %d", len(program.Nodes), nodeNames(program), len(want))
 	}
 }
+
+// parseFlowSource parses a flow source and returns the parse error, if any. It
+// is the primitive the derived-name collision test uses to ask the PARSER
+// whether an identifier is writable rather than asserting it.
+func parseFlowSource(src string) (*ast.File, error) {
+	return ast.Parse([]byte(src))
+}
