@@ -164,9 +164,15 @@ func (l *lowering) node(n Node) {
 // source lowers a source: the one call that begins a chain, on the machine
 // rather than on a flow.
 func (l *lowering) source(n Node, options []string) {
-	results := []string{varOf(n.Name), varOf(n.Name) + "Ingest"}
+	// THE INGEST CLOSURE IS DISCARDED. Machine.Source returns a Flow and an
+	// Ingest[T]; the locked Wire signature exposes neither, so a source is driven
+	// by the transport its `over` clause names rather than fed programmatically.
+	// Whether a generated package should also EXPORT a typed Ingest is an open
+	// question on this plan, and binding it to a name nothing reads would not
+	// compile, so it is discarded explicitly rather than left dangling.
+	results := []string{varOf(n.Name), "_"}
 	l.append(Op{
-		Method: MethodSource, Receiver: machineVar, Results: results,
+		Method: MethodSource, Receiver: machineVar, Results: results, TypeArg: l.payloadType(n),
 		Node: n.Name, Ref: refOf(n), Options: options, Start: n.Start, Stop: n.Stop,
 	})
 	l.bind(n.Outputs, results[0])
@@ -257,7 +263,7 @@ func (l *lowering) switchChain(n Node, options []string) {
 		}
 		l.append(Op{
 			Method: MethodIf, Receiver: receiver, Results: []string{trueVar, falseVar},
-			Node: name, Ref: armPredicate(s, arm), Options: armOptions(options, k),
+			Node: name, Ref: armPredicate(l, n, s, arm), Options: armOptions(options, k),
 			Start: n.Start, Stop: n.Stop,
 		})
 		l.flowVar[arm.Target.Name] = trueVar
@@ -375,14 +381,22 @@ func refOf(n Node) string {
 	}
 }
 
-// armPredicate renders one switch arm's predicate over the switch subject.
-func armPredicate(s ast.SwitchStmt, arm ast.SwitchArm) string {
-	values := make([]string, 0, len(arm.Values))
-	for _, v := range arm.Values {
-		values = append(values, v.Text)
+// payloadType reads a node's declared input type spelling, reporting when the
+// driver supplied none.
+//
+// Machine.Source is the one builder call that cannot infer its payload type, so
+// an absent spelling is a refusal rather than a guess: emitting `any` there
+// would produce a machine whose whole flow is erased, which compiles.
+func (l *lowering) payloadType(n Node) string {
+	spelling, ok := l.program.InputTypes[n.Name]
+	if !ok || strings.TrimSpace(spelling) == "" {
+		l.diagf(n.Start, n.Stop,
+			"the source %q needs its payload type, which no type information supplies", n.Name)
+
+		return ""
 	}
 
-	return s.Subject.Text + " in " + strings.Join(values, ", ")
+	return spelling
 }
 
 // armOptions carries the statement's options onto the FIRST call of a chain

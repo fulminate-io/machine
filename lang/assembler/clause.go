@@ -68,9 +68,9 @@ func (l *lowering) lowerClause(n Node, clause string) []string {
 		// produces an option expression.
 		return nil
 	case "Reads":
-		return capabilityOption(readsHelper, n, n.Clauses.Reads)
+		return capabilityOption(capabilityHelper(n, readsHelperName, filterReadsHelper), n, n.Clauses.Reads)
 	case "Writes":
-		return capabilityOption(writesHelper, n, n.Clauses.Writes)
+		return capabilityOption(capabilityHelper(n, writesHelperName, filterWritesHelper), n, n.Clauses.Writes)
 	case "Over":
 		return spanOption("machine.WithEdge", n.Clauses.Over)
 	case "OnError":
@@ -81,6 +81,22 @@ func (l *lowering) lowerClause(n Node, clause string) []string {
 		return l.idempotentOption(n)
 	default:
 		return nil
+	}
+}
+
+// capabilityHelper picks the preamble helper whose signature matches the node's
+// own function shape.
+//
+// A BRANCH'S PREDICATE IS A Filter, NOT A Transformation, and a switch lowers to
+// a chain of the same. Passing a Filter to the Transformation-shaped helper does
+// not compile, so the choice is a property of the node's kind rather than a
+// stylistic one.
+func capabilityHelper(n Node, transformation, filter string) string {
+	switch n.Kind {
+	case KindBranch, KindSwitch:
+		return filter
+	default:
+		return transformation
 	}
 }
 
