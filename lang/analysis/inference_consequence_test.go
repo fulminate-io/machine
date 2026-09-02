@@ -5,9 +5,16 @@
 package analysis
 
 import (
+	"bytes"
+	"go/types"
+	"io/fs"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/whitaker-io/machine/lang/loader"
 )
 
 // The inference budget, structured on TestFullAnalysisBudget's so the two are
@@ -77,4 +84,142 @@ func TestInferenceBudget(t *testing.T) {
 	if mean > inferenceBudget {
 		t.Fatalf("mean inference %v exceeds the %v budget", mean, inferenceBudget)
 	}
+}
+
+// assertExportedAndSignatureLess pins the two properties that make a fixture the
+// SUBJECT of the retyping consequence rather than a counterexample to it.
+//
+// A signature-bearing flow is typed by its HEADER, so a dependency edit would not
+// reach it and observing one would prove the opposite of the point. An unexported
+// flow is nobody's dependency. Both are asserted rather than assumed, because a
+// later edit to the fixture could quietly remove either.
+func assertExportedAndSignatureLess(t *testing.T, src Source) {
+	t.Helper()
+
+	flow := firstFlow(t, src)
+	if name := flow.Name.Name; name == "" || strings.ToUpper(name[:1]) != name[:1] {
+		t.Fatalf("the subject flow %q is not exported, so it is nobody's dependency", name)
+	}
+	if flow.Signature != nil {
+		t.Fatalf("the subject flow %s declares a signature, so its header would type it and this "+
+			"observation would prove the opposite of the consequence", flow.Name.Name)
+	}
+}
+
+// copyTree copies a directory tree into dst, so a test edits a COPY and never the
+// checked-in fixture module.
+func copyTree(t *testing.T, src, dst string) {
+	t.Helper()
+
+	err := filepath.WalkDir(src, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, relErr := filepath.Rel(src, path)
+		if relErr != nil {
+			return relErr
+		}
+		target := filepath.Join(dst, rel)
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		body, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		return os.WriteFile(target, body, 0o644)
+	})
+	if err != nil {
+		t.Fatalf("copying the fixture module failed: %v", err)
+	}
+}
+
+// TestADependencyEditRetypesASignatureLessConsumer OBSERVES the ruling's accepted
+// consequence rather than describing it.
+//
+// A signature-less exported flow takes its types from its BODY, so an edit inside
+// a dependency it never mentions retypes it at the consumer's next generation.
+// That is the accepted cost of not declaring a header, and the signature header is
+// the author's opt-in contract against exactly this. If it did not hold — if the
+// inference cached or otherwise pinned a type so a dependency edit never reached
+// the consumer — the header's whole reason for existing would be unfounded, and no
+// other gate in this plan looks at it.
+//
+// EVERY CONTROL HERE IS LOAD-BEARING. The subject must be exported and
+// signature-less; the edit must be proven to have matched something, or the
+// re-measurement proves nothing; and the .flow bytes must be IDENTICAL across both
+// runs, which is what makes the retyping attributable to the DEPENDENCY rather
+// than to the flow.
+func TestADependencyEditRetypesASignatureLessConsumer(t *testing.T) {
+	path := filepath.Join(inferenceDir, "Screening.flow")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("cannot read the subject flow: %v", err)
+	}
+
+	src := loadSource(t, path)
+	assertExportedAndSignatureLess(t, src)
+
+	// THE CHECKED-IN FIXTURE IS NEVER MUTATED: the edit lands in a copy.
+	copied := t.TempDir()
+	copyTree(t, inferenceSubject, copied)
+
+	original, oerr := loader.Load(copied, []string{"./..."})
+	if oerr != nil {
+		t.Fatalf("the copied fixture module did not load: %v", oerr)
+	}
+	first, _, ferr := BuildInferredTypes([]Source{src}, original)
+	if ferr != nil {
+		t.Fatalf("the first inference failed: %v", ferr)
+	}
+	was, known := first.Name("Screening", "scored")
+	if !known {
+		t.Fatal("the subject name carries no type before the edit, so a change cannot be observed")
+	}
+
+	// THE DEPENDENCY-INTERNAL EDIT: Score now hands back a Receipt. The .flow file
+	// says nothing about either type.
+	pkgFile := filepath.Join(copied, "orderpkg", "v2", "orders.go")
+	body, rerr := os.ReadFile(pkgFile)
+	if rerr != nil {
+		t.Fatalf("cannot read the copied dependency: %v", rerr)
+	}
+	const oldSig = "func Score(o Order) (Scored, error) { return Scored{Order: o}, nil }"
+	const newSig = "func Score(o Order) (Receipt, error) { return Receipt{ID: o.ID}, nil }"
+	edited := strings.Replace(string(body), oldSig, newSig, 1)
+	if edited == string(body) {
+		t.Fatal("CONTROL FAILED: the dependency edit matched nothing, so re-measuring proves nothing")
+	}
+	if werr := os.WriteFile(pkgFile, []byte(edited), 0o644); werr != nil {
+		t.Fatalf("cannot write the edited dependency: %v", werr)
+	}
+
+	retyped, rlerr := loader.Load(copied, []string{"./..."})
+	if rlerr != nil {
+		t.Fatalf("the edited fixture module did not load: %v", rlerr)
+	}
+	second, _, serr := BuildInferredTypes([]Source{src}, retyped)
+	if serr != nil {
+		t.Fatalf("the second inference failed: %v", serr)
+	}
+	now, stillKnown := second.Name("Screening", "scored")
+	if !stillKnown {
+		t.Fatal("the subject name lost its type entirely after the edit")
+	}
+
+	// THE ATTRIBUTION CONTROL: the flow source did not move.
+	after, aerr := os.ReadFile(path)
+	if aerr != nil {
+		t.Fatalf("cannot re-read the subject flow: %v", aerr)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("the .flow source changed between the two runs, so the retyping is not attributable to the dependency")
+	}
+
+	if types.Identical(was, now) {
+		t.Fatalf("a dependency edit did NOT retype the signature-less consumer; it is still %s",
+			types.TypeString(was, nil))
+	}
+	t.Logf("a dependency-internal edit retyped the signature-less consumer: %s -> %s",
+		types.TypeString(was, nil), types.TypeString(now, nil))
 }

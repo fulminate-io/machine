@@ -422,13 +422,16 @@ const inferenceName = "typeinference"
 const inferenceDoc = "typeinference resolves every node's Go reference to a real types.Type through the " +
 	"loader's loaded packages and propagates those types along the derived flowgraph, reporting a " +
 	"fan-in whose inputs disagree over real type IDENTITY rather than over spellings. IT IS NOT " +
-	"REGISTERED AND THAT IS THE DESIGN: it is built by a constructor because it needs a " +
+	"REGISTERED and All() does not return it: it is built by a constructor because it needs a " +
 	"*loader.Packages the caller owns, and Pass has no channel for a caller-supplied value. " +
 	"Registering it would either force a Pass field change every consumer must answer for, or leave " +
-	"it silent whenever no package set was supplied, which is a silently degraded lane. THE EXPORTED " +
-	"SURFACE IS AN OPT-IN STABILITY CONTRACT: a caller that constructs this analyzer accepts that " +
-	"loading real packages costs seconds and is done once per run, not once per keystroke — the " +
-	"registered structural analyzers are what an editor runs. A reference that does not resolve is " +
+	"it silent whenever no package set was supplied, which is a silently degraded lane. THE ACCEPTED " +
+	"CONSEQUENCE, DISCLOSED RATHER THAN DISCOVERED: a signature-less exported flow takes its types " +
+	"from its BODY, so an edit inside a dependency it never mentions changes what it hands back, and " +
+	"every flow that binds those outputs is a retyped consumer at its next generation. That is the " +
+	"cost of not declaring a header, and the signature header is the author's OPT-IN STABILITY " +
+	"CONTRACT against exactly it: a flow that declares one is typed by what it promised rather than " +
+	"by what its dependencies currently happen to return. A reference that does not resolve is " +
 	"REPORTED and its name is left untyped; nothing here hands back a guess beside a nil error."
 
 // TypeInferenceAnalyzer builds the inference pass over a caller-supplied package

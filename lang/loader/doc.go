@@ -10,13 +10,20 @@
 // declares, and derives whether a type survives serialization at a given
 // position.
 //
-// IT IS THE ONLY MODULE HERE THAT IMPORTS go/types, go/importer OR
-// golang.org/x/tools, and that is a fenced property rather than a habit. A
-// go/types walk needs a type switch over types.Type, which the root module's
-// erasure gate forbids, and x/tools is barred from the root module's direct
-// requirements, which are OTel-only. Homing the loading surface in one module
-// keeps both true while giving every consumer one implementation to call
-// instead of one each.
+// IT IS THE ONLY MODULE HERE THAT LOADS AND TYPE-CHECKS PACKAGES: go/importer
+// and golang.org/x/tools are imported by this module and by no other, and that
+// is a fenced property rather than a habit. x/tools is barred from the root
+// module's direct requirements, which are OTel-only, and a go/types walk needs a
+// type switch over types.Type, which the root module's erasure gate forbids.
+// Homing the loading surface in one module keeps both true while giving every
+// consumer one implementation to call instead of one each.
+//
+// HOLDING A TYPE IS NOT LOADING ONE, and the fence separates them. lang/analysis
+// imports go/types to hold and evaluate the types this module hands back — a
+// consumer that receives a types.Type necessarily names it in its own signatures
+// — which is precisely the inference the WHAT IT DOES NOT DO paragraph below
+// delegates upward. It loads nothing itself, and the ownership census enforces
+// that split by name rather than by trust.
 //
 // LOADING IS THE EXPENSIVE OPERATION IN THIS WHOLE TOOLCHAIN — seconds, not
 // microseconds — so Load is called ONCE per generation run, over every package

@@ -114,12 +114,25 @@ func TestAnalyzerDocsCarryTheirDisclosures(t *testing.T) {
 		"resolve":      {"unimported-qualifier", "v82"},
 		"switches":     {"prove coverage"},
 		"errorrouting": {"not the enforcement"},
+		"typeinference": {
+			"IT IS NOT REGISTERED",
+			"retyped consumer",
+			"opt-in stability contract",
+		},
 	}
 
 	registered := map[string]*Analyzer{}
 	for _, a := range All() {
 		registered[a.Name] = a
 	}
+
+	// THE CONSTRUCTED ANALYZER IS SEEDED EXPLICITLY. typeinference is built by a
+	// constructor rather than registered, so a registry-only walk would skip its
+	// disclosures entirely while every other gate stayed green — which is exactly
+	// the silent gap this one exists to close. nil is safe: only Doc is read here,
+	// and it is a constant.
+	inference := TypeInferenceAnalyzer(nil)
+	registered[inference.Name] = inference
 
 	// THE CONTROL. A registry-driven gate is exactly the shape that passes
 	// vacuously, so an empty registry is a loud failure rather than a loop that
@@ -140,7 +153,11 @@ func TestAnalyzerDocsCarryTheirDisclosures(t *testing.T) {
 			}
 		}
 	}
-	t.Logf("checked %d disclosures across %d registered analyzers", len(required), len(registered))
+	// THE CENSUS LINE DISCLOSES THAT ITS POPULATION IS NOT All(). Without that
+	// clause a reader comparing this count against the registry is off by one and
+	// concludes the registry grew, which is the opposite of what this plan did.
+	t.Logf("checked %d disclosures across %d analyzers, one of them constructed rather than registered",
+		len(required), len(registered))
 }
 
 // corpusFiles lists a corpus directory's .flow sources, sorted.
