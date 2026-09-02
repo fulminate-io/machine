@@ -1,0 +1,119 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"sync"
+
+	machine "github.com/whitaker-io/machine/v4"
+)
+
+// Order is the payload the looping flow carries. Attempt is what MAKES THE LOOP
+// TERMINATE: it rises by one on every pass, and the branch predicate reads it.
+type Order struct {
+	ID      string
+	Attempt int
+}
+
+// attemptsBeforeDone is how many passes the datum makes before the branch routes
+// it out of the loop. The token asserts on this exact number, so a loop that ran
+// the wrong number of times fails rather than passing quietly.
+const attemptsBeforeDone = 3
+
+// loopCapacity buffers the one datum plus its re-entries, so a Send back into the
+// edge never blocks the node that issued it.
+const loopCapacity = attemptsBeforeDone + 1
+
+// Feed is the source transport. It pushes exactly ONE datum, so the attempt count
+// the token carries is unambiguously the loop's work rather than an artifact of
+// several data racing.
+//
+// IT MINTS DATA WITH machine.RebuildPacket, which is the exported packet
+// constructor: there is no exported path from a Frame to a Packet, so this is the
+// sanctioned way for a transport to produce one.
+func Feed() machine.EdgeFactory[Order] {
+	return func(node string, report machine.Report) (machine.Edge[Order], error) {
+		return &feedEdge{node: node, ch: make(chan machine.Packet[Order], loopCapacity)}, nil
+	}
+}
+
+type feedEdge struct {
+	node string
+	ch   chan machine.Packet[Order]
+	once sync.Once
+}
+
+func (e *feedEdge) Start(ctx context.Context) error {
+	e.once.Do(func() {
+		packet, err := machine.RebuildPacket(machine.FrameData{
+			ID:     "datum-0",
+			Source: e.node,
+			Node:   e.node,
+		}, Order{ID: "order-0"})
+		if err != nil {
+			return
+		}
+		e.ch <- packet
+	})
+
+	return nil
+}
+
+// Send is what the LOOP exercises. The generated Wire calls hold.Send(ingest), so
+// every re-entry arrives here and goes back onto the same channel the source
+// reads from.
+func (e *feedEdge) Send(ctx context.Context, packet machine.Packet[Order]) error {
+	select {
+	case e.ch <- packet:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (e *feedEdge) Receive() <-chan machine.Packet[Order] { return e.ch }
+
+func (e *feedEdge) Close() error { return nil }
+
+// Bump raises the datum's attempt counter. It is the loop's progress: without it
+// the branch below would route the same way forever.
+func Bump(f machine.Frame[Order]) Order {
+	out := f.Value()
+	out.Attempt++
+
+	return out
+}
+
+// Done is the branch predicate and the loop's TERMINATION CONDITION. True routes
+// the datum to finished and out of the loop; false routes it to retrying, which
+// is the outlet the send re-enters from.
+func Done(f machine.Frame[Order]) bool { return f.Value().Attempt >= attemptsBeforeDone }
+
+// Hold is the node the retrying outlet feeds and the one the send re-enters from.
+// It changes nothing: the construct under test is the re-entry, not a transform.
+func Hold(f machine.Frame[Order]) Order { return f.Value() }
+
+// Report is the sink. It prints the LOCKED TOKEN from the fixture's own code,
+// carrying the attempt count the loop produced.
+func Report(f machine.Frame[Order]) Order {
+	v := f.Value()
+	Emit(v.Attempt)
+
+	return v
+}
+
+// done is closed once the token has been printed, so main can exit on the datum
+// rather than on a timer.
+var done = make(chan struct{})
+
+var emitOnce sync.Once
+
+// Emit prints the locked token. The harness asserts on the running program's
+// stdout, so nothing but the flow actually looping and then leaving the loop can
+// produce it.
+func Emit(attempt int) {
+	emitOnce.Do(func() {
+		fmt.Printf("flow-loop: attempts=%d\n", attempt)
+		close(done)
+	})
+}

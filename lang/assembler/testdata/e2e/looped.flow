@@ -1,0 +1,32 @@
+flow looped
+note """
+The SECOND end-to-end fixture. It exists because the first one drives no loop and
+no send at run time, and step 5.2's construct list names both. Everything here is
+lowered by the generator, and the sink prints a locked token from its own func
+body so the assertion is on the PROGRAM's stdout rather than on the harness.
+
+THE LOOP TERMINATES, which is the whole reason this is a separate fixture rather
+than a clause added to the first. A loop is only runnable if something ends it:
+bump raises the datum's own Attempt counter on every pass, ready routes on that
+counter, and only the retrying outlet re-enters. The datum therefore makes
+exactly attemptsBeforeDone passes and then leaves through finished. A fixture
+whose loop did not terminate would hang rather than fail, which is the worst
+shape a test can have.
+
+THE SEND IS THE RE-ENTRY. `send hold -> again` merges hold's output back into the
+flow preceding the node the label feeds, so the datum re-enters at bump. That is
+the construct under test: it is what makes this a running proof of Flow.Send
+rather than of text the emitter produced.
+
+IT CARRIES NO checkpoint OR idempotent, for the same reason the first fixture
+does not: a checkpoint would pull a journal, and with it a raft dependency, into
+a test whose subject is the builder path.
+"""
+
+source ingest Feed()
+loop again
+transform bump Bump from ingest, again
+branch ready Done from bump -> finished, retrying
+transform hold Hold from retrying
+send hold -> again
+sink report Report from finished
