@@ -41,7 +41,9 @@ func lowerFile(programs []*Program, boundary map[string]Boundary, cfg Config) ([
 }
 
 // lowerProgram lowers one flow with its dependencies available.
-func lowerProgram(p *Program, deps map[string]*Program, boundary map[string]Boundary, cfg Config) (*Plan, []Diagnostic) {
+func lowerProgram(
+	p *Program, deps map[string]*Program, boundary map[string]Boundary, cfg Config,
+) (*Plan, []Diagnostic) {
 	l := newLowering(p, cfg)
 	l.deps = deps
 	l.boundary = boundary
@@ -222,7 +224,7 @@ func (l *lowering) inline(n Node, s ast.UseStmt, dep *Program) {
 }
 
 // rename namespaces one inlined node and every name it references.
-func (l *lowering) rename(n Node, instance string) Node {
+func (*lowering) rename(n Node, instance string) Node {
 	renamed := n
 	renamed.Name = instance + nameSep + n.Name
 	renamed.Inputs = prefixAll(n.Inputs, instance)

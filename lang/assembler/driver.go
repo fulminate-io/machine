@@ -150,7 +150,7 @@ func (d *Driver) load(dir string) (*loader.Packages, error) {
 //
 // Nothing marks a directory as flow-bearing, deliberately: a marker file is one
 // more thing to forget, and its absence would silently generate nothing.
-func (d *Driver) discover(dir string) ([]Source, error) {
+func (*Driver) discover(dir string) ([]Source, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", dir, err)
@@ -161,7 +161,7 @@ func (d *Driver) discover(dir string) ([]Source, error) {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
-		body, readErr := os.ReadFile(path) //nolint:gosec // the path comes from a directory walk the caller named.
+		body, readErr := os.ReadFile(path)
 		if readErr != nil {
 			return nil, fmt.Errorf("reading %s: %w", path, readErr)
 		}
@@ -195,29 +195,41 @@ func (d *Driver) emitAll(sources []Source, facts Facts) ([]Generated, error) {
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
-			mu.Lock()
-			live++
-			observed := live
-			mu.Unlock()
-			if d.Observe != nil {
-				d.Observe(observed)
-			}
-
-			out, diags := assembleOne(source, d.Config, facts)
-			results[i], failures[i] = out, diags
-
-			mu.Lock()
-			live--
-			mu.Unlock()
+			d.enter(&mu, &live)
+			results[i], failures[i] = assembleOne(source, d.Config, facts)
+			d.leave(&mu, &live)
 		}()
 	}
 	wg.Wait()
 
+	return collect(results, failures)
+}
+
+// enter records one emission starting and reports the live count.
+func (d *Driver) enter(mu *sync.Mutex, live *int) {
+	mu.Lock()
+	*live++
+	observed := *live
+	mu.Unlock()
+	if d.Observe != nil {
+		d.Observe(observed)
+	}
+}
+
+// leave records one emission finishing.
+func (*Driver) leave(mu *sync.Mutex, live *int) {
+	mu.Lock()
+	*live--
+	mu.Unlock()
+}
+
+// collect folds the per-file results into one answer.
+func collect(results []Generated, failures [][]Diagnostic) ([]Generated, error) {
 	var (
 		generated []Generated
 		diags     []Diagnostic
 	)
-	for i := range sources {
+	for i := range results {
 		diags = append(diags, failures[i]...)
 		if len(results[i].Source) > 0 {
 			generated = append(generated, results[i])
@@ -231,7 +243,7 @@ func (d *Driver) emitAll(sources []Source, facts Facts) ([]Generated, error) {
 }
 
 // commit writes the generated set atomically.
-func (d *Driver) commit(outputDir string, generated []Generated) error {
+func (*Driver) commit(outputDir string, generated []Generated) error {
 	if err := os.MkdirAll(outputDir, 0o750); err != nil {
 		return fmt.Errorf("creating %s: %w", outputDir, err)
 	}

@@ -47,7 +47,7 @@ func (l *lowering) ordered() []Op {
 // It loops because appending one Send can never satisfy another, but draining in
 // one pass would leave a Send behind whose target was declared earlier in the
 // same sweep.
-func drainSatisfied(out, pending []Op, declared map[string]bool) ([]Op, []Op) {
+func drainSatisfied(out, pending []Op, declared map[string]bool) (placed, waiting []Op) {
 	for {
 		moved := false
 		remaining := pending[:0:0]

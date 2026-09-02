@@ -55,11 +55,11 @@ func armPredicate(l *lowering, n Node, s ast.SwitchStmt, arm ast.SwitchArm) stri
 	}
 
 	var b strings.Builder
-	b.WriteString("func(f machine.Frame[" + spelling + "]) bool {\n")
-	b.WriteString("\t\t" + datum + " := f.Value()\n")
-	b.WriteString("\t\t_ = " + datum + "\n")
-	b.WriteString("\t\treturn " + strings.Join(conditions, " || ") + "\n")
-	b.WriteString("\t}")
+	_, _ = b.WriteString("func(f machine.Frame[" + spelling + "]) bool {\n")
+	_, _ = b.WriteString("\t\t" + datum + " := f.Value()\n")
+	_, _ = b.WriteString("\t\t_ = " + datum + "\n")
+	_, _ = b.WriteString("\t\treturn " + strings.Join(conditions, " || ") + "\n")
+	_, _ = b.WriteString("\t}")
 
 	return b.String()
 }

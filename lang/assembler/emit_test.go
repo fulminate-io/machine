@@ -34,7 +34,7 @@ func generateOf(t *testing.T, src string, types map[string]string, boundary map[
 	if len(lowerDiags) != 0 {
 		t.Fatalf("the fixture must lower clean:\n%s", strings.Join(messagesOf(lowerDiags), "\n"))
 	}
-	out, emitDiags := Generate(file, programs, plans, cfg, "pipeline.flow", nil)
+	out, emitDiags := Generate(Request{File: file, Programs: programs, Plans: plans, Config: cfg, Source: "pipeline.flow"})
 	if len(emitDiags) != 0 {
 		t.Fatalf("emission reported:\n%s\n--- source ---\n%s",
 			strings.Join(messagesOf(emitDiags), "\n"), out.Source)

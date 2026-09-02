@@ -51,7 +51,7 @@ func main() {
 	flag.Parse()
 
 	if *qualifier == "" {
-		fmt.Fprintln(os.Stderr, "flowc: -qualifier is required: it prefixes every process-global state "+
+		_, _ = fmt.Fprintln(os.Stderr, "flowc: -qualifier is required: it prefixes every process-global state "+
 			"handle name, and two programs sharing a prefix collide in the runtime's single namespace")
 		os.Exit(2)
 	}
@@ -73,12 +73,12 @@ func main() {
 func report(dir string, err error) {
 	var assembly *assembler.Error
 	if !asAssemblyError(err, &assembly) {
-		fmt.Fprintf(os.Stderr, "flowc: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "flowc: %v\n", err)
 
 		return
 	}
 	for _, d := range assembly.Diagnostics {
-		fmt.Fprintln(os.Stderr, assembler.Render(dir, d))
+		_, _ = fmt.Fprintln(os.Stderr, assembler.Render(dir, d))
 	}
 }
 

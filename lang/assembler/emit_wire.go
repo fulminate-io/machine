@@ -5,6 +5,7 @@
 package assembler
 
 import (
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -159,7 +160,20 @@ func (e *emitter) op(op Op, s *synthesis) {
 }
 
 // callText renders one op's Go call expression.
+//
+// IT REFUSES A METHOD OUTSIDE THE RUNTIME'S CLOSED VOCABULARY rather than writing
+// it. The lowering is what chooses methods and a cross-check gates that choice,
+// but emitting an unknown one would produce Go that does not compile against the
+// runtime, and saying so here names the op rather than leaving a build error
+// against a generated line.
 func (e *emitter) callText(op Op, s *synthesis) string {
+	if !slices.Contains(builderMethods, op.Method) {
+		e.diags = append(e.diags, diagnosticAt(op.Start, op.Stop,
+			"the op for %q calls %q, which is not one of the runtime's builder methods %v",
+			op.Node, op.Method, builderMethods))
+
+		return ""
+	}
 	args := e.argsOf(op, s)
 	if op.Method == MethodSource {
 		return "m.Source[" + op.TypeArg + "](\"" + op.Node + "\"" + args + ")"
@@ -169,7 +183,7 @@ func (e *emitter) callText(op Op, s *synthesis) string {
 }
 
 // argsOf renders an op's argument list, leading comma included.
-func (e *emitter) argsOf(op Op, s *synthesis) string {
+func (*emitter) argsOf(op Op, s *synthesis) string {
 	var parts []string
 	switch op.Method {
 	case MethodSend:

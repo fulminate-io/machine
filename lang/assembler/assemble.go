@@ -96,7 +96,10 @@ func assembleOne(source Source, cfg Config, facts Facts) (Generated, []Diagnosti
 		return Generated{}, lowerDiags
 	}
 
-	return Generate(source.File, programs, plans, cfg, source.Path, facts.Types)
+	return Generate(Request{
+		File: source.File, Programs: programs, Plans: plans,
+		Config: cfg, Source: source.Path, Types: facts.Types,
+	})
 }
 
 // nodeTypes resolves every node's input type spelling.
@@ -118,11 +121,55 @@ func nodeTypes(p *Program, facts Facts) map[string]string {
 			}
 		}
 	}
+	propagateTypes(p, out)
 	for name, spelling := range boundaryTypes(p, facts) {
 		out[name] = spelling
 	}
 
 	return out
+}
+
+// propagateTypes carries a payload type along the graph to the nodes that name
+// no Go function of their own.
+//
+// A TEE, A DROP AND A SEND APPLY NOTHING. The language says so — a tee is
+// route-only — so there is no signature to read a payload off, and their payload
+// is by definition whatever their input carries. Propagating along the declaring
+// input is not an inference: a route-only node cannot change the type, so its
+// producer's type IS its type.
+//
+// The walk repeats until it settles rather than assuming source order, because a
+// loop puts a consumer before its producer.
+func propagateTypes(p *Program, known map[string]string) {
+	producer := map[string]string{}
+	for _, n := range p.Nodes {
+		for _, out := range n.Outputs {
+			producer[out] = n.Name
+		}
+	}
+	for range len(p.Nodes) {
+		if settled := propagateOnce(p, known, producer); settled {
+			return
+		}
+	}
+}
+
+// propagateOnce carries the type one hop, reporting whether anything moved.
+func propagateOnce(p *Program, known, producer map[string]string) bool {
+	settled := true
+	for _, n := range p.Nodes {
+		if _, have := known[n.Name]; have || len(n.Inputs) == 0 {
+			continue
+		}
+		spelling, ok := known[producer[n.Inputs[0]]]
+		if !ok {
+			continue
+		}
+		known[n.Name] = spelling
+		settled = false
+	}
+
+	return settled
 }
 
 // boundaryTypes resolves a flow's BOUNDARY type spellings, by the THREE-WAY RULE

@@ -326,3 +326,14 @@ func TestGraphWalksEveryStatementShape(t *testing.T) {
 func parseFlowSource(src string) (*ast.File, error) {
 	return ast.Parse([]byte(src))
 }
+
+// lower is the single-flow lowering entry point.
+//
+// IT LIVES IN A TEST FILE ON PURPOSE. The production path is lowerFile, which
+// supplies the dependency set and the exported boundaries that a single flow
+// cannot carry; this one-flow convenience is reached only from tests, and the
+// module's linter reads no _test.go, so a production helper nothing production
+// calls is reported unused. The rule is that such a helper belongs here.
+func lower(p *Program) (*Plan, []Diagnostic) {
+	return lowerProgram(p, map[string]*Program{}, map[string]Boundary{}, Config{})
+}

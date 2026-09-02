@@ -1,0 +1,48 @@
+func Count(f machine.Frame[Order]) Order {
+  seen, _, err := f.Load(processed)
+  if err != nil {
+    panic(err)
+  }
+  if err := f.Save(processed, seen+1); err != nil {
+    panic(err)
+  }
+  f.Set(attempt, f.Get(attempt)+1)
+
+  out := f.Value()
+  out.Seen = seen + 1
+  return out
+}
+
+func Report(f machine.Frame[Order]) Order {
+  v := f.Value()
+  if v.Seen == 3 {
+    Emit(v.Seen)
+  }
+  return v
+}
+
+flow e2e
+note """
+The end-to-end fixture. It exists to prove the ticket's central claim by RUNNING:
+a compiled flow builds and runs against the machine runtime. Every construct here
+is one the generator lowers, and the sink prints a locked token from its own func
+body so the assertion is on the PROGRAM's stdout rather than on the harness.
+
+IT CARRIES NO checkpoint OR idempotent. Both clauses lower now, but whether this
+fixture should gain a checkpointed node is a decision that belongs with the
+ruling rather than with the fixture; a checkpoint would also pull a journal, and
+with it a raft dependency, into a test whose subject is the builder path.
+"""
+
+state {
+  processed int
+}
+var attempt int
+source ingest Feed()
+transform count Count from ingest
+  reads attempt, processed  writes attempt, processed
+branch route Interesting from count -> kept, dropped
+tee split from kept -> reported, audited
+sink emit Report from reported
+sink audit Audit from audited
+drop dropped

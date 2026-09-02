@@ -246,21 +246,26 @@ func (b *builder) diagf(start, end ast.Position, format string, args ...any) {
 func (b *builder) collect(stmt ast.Stmt) {
 	switch s := stmt.(type) {
 	case ast.SourceStmt:
-		b.addNode(node(s, KindSource, s.Name.Name, nil, []string{s.Name.Name}, s.Clauses))
+		b.addNode(node(s, KindSource, s.Name.Name, nameLists{in: nil, out: []string{s.Name.Name}}, s.Clauses))
 	case ast.TransformStmt:
-		b.addNode(node(s, KindTransform, s.Name.Name, fromNames(s.Clauses), []string{s.Name.Name}, s.Clauses))
+		b.addNode(node(s, KindTransform, s.Name.Name,
+			nameLists{in: fromNames(s.Clauses), out: []string{s.Name.Name}}, s.Clauses))
 	case ast.BranchStmt:
 		outs := []string{s.TrueTarget.Name, s.FalseTarget.Name}
-		b.addNode(node(s, KindBranch, s.Name.Name, fromNames(s.Clauses), outs, s.Clauses))
+		b.addNode(node(s, KindBranch, s.Name.Name,
+			nameLists{in: fromNames(s.Clauses), out: outs}, s.Clauses))
 	case ast.SwitchStmt:
-		b.addNode(node(s, KindSwitch, s.Name.Name, fromNames(s.Clauses), switchOutputs(s), s.Clauses))
+		b.addNode(node(s, KindSwitch, s.Name.Name,
+			nameLists{in: fromNames(s.Clauses), out: switchOutputs(s)}, s.Clauses))
 	case ast.TeeStmt:
-		b.addNode(node(s, KindTee, s.Name.Name, fromNames(s.Clauses), identNames(s.Targets), s.Clauses))
+		b.addNode(node(s, KindTee, s.Name.Name,
+			nameLists{in: fromNames(s.Clauses), out: identNames(s.Targets)}, s.Clauses))
 	case ast.SinkStmt:
-		b.addNode(node(s, KindSink, s.Name.Name, fromNames(s.Clauses), nil, s.Clauses))
+		b.addNode(node(s, KindSink, s.Name.Name, nameLists{in: fromNames(s.Clauses), out: nil}, s.Clauses))
 	case ast.UseStmt:
 		b.refuseDottedFlowRef(s)
-		b.addNode(node(s, KindUse, s.Instance.Name, fromNames(s.Clauses), identNames(s.Bindings), s.Clauses))
+		b.addNode(node(s, KindUse, s.Instance.Name,
+			nameLists{in: fromNames(s.Clauses), out: identNames(s.Bindings)}, s.Clauses))
 	default:
 		b.collectFlowControl(stmt)
 	}
@@ -275,10 +280,10 @@ func (b *builder) collectFlowControl(stmt ast.Stmt) {
 	switch s := stmt.(type) {
 	case ast.DropStmt:
 		name := s.Input.Name + derivedSep + "drop"
-		b.addNode(node(s, KindDrop, name, []string{s.Input.Name}, nil, ast.Clauses{}))
+		b.addNode(node(s, KindDrop, name, nameLists{in: []string{s.Input.Name}, out: nil}, ast.Clauses{}))
 	case ast.SendStmt:
 		name := s.Source.Name + derivedSep + "send"
-		n := node(s, KindSend, name, []string{s.Source.Name}, nil, ast.Clauses{})
+		n := node(s, KindSend, name, nameLists{in: []string{s.Source.Name}, out: nil}, ast.Clauses{})
 		b.addNode(n)
 	case ast.LoopStmt:
 		// A LOOP IS A LABEL, NOT A NODE. It applies nothing and carries no
@@ -292,17 +297,26 @@ func (b *builder) collectFlowControl(stmt ast.Stmt) {
 }
 
 // node builds one IR node from a statement and its resolved name lists.
-func node(stmt ast.Stmt, kind NodeKind, name string, in, out []string, clauses ast.Clauses) Node {
+func node(stmt ast.Stmt, kind NodeKind, name string, names nameLists, clauses ast.Clauses) Node {
 	return Node{
 		Name:    name,
 		Kind:    kind,
 		Stmt:    stmt,
-		Inputs:  in,
-		Outputs: out,
+		Inputs:  names.in,
+		Outputs: names.out,
 		Clauses: clauses,
 		Start:   stmt.Pos(),
 		Stop:    stmt.End(),
 	}
+}
+
+// nameLists pairs a node's consumed and published names.
+//
+// They travel together everywhere and are meaningless apart, and pairing them
+// keeps the constructor inside the module's five-argument limit without splitting
+// one node's construction across two calls.
+type nameLists struct {
+	in, out []string
 }
 
 // addNode records a node, its published names, and refuses a redeclaration.

@@ -41,15 +41,29 @@ const (
 // the held code path is kept under test with a synthetic member so it cannot rot
 // into a silent drop while unused.
 var clausePartition = map[string]clauseDisposition{
-	"From":       clauseLowered,
-	"Reads":      clauseLowered,
-	"Writes":     clauseLowered,
-	"Over":       clauseLowered,
-	"OnError":    clauseLowered,
-	"Note":       clauseLowered,
-	"Checkpoint": clauseLowered,
-	"Idempotent": clauseLowered,
+	clauseFrom:       clauseLowered,
+	clauseReads:      clauseLowered,
+	clauseWrites:     clauseLowered,
+	clauseOver:       clauseLowered,
+	clauseOnError:    clauseLowered,
+	clauseNote:       clauseLowered,
+	clauseCheckpoint: clauseLowered,
+	clauseIdempotent: clauseLowered,
 }
+
+// The clause names, spelled once. They are the FIELD NAMES of ast.Clauses, and
+// the partition's parity with that struct is derived from the AST's own source at
+// run time rather than trusted to these constants.
+const (
+	clauseFrom       = "From"
+	clauseReads      = "Reads"
+	clauseWrites     = "Writes"
+	clauseOver       = "Over"
+	clauseOnError    = "OnError"
+	clauseNote       = "Note"
+	clauseCheckpoint = "Checkpoint"
+	clauseIdempotent = "Idempotent"
+)
 
 // lowering carries one flow's lowering state.
 type lowering struct {
@@ -104,15 +118,6 @@ func (l *lowering) carryCheckpointCodecs(p *Program) {
 	}
 }
 
-// lower turns one validated graph into an ordered plan of runtime builder calls.
-//
-// It is the single-flow entry point: a file whose flows embed one another goes
-// through lowerFile, which supplies the dependency set and the exported output
-// boundaries neither of which is derivable from one flow.
-func lower(p *Program) (*Plan, []Diagnostic) {
-	return lowerProgram(p, map[string]*Program{}, map[string]Boundary{}, Config{})
-}
-
 // heldClauses lists the partition's held members.
 func heldClauses() map[string]bool {
 	held := map[string]bool{}
@@ -144,6 +149,18 @@ func (l *lowering) node(n Node) {
 		l.switchChain(n, options)
 	case KindTee:
 		l.teeChain(n, options)
+	default:
+		l.flowControl(n, options)
+	}
+}
+
+// flowControl lowers the shapes that terminate, route or declare nothing.
+//
+// It is split from node only because the module's linter caps a dispatch's
+// cyclomatic complexity; the two together are one switch, and the default arm
+// below is its mandatory refusal.
+func (l *lowering) flowControl(n Node, options []string) {
+	switch n.Kind {
 	case KindSink:
 		l.sink(n, options)
 	case KindDrop:

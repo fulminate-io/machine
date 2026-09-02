@@ -44,7 +44,10 @@ func (l *lowering) options(n Node) []string {
 //
 // It is stable rather than map order so generated output is deterministic; the
 // drift test over the golden fixtures depends on that.
-var clauseOrder = []string{"From", "Reads", "Writes", "Over", "OnError", "Note", "Checkpoint", "Idempotent"}
+var clauseOrder = []string{
+	clauseFrom, clauseReads, clauseWrites, clauseOver,
+	clauseOnError, clauseNote, clauseCheckpoint, clauseIdempotent,
+}
 
 // reportHeld emits the positioned not-yet-lowered diagnostic for a held clause.
 //
@@ -55,29 +58,30 @@ func (l *lowering) reportHeld(n Node, clause string) {
 	if !clausePresent(n.Clauses, clause) {
 		return
 	}
-	l.diagf(n.Start, n.Stop, "the %q clause on %q is not yet lowered by this generator", strings.ToLower(clause), n.Name)
+	l.diagf(n.Start, n.Stop, "the %q clause on %q is not yet lowered by this generator",
+		strings.ToLower(clause), n.Name)
 }
 
 // lowerClause renders one lowered clause's option expressions.
 func (l *lowering) lowerClause(n Node, clause string) []string {
 	switch clause {
-	case "From", "Note":
+	case clauseFrom, clauseNote:
 		// FROM IS AN EDGE, NOT AN OPTION: it was consumed building the graph and
 		// is what chose this node's receiver. NOTE carries documentation and
 		// emits nothing. Both are lowered — neither is dropped — and neither
 		// produces an option expression.
 		return nil
-	case "Reads":
+	case clauseReads:
 		return capabilityOption(capabilityHelper(n, readsHelperName, filterReadsHelper), n, n.Clauses.Reads)
-	case "Writes":
+	case clauseWrites:
 		return capabilityOption(capabilityHelper(n, writesHelperName, filterWritesHelper), n, n.Clauses.Writes)
-	case "Over":
+	case clauseOver:
 		return spanOption("machine.WithEdge", n.Clauses.Over)
-	case "OnError":
+	case clauseOnError:
 		return spanOption("machine.WithErrorHandler", n.Clauses.OnError)
-	case "Checkpoint":
+	case clauseCheckpoint:
 		return spanOption("machine.WithCheckpoint", n.Clauses.Checkpoint)
-	case "Idempotent":
+	case clauseIdempotent:
 		return l.idempotentOption(n)
 	default:
 		return nil
@@ -225,21 +229,21 @@ func (l *lowering) successorsOf(n Node) []string {
 // default arm below instead of being silently reported absent.
 func clausePresent(c ast.Clauses, clause string) bool {
 	switch clause {
-	case "From":
+	case clauseFrom:
 		return len(c.From) > 0
-	case "Reads":
+	case clauseReads:
 		return len(c.Reads) > 0
-	case "Writes":
+	case clauseWrites:
 		return len(c.Writes) > 0
-	case "Over":
+	case clauseOver:
 		return c.Over != nil
-	case "OnError":
+	case clauseOnError:
 		return c.OnError != nil
-	case "Note":
+	case clauseNote:
 		return c.Note != nil
-	case "Checkpoint":
+	case clauseCheckpoint:
 		return c.Checkpoint != nil
-	case "Idempotent":
+	case clauseIdempotent:
 		return c.Idempotent != nil
 	default:
 		return false

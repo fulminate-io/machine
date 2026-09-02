@@ -38,32 +38,27 @@ const (
 // rather than an empty string, because a diagnostic naming nothing is worse than
 // one naming a number a reader can look up.
 func (k NodeKind) String() string {
-	switch k {
-	case KindInvalid:
-		return "invalid"
-	case KindSource:
-		return "source"
-	case KindTransform:
-		return "transform"
-	case KindBranch:
-		return "branch"
-	case KindSwitch:
-		return "switch"
-	case KindTee:
-		return "tee"
-	case KindSink:
-		return "sink"
-	case KindDrop:
-		return "drop"
-	case KindLoop:
-		return "loop"
-	case KindSend:
-		return "send"
-	case KindUse:
-		return "use"
-	default:
-		return "NodeKind(" + itoa(int(k)) + ")"
+	if name, ok := kindNames[k]; ok {
+		return name
 	}
+
+	return "NodeKind(" + itoa(int(k)) + ")"
+}
+
+// kindNames spells every member once. A table rather than a switch because the
+// set is closed and a lookup cannot grow a branch per member.
+var kindNames = map[NodeKind]string{
+	KindInvalid:   "invalid",
+	KindSource:    "source",
+	KindTransform: "transform",
+	KindBranch:    "branch",
+	KindSwitch:    "switch",
+	KindTee:       "tee",
+	KindSink:      "sink",
+	KindDrop:      "drop",
+	KindLoop:      "loop",
+	KindSend:      "send",
+	KindUse:       "use",
 }
 
 // itoa renders a small non-negative int without pulling in strconv for one call

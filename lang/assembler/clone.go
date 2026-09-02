@@ -5,7 +5,6 @@
 package assembler
 
 import (
-	"fmt"
 	"go/types"
 	"strings"
 
@@ -90,7 +89,7 @@ func newCloneDeriver(local string) *cloneDeriver {
 // does not report that refusal to an unrelated shallower caller.
 func (d *cloneDeriver) derive(typ types.Type, at posRange, depth int) (string, bool) {
 	if depth > cloneCeiling {
-		d.refuse(at, "the type %q is deeper than the %d-frame derivation ceiling; "+
+		d.refusef(at, "the type %q is deeper than the %d-frame derivation ceiling; "+
 			"supply an explicit clone function for it", typ.String(), cloneCeiling)
 
 		return "", false
@@ -155,17 +154,17 @@ func (d *cloneDeriver) refuseUnderivable(typ types.Type, at posRange) {
 	case *types.Chan:
 		what = "a channel, which is an identity rather than a value"
 	}
-	d.refuse(at, "the type %q cannot be deep-copied: it is %s. "+
+	d.refusef(at, "the type %q cannot be deep-copied: it is %s. "+
 		"Supply an explicit clone function with the var's `clone` clause", d.spellingOf(typ), what)
 }
 
-// refuse records a positioned refusal.
-func (d *cloneDeriver) refuse(at posRange, format string, args ...any) {
+// refusef records a positioned refusal.
+func (d *cloneDeriver) refusef(at posRange, format string, args ...any) {
 	d.diags = append(d.diags, diagnosticAt(at.start, at.stop, format, args...))
 }
 
 // wrap renders a clone function around a body.
-func (d *cloneDeriver) wrap(name, spelling, body string) string {
+func (*cloneDeriver) wrap(name, spelling, body string) string {
 	return "func " + name + "(v " + spelling + ") " + spelling + " {\n" + body + "\n}\n"
 }
 
@@ -209,13 +208,13 @@ func cloneInterface(typ types.Type) *types.Interface {
 // distinct types cannot collide and no author-written name can be produced.
 func cloneFuncName(key string) string {
 	var b strings.Builder
-	b.WriteString("cloneFlow_")
+	_, _ = b.WriteString("cloneFlow_")
 	for _, r := range key {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-			b.WriteRune(r)
+			_, _ = b.WriteRune(r)
 		default:
-			b.WriteByte('_')
+			_ = b.WriteByte('_')
 		}
 	}
 
@@ -227,8 +226,8 @@ func (d *cloneDeriver) Functions() string {
 	var b strings.Builder
 	for _, key := range d.order {
 		if body, ok := d.bodies[key]; ok {
-			b.WriteString(body)
-			b.WriteString("\n")
+			_, _ = b.WriteString(body)
+			_, _ = b.WriteString("\n")
 		}
 	}
 
@@ -237,12 +236,3 @@ func (d *cloneDeriver) Functions() string {
 
 // Diagnostics returns the refusals.
 func (d *cloneDeriver) Diagnostics() []Diagnostic { return d.diags }
-
-// derivationError renders a refusal for a caller that wants one error.
-func (d *cloneDeriver) derivationError() error {
-	if len(d.diags) == 0 {
-		return nil
-	}
-
-	return fmt.Errorf("%s", d.diags[0].Message)
-}

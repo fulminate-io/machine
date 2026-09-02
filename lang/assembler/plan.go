@@ -124,7 +124,7 @@ type Handle struct {
 // outputs does this flow expose"; this package resolves a use statement's
 // identifiers against that fact and refuses loudly when its own graph disagrees.
 // Two implementations of one ruled semantic drift apart invisibly, changing no
-// build result and no runtime behaviour, which is why there is only one.
+// build result and no runtime behavior, which is why there is only one.
 type Boundary struct {
 	// Outputs are the names a consumer may bind, as analysis exported them.
 	Outputs []string
