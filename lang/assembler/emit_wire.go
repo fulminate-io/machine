@@ -10,9 +10,9 @@ import (
 )
 
 // wire writes one flow's handle declarations and its wiring function.
-func (e *emitter) wire(plan *Plan) {
+func (e *emitter) wire(plan *Plan, s *synthesis) {
 	e.flowErrorHandler(plan)
-	e.handles(plan)
+	e.handles(plan, s)
 	e.writeln("// Wire" + exported(plan.Flow) + " declares the " + plan.Flow + " flow on m.")
 	e.writeln("//")
 	e.writeln("// IT RETURNS error UNCONDITIONALLY. A flow with no checkpoint returns nil; the")
@@ -27,7 +27,7 @@ func (e *emitter) wire(plan *Plan) {
 	e.writeln("func Wire" + exported(plan.Flow) + "(m *machine.Machine) error {")
 	e.journalCheck(plan)
 	for _, op := range plan.Ops {
-		e.op(op)
+		e.op(op, s)
 	}
 	e.writeln("")
 	e.writeln("\treturn nil")
@@ -97,7 +97,7 @@ func planCheckpoints(plan *Plan) bool {
 // cells in ONE namespace for the whole process and panics on a duplicate. Two
 // generated packages in one binary, or two flows in one package, would otherwise
 // collide on any shared var name.
-func (e *emitter) handles(plan *Plan) {
+func (e *emitter) handles(plan *Plan, s *synthesis) {
 	if len(plan.Handles) == 0 {
 		return
 	}
@@ -110,17 +110,41 @@ func (e *emitter) handles(plan *Plan) {
 
 			continue
 		}
-		// A key's clone function is supplied by Phase 4's synthesis; until then a
-		// trivially-copyable type is copied by assignment.
-		e.writeln("\t" + h.Var + " = machine.NewKey[" + h.Type + "](\"" + h.Name + "\", func(v " + h.Type + ") " + h.Type + " { return v })")
+		// machine.NewKey DEMANDS a cloner and panics without one, because Tee
+		// deep-copies the frame and the frame's clone walks the cloner map. A
+		// trivially-copyable type gets the identity; anything else gets the
+		// derived deep copy.
+		e.writeln("\t" + h.Var + " = machine.NewKey[" + h.Type + "](\"" + h.Name + "\", " + keyCloner(s, h.Type) + ")")
 	}
 	e.writeln(")")
 	e.writeln("")
 }
 
+// teeDuplicator names the Duplicator a tee call takes.
+func teeDuplicator(s *synthesis, spelling string) string {
+	if s != nil {
+		if derived := s.DuplicatorFor(spelling); derived != "" {
+			return derived
+		}
+	}
+
+	return "func(d " + spelling + ") (" + spelling + ", " + spelling + ") { return d, d }"
+}
+
+// keyCloner renders the clone function a key's NewKey takes.
+func keyCloner(s *synthesis, spelling string) string {
+	if s != nil {
+		if derived := s.ClonerFor(spelling); derived != "" {
+			return derived
+		}
+	}
+
+	return "func(v " + spelling + ") " + spelling + " { return v }"
+}
+
 // op writes one builder call.
-func (e *emitter) op(op Op) {
-	call := e.callText(op)
+func (e *emitter) op(op Op, s *synthesis) {
+	call := e.callText(op, s)
 	if call == "" {
 		return
 	}
@@ -135,8 +159,8 @@ func (e *emitter) op(op Op) {
 }
 
 // callText renders one op's Go call expression.
-func (e *emitter) callText(op Op) string {
-	args := e.argsOf(op)
+func (e *emitter) callText(op Op, s *synthesis) string {
+	args := e.argsOf(op, s)
 	if op.Method == MethodSource {
 		return "m.Source[" + op.TypeArg + "](\"" + op.Node + "\"" + args + ")"
 	}
@@ -145,7 +169,7 @@ func (e *emitter) callText(op Op) string {
 }
 
 // argsOf renders an op's argument list, leading comma included.
-func (e *emitter) argsOf(op Op) string {
+func (e *emitter) argsOf(op Op, s *synthesis) string {
 	var parts []string
 	switch op.Method {
 	case MethodSend:
@@ -154,6 +178,11 @@ func (e *emitter) argsOf(op Op) string {
 		if op.Ref != "" {
 			parts = append(parts, "machine.WithEdge("+op.Ref+")")
 		}
+	case MethodTee:
+		// A TEE CARRIES NO GO REFERENCE. The language says a tee is route-only and
+		// applies no function, so its Duplicator is entirely the generator's and
+		// comes from the derivation rather than from the source.
+		parts = append(parts, "\""+op.Node+"\"", teeDuplicator(s, op.TypeArg))
 	default:
 		parts = append(parts, "\""+op.Node+"\"")
 		if op.Ref != "" {

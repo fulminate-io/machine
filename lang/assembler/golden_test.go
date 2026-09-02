@@ -122,7 +122,7 @@ func generateCase(t *testing.T, c goldenCase) Generated {
 	if len(lowerDiags) != 0 {
 		t.Fatalf("%s: the fixture must lower clean:\n%s", c.name, strings.Join(messagesOf(lowerDiags), "\n"))
 	}
-	out, emitDiags := Generate(file, programs, plans, cfg, "pipeline.flow")
+	out, emitDiags := Generate(file, programs, plans, cfg, "pipeline.flow", nil)
 	if len(emitDiags) != 0 {
 		t.Fatalf("%s: emission reported:\n%s", c.name, strings.Join(messagesOf(emitDiags), "\n"))
 	}
