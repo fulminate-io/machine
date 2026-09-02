@@ -301,8 +301,41 @@ func (l *lowering) emit(n Node, method, receiver string, results, options []stri
 		Method: method, Receiver: receiver, Results: results, Node: n.Name,
 		Ref: refOf(n), Options: options, Start: n.Start, Stop: n.Stop,
 	})
-	if len(results) > 0 {
+	// BIND ONLY A SINGLE-RESULT CALL HERE. A branch and a tee bind one flow PER
+	// OUTLET, and their own helpers have already recorded that mapping; binding
+	// every output to results[0] would overwrite it and point both outlets at the
+	// left one. That is not a cosmetic error: a later `drop lost` would then drop
+	// the KEPT flow, leaving the real one declared and never consumed.
+	if len(results) == 1 {
 		l.bind(n.Outputs, results[0])
+	}
+	l.mergeInputs(n, receiver)
+}
+
+// mergeInputs emits the Send that routes each NON-declaring input into this node.
+//
+// THE FIRST NAME BUILDS THE NODE AND EVERY LATER ONE IS ROUTED IN. `transform t
+// Foo from a, b` constructs t from a's flow and then merges b into the same
+// consumer, which is a Send because the runtime has no fan-in constructor. A
+// lowering that ignored the later names would emit a node reading only its first
+// input and leave the extra flows declared and never consumed — Go rejects that
+// file, which is how this gap surfaced rather than shipping.
+func (l *lowering) mergeInputs(n Node, receiver string) {
+	if len(n.Inputs) < 2 {
+		return
+	}
+	for _, extra := range n.Inputs[1:] {
+		source, bound := l.flowVar[extra]
+		if !bound {
+			// A loop label carries no flow of its own: the send that TARGETS the
+			// label is what closes that path, and it is lowered from its own
+			// statement.
+			continue
+		}
+		l.append(Op{
+			Method: MethodSend, Receiver: source, Ref: receiver,
+			Node: extra + derivedSep + "merge", After: n.Name, Start: n.Start, Stop: n.Stop,
+		})
 	}
 }
 

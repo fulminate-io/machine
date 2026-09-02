@@ -1,0 +1,36 @@
+func Bill(f machine.Frame[Order]) Receipt {
+  count, _, err := f.Load(seen)
+  if err != nil {
+    panic(err)
+  }
+  if err := f.Save(seen, count+1); err != nil {
+    panic(err)
+  }
+  f.Set(attempt, f.Get(attempt)+1)
+  return Receipt{ID: strings.ToUpper(f.Value().ID), Seen: count + 1}
+}
+
+flow orders
+note """
+The canonical shape: a source feeding one transform that touches both handle
+kinds, then a sink. It carries a const, a param, an error handler at both the
+flow and the node level, an `over` transport clause and a verbatim func.
+"""
+import "strings"
+
+const Retries int = 3
+param Endpoint string = ":8080"
+
+state {
+  seen int
+}
+var attempt int
+
+on error PageOnCall
+
+source ingest Poll()
+  over machine.Channel[Order](0)
+transform charge Bill from ingest
+  reads attempt  writes seen
+  on error NodeFailed
+sink done Store from charge
