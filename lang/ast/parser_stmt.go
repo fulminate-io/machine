@@ -129,8 +129,16 @@ func (p *parser) parseSend() Stmt {
 
 // parseUse parses `use <instance> <flowRef> from <inputs> -> <bindings...>`.
 //
-// The bindings are POSITIONAL and caller-chosen: they name the embedded flow's
-// outputs in signature order, and matching them up is the analysis engine's job.
+// The bindings NAME the embedded flow's outputs. They are a SET: order carries no
+// meaning, binding a subset is legal, and an identifier naming no output of that
+// flow, or repeating one already bound, is an analysis error. The parser keeps
+// them in source order because that is what it read, and matching them up against
+// the embedded flow's boundary is the analysis engine's job.
+//
+// THEY WERE ONCE POSITIONAL — bound to the embedded flow's outputs in signature
+// order — and that was the defect, not the contract: an order the source never
+// states cannot be checked, and a caller that transposed two names bound each to
+// the other in silence. Do not reintroduce it.
 func (p *parser) parseUse() Stmt {
 	stmt := UseStmt{Start: p.tok.pos}
 	p.advance()

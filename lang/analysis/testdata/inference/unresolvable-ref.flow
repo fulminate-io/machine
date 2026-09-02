@@ -1,0 +1,7 @@
+note """inference fixture: a reference to a function the subject package does not declare. The inference REFUSES it by name and leaves the name untyped, rather than handing back a guess beside a nil error — a caller cannot tell that shape from a real answer."""
+import "example.com/inference/subject/orderpkg/v2"
+
+flow missing
+source ingest orders.Listen[orders.Order](":8080")
+transform scored orders.NotDeclaredAnywhere from ingest
+sink store orders.Store from scored

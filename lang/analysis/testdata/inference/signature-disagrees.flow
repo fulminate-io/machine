@@ -1,0 +1,6 @@
+note """inference fixture for phase 4: a flow whose DECLARED output type contradicts the type its body produces. The header promises a Receipt and the transform delivers a Scored, which is a real type disagreement rather than a spelling difference — the header and the body are compared as go/types identities. Its known positive is signature-agrees.flow, identical but for the declared spelling."""
+import "example.com/inference/subject/orderpkg/v2"
+
+flow Disagreeing (orders.Order) -> scored orders.Receipt
+transform scored orders.Score from in
+sink store orders.Store from scored

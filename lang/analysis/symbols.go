@@ -78,9 +78,15 @@ type FlowSymbols struct {
 //
 // Src is the source itself rather than only its path, because every analyzer
 // downstream reports against this table and Report takes a Source.
+//
+// Funcs carries the whole declaration rather than only its position, because a
+// bare node reference names a func this file declares and lang/ast captures
+// FuncDecl.Body as one opaque GoSpan running from the opening parenthesis
+// through the matching close brace. That span is the func literal minus its
+// `func` keyword, so it is the only place a bare reference's signature exists.
 type FileSymbols struct {
 	Src     Source
-	Funcs   map[string]ast.Position
+	Funcs   map[string]ast.FuncDecl
 	Imports []ImportRef
 	Flows   []FlowSymbols
 }
@@ -119,13 +125,13 @@ func runSymbols(p *Pass) (any, error) {
 // NOT against lang/ast growing a shape, and this module is versioned separately
 // from that one.
 func tableFile(p *Pass, src Source) FileSymbols {
-	out := FileSymbols{Src: src, Funcs: map[string]ast.Position{}}
+	out := FileSymbols{Src: src, Funcs: map[string]ast.FuncDecl{}}
 	for _, decl := range src.File.Decls {
 		switch d := decl.(type) {
 		case ast.ImportDecl:
 			out.Imports = append(out.Imports, importRef(d))
 		case ast.FuncDecl:
-			out.Funcs[d.Name.Name] = d.Name.NamePos
+			out.Funcs[d.Name.Name] = d
 		case ast.FlowDecl:
 			out.Flows = append(out.Flows, tableFlow(p, src, d))
 		default:

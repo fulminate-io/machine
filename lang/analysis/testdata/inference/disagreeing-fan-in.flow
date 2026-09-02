@@ -1,0 +1,9 @@
+note """inference fixture: a sink joining edges that carry genuinely DIFFERENT type identities — a Scored down one path and an Order down the other, the second produced by tagging a Receipt back into an Order. The structural typeflow analyzer cannot see this: nothing here declares a type spelling, so there are no spellings to compare. Only real inferred types disagree."""
+import "example.com/inference/subject/orderpkg/v2"
+
+flow mixing
+source ingest orders.Listen[orders.Order](":8080")
+transform scored orders.Score from ingest
+transform stored orders.Store from scored
+transform tagged orders.Tag from stored
+sink out orders.Store from scored, tagged

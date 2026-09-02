@@ -1,0 +1,9 @@
+note """inference fixture: a BARE reference naming a func this file declares. lang/ast captures FuncDecl.Body as one opaque span from the opening parenthesis through the matching close brace, so that span is the func literal minus its `func` keyword — which is the only place a bare reference's signature exists. The func is declared AFTER the flow body because a braceless body would otherwise end at it."""
+import "example.com/inference/subject/orderpkg/v2"
+
+flow locals
+source ingest orders.Listen[orders.Order](":8080")
+transform scored Score from ingest
+sink store orders.Store from scored
+
+func Score(o orders.Order) orders.Scored { return orders.Scored{Order: o} }

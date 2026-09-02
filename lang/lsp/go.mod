@@ -10,7 +10,13 @@ require (
 	go.lsp.dev/uri v1.0.1
 )
 
-require github.com/go-json-experiment/json v0.0.0-20260623181947-01eb4420fa68 // indirect
+require (
+	github.com/go-json-experiment/json v0.0.0-20260623181947-01eb4420fa68 // indirect
+	github.com/whitaker-io/machine/lang/loader v0.0.0 // indirect
+	golang.org/x/mod v0.39.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/tools v0.49.0 // indirect
+)
 
 replace github.com/whitaker-io/machine/lang/analysis => ../analysis
 

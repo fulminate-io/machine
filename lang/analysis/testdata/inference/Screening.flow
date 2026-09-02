@@ -1,0 +1,12 @@
+note """inference fixture: a CAPITALIZED, SIGNATURE-LESS flow — the case CEO ruling cfc0bd70 is about. It declares no header, so its boundary is the names its body produces and what they connect from, and every one of those names is inferred against real go/types values loaded from example.com/inference/subject. It carries all three reference shapes the corpus census found: a COMPOUND generic-instantiation call, SIMPLE qualified references, and a BARE reference to the func this file declares."""
+import "example.com/inference/subject/orderpkg/v2"
+
+flow Screening
+source ingest orders.Listen[orders.Order](":8080")
+transform enriched Enrich from ingest
+transform scored orders.Score from enriched
+branch check orders.Clean from scored -> clean, suspect
+sink store orders.Store from clean
+sink hold orders.Quarantine from suspect
+
+func Enrich(o orders.Order) orders.Order { return o }

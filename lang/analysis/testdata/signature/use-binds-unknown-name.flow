@@ -1,0 +1,10 @@
+note """analysis check: a use binds a name that is not an output of the flow it embeds. `screening` hands back `ok` and `bad`, and a binding identifier NAMES one of those; `clean` names neither, so it is reported against the flow's real outputs. This fixture replaces use-arity-mismatch.flow, which existed only to exercise a positional arity mismatch — bindings are a set bound by name, so there is no arity to mismatch and binding a subset is legal."""
+flow screening (Order) -> ok OkResult, bad ErrResult
+import "github.com/acme/fraud"
+import "acme.dev/flows/warehouse"
+branch check fraud.Clean from in -> ok, bad
+
+flow main
+source ingest Poll
+use screen screening from ingest -> clean
+sink store warehouse.Insert from clean

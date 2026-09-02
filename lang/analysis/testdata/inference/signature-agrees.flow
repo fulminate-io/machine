@@ -1,0 +1,6 @@
+note """inference fixture for phase 4: a flow whose DECLARED output type is the type its body actually produces. It is the accepting direction and the known positive for signature-disagrees.flow, whose only difference is the declared spelling. The declared output is produced by a TRANSFORM rather than named for a sink, because a sink produces nothing and a declared output no statement delivers trips the existing undelivered-output rule instead of reaching the type comparison."""
+import "example.com/inference/subject/orderpkg/v2"
+
+flow Agreeing (orders.Order) -> scored orders.Scored
+transform scored orders.Score from in
+sink store orders.Store from scored

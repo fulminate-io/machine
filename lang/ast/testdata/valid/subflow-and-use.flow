@@ -3,6 +3,6 @@ branch check fraud.Clean from in -> ok, bad
 
 flow main
 source ingest Poll
-use screen screening from ingest -> clean, suspect
-sink store warehouse.Insert from clean
-sink hold fraud.Quarantine from suspect
+use screen screening from ingest -> ok, bad
+sink store warehouse.Insert from ok
+sink hold fraud.Quarantine from bad
