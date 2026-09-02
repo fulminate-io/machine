@@ -447,3 +447,48 @@ jobs:
               exit 1
             }
           }'
+
+  lang-assembler:
+    name: lang/assembler
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'lang/assembler/go.mod'
+          cache-dependency-path: 'lang/assembler/go.sum'
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+          working-directory: lang/assembler
+          args: --config ${{ github.workspace }}/.golangci.yml
+          github-token: ${{ github.token }}
+          only-new-issues: true
+      - name: Go Build
+        working-directory: lang/assembler
+        run: go build ./...
+      - name: Go Test
+        working-directory: lang/assembler
+        run: go test -timeout 600s -coverprofile=coverage.out ./...
+
+      # The floor is the coverage THIS suite actually achieves, measured rather
+      # than copied from a sibling job. lang/ast reaches 100 partly because the
+      # marker methods sealing its AST have empty bodies and contribute no
+      # statements; a generator has no such structural help, and lang/loader
+      # measured 96 for reasons of its own. The number is re-derived once the
+      # module's suite is complete and moves only deliberately after that.
+      - name: Enforce coverage floor
+        working-directory: lang/assembler
+        env:
+          COVERAGE_FLOOR: "0"
+        run: |
+          total=$(go tool cover -func=coverage.out | awk '$1 == "total:" { print $NF }')
+          test -n "$total" || { echo "coverage.out yielded no total line"; exit 1; }
+          echo "total statement coverage: $total"
+          awk -v got="${total%\%}" -v floor="$COVERAGE_FLOOR" 'BEGIN {
+            if (got + 0 < floor + 0) {
+              printf "coverage %s%% is below the %s%% floor\n", got, floor
+              exit 1
+            }
+          }'

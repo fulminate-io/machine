@@ -1,0 +1,5 @@
+func flowReadsOf(f machine.Frame[Order]) Result { return Result{} }
+
+flow collides
+source ingest Poll
+sink done Store from ingest
