@@ -1,0 +1,4 @@
+flow stranded
+source ingest Poll
+transform enrich Lookup from ingest
+sink done Store from ingest

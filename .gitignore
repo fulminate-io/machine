@@ -11,6 +11,15 @@
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
 
+# Go generated from .flow sources. Generated code is a BUILD ARTIFACT: users
+# commit .flow files, and the Go the assembler emits is regenerated whole on
+# every run. The negation below is REQUIRED, not a loophole — the assembler's
+# golden fixtures ARE *.flow.go files, and with the fence alone they are skipped
+# by `git add -A` and absent from a CI checkout, which leaves the golden gate
+# reading zero files and passing vacuously. Both lines belong together.
+*.flow.go
+!lang/assembler/testdata/golden/**/*.flow.go
+
 pkg/
 vendor/
 secret/
