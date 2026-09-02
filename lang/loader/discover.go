@@ -128,9 +128,11 @@ func (p *Packages) Sources(pkgPath string) ([]string, error) {
 // disagree.
 //
 // OUTPUTS CARRIES THE DECLARED TYPE SPELLINGS, not the output names, because the
-// declared TYPES are what a signature contributes across a module boundary — a
-// consumer already knows the names it is binding, positionally, from its own use
-// statement. Each entry is the Go type text exactly as the flow author wrote it,
+// declared TYPES are what a signature contributes across a module boundary. The
+// names travel the other way: a consumer's `use` statement NAMES the outputs it
+// binds, order carries no meaning, and whether those names are outputs of the
+// flow at all is checked above this module. Each entry is the Go type text
+// exactly as the flow author wrote it,
 // which is what Resolve turns into a types.Type. HasSignature false means this
 // module makes NO type claim about the flow at all, which is a different
 // statement from an empty output list.
