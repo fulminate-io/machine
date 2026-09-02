@@ -1,0 +1,62 @@
+// Command serde-probe is a FIXTURE VALIDATOR, never a criterion instrument. It
+// constructs the two analyzers flowc will run once the assembler follow-up
+// lands and prints their diagnostics, so the smoke's serialization fixture is
+// proven a genuine violator BEFORE a criterion depends on flowc reporting it.
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/whitaker-io/machine/lang/analysis"
+	"github.com/whitaker-io/machine/lang/ast"
+	"github.com/whitaker-io/machine/lang/loader"
+)
+
+func main() {
+	dir := flag.String("in", ".", "directory holding the .flow sources")
+	pkgpath := flag.String("pkgpath", "", "import path the sources belong to")
+	flag.Parse()
+
+	pkgs, err := loader.Load(*dir, []string{"./..."})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "load:", err)
+		os.Exit(2)
+	}
+	entries, err := os.ReadDir(*dir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "readdir:", err)
+		os.Exit(2)
+	}
+	var srcs []analysis.Source
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".flow") {
+			continue
+		}
+		body, rerr := os.ReadFile(filepath.Join(*dir, e.Name()))
+		if rerr != nil {
+			fmt.Fprintln(os.Stderr, "read:", rerr)
+			os.Exit(2)
+		}
+		file, perr := ast.Parse(body)
+		if perr != nil {
+			fmt.Fprintln(os.Stderr, "parse:", perr)
+			os.Exit(2)
+		}
+		srcs = append(srcs, analysis.Source{Path: e.Name(), Src: body, File: file})
+	}
+	all := append(analysis.All(),
+		analysis.TypeInferenceAnalyzer(pkgs),
+		analysis.SerializationAnalyzer(pkgs, *pkgpath))
+	diags, err := analysis.Run(srcs, all)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "run:", err)
+		os.Exit(2)
+	}
+	for _, d := range diags {
+		fmt.Printf("%s:%d:%d: %s: %s [%s]\n", d.Path, d.Pos.Line, d.Pos.Col, d.Severity, d.Message, d.Code)
+	}
+}

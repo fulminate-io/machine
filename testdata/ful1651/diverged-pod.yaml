@@ -1,0 +1,41 @@
+# The DIVERGED-IDENTITY probe. It supplies Config.Node and the ledger's LocalID
+# through two different env vars, which is the disagreement ErrIdentityDiverged
+# refuses. Under a real Deployment those two values reach the process by two
+# different paths, and no live rollout has ever exercised their disagreement.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: smokehost-diverged
+  namespace: ful1651-smoke
+spec:
+  restartPolicy: Never
+  containers:
+    - name: smokehost
+      image: ful1651/smokehost:smoke
+      imagePullPolicy: Never
+      env:
+        - name: MACHINE_NODE_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: MACHINE_LEDGER_ID
+          value: "a-different-identity"
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: MACHINE_ADVERTISE
+          value: "$(POD_IP):7946"
+        - name: MACHINE_BIND
+          value: "0.0.0.0:7946"
+        - name: MACHINE_FLOW
+          value: "smoke"
+        - name: MACHINE_CLUSTER_PEERS
+          value: "smoke-peers.ful1651-smoke.svc.cluster.local:7946"
+        - name: MACHINE_CLUSTER_EXPECT
+          value: "3"
+        - name: MACHINE_CLUSTER_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: smoke-secret
+              key: token

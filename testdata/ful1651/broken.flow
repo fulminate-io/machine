@@ -1,0 +1,8 @@
+flow Smoke
+state {
+  processed int
+}
+source ingest Feed()
+transform tally Count from ingest
+  reads nosuchstate
+sink emit Report from tally

@@ -1,0 +1,16 @@
+flow Serde
+note """
+The SERIALIZATION fixture. Its state block declares a type gob silently drops
+and a plain named struct that needs registration, which are carry-in (h)'s two
+seeds. It is otherwise a well-formed flow, so any refusal it draws is about
+serialization and nothing else.
+"""
+state {
+  ledger Ledger
+  memo Note
+}
+on error Alert
+source ingest Feed()
+transform tally Count from ingest
+  reads ledger, memo  writes ledger, memo
+sink emit Report from tally

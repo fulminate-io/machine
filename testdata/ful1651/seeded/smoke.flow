@@ -1,0 +1,30 @@
+import "strings"
+
+flow Screen (Order) -> ok Order, bad Order
+branch triage Clean from in -> ok, bad
+
+flow Smoke
+note """
+The phase-2 smoke fixture: every construct the ticket names, in one flow.
+"""
+state {
+  processed int
+}
+var attempt int
+on error Alert
+source ingest Feed()
+transform tally Count from ingest
+  reads attempt, unknownstate  writes processed
+  checkpoint machine.GobCodec[Order]{}
+  idempotent
+use screen Screen from tally -> ok, bad
+switch route from ok on strings.ToLower(ok.Kind) over Passthrough() {
+  "card", "wallet" -> billable
+  else -> other
+}
+tee fan from billable -> reported, audited
+sink emit Report from reported
+loop retry
+transform redo Backoff from retry, other
+send redo -> retry
+drop bad

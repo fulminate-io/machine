@@ -1,0 +1,73 @@
+# THE FAIL-SILENT PROBE. Identical to deployment.yaml except that every replica
+# sets MACHINE_DISABLE_LOCAL_STATS, so no node installs the local-stats callback
+# the promoter reads. It exists to RECORD what the promoter says when its stats
+# are absent, which finding 26bca6446a18292eed3dcb3d7d62859f names as a
+# fail-silent candidate for lane D.
+#
+# NOTHING HERE IS NAMED "nostats", AND THAT IS A MEASUREMENT REQUIREMENT RATHER
+# THAN TASTE. The criterion counts log lines mentioning stats; with the obvious
+# name every line naming the flow, the deployment or a pod matched the word being
+# counted, and the leg read 15 when the true answer was 0.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: smokehost-quiet
+  namespace: ful1651-smoke
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: smokehost-quiet
+  template:
+    metadata:
+      labels:
+        app: smokehost-quiet
+    spec:
+      terminationGracePeriodSeconds: 2
+      containers:
+        - name: smokehost
+          image: ful1651/smokehost:smoke
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 7946
+          env:
+            - name: MACHINE_DISABLE_LOCAL_STATS
+              value: "1"
+            - name: MACHINE_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: MACHINE_ADVERTISE
+              value: "$(POD_IP):7946"
+            - name: MACHINE_BIND
+              value: "0.0.0.0:7946"
+            - name: MACHINE_FLOW
+              value: "quiet"
+            - name: MACHINE_CLUSTER_PEERS
+              value: "quiet-peers.ful1651-smoke.svc.cluster.local:7946"
+            - name: MACHINE_CLUSTER_EXPECT
+              value: "3"
+            - name: MACHINE_CLUSTER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: smoke-secret
+                  key: token
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: quiet-peers
+  namespace: ful1651-smoke
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: smokehost-quiet
+  ports:
+    - name: mux
+      port: 7946
+      targetPort: 7946

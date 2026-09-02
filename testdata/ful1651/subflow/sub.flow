@@ -1,0 +1,8 @@
+flow screening (Order) -> ok Order, bad Order
+branch triage Clean from in -> ok, bad
+
+flow Main
+source ingest Feed()
+use screen screening from ingest -> ok, bad
+sink store Report from ok
+drop bad
