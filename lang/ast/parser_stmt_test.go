@@ -149,7 +149,7 @@ transform enrich Lookup from ingest
 	reads seen
 	writes seen, tally
 	over ratelimit.New(10)
-	checkpoint
+	checkpoint machine.GobCodec[Order]{}
 	on error Handle
 	note """continued across newlines"""
 drop enrich
@@ -197,23 +197,33 @@ drop enrich
 	}
 }
 
-// TestParseCheckpointIsBare asserts both directions of the clause's zero arity.
+// TestParseCheckpointRecordsItsCodecSpan asserts the clause's POSITION FIDELITY
+// now that it carries an operand.
 //
-// The negative case is the one that matters: a clause loop that simply continues
-// after a bare keyword reads the operand as the start of the next clause and
-// reports nothing at all.
-func TestParseCheckpointIsBare(t *testing.T) {
-	file := mustParse(t, "flow c\nsource ingest Poll\ntransform t Foo from ingest checkpoint\n")
+// IT REPLACES A TEST OF THE RETIRED ZERO-ARITY RULE. That test asserted a bare
+// checkpoint was recorded at line 3 and that an operand following it was a
+// diagnostic; the clause now REQUIRES the operand, so its second leg asserted the
+// opposite of the rule and is gone. The first leg's property survives and is what
+// this test keeps: the clause is still locatable to the line it was written on,
+// which is the thing an editor and the analysis engine need and the thing a
+// change from *Position to *GoSpan could silently have cost.
+//
+// Whether the bare form is REFUSED is TestCheckpointClauseRequiresACodecOperand's
+// leg, not this one's.
+func TestParseCheckpointRecordsItsCodecSpan(t *testing.T) {
+	const operand = "machine.GobCodec[Order]{}"
+
+	file := mustParse(t, "flow c\nsource ingest Poll\ntransform t Foo from ingest checkpoint "+operand+"\n")
 	stmt := flowAt(t, file, 0).Body[1].(TransformStmt)
 	if stmt.Checkpoint == nil {
-		t.Fatalf("the bare checkpoint clause was not recorded")
+		t.Fatalf("the checkpoint clause was not recorded")
 	}
-	if stmt.Checkpoint.Line != 3 {
-		t.Errorf("checkpoint recorded at %s, want line 3", stmt.Checkpoint)
+	if stmt.Checkpoint.Text != operand {
+		t.Errorf("the checkpoint operand is %q, want %q", stmt.Checkpoint.Text, operand)
 	}
-
-	diags := diagnosticsFor(t, "flow c\nsource ingest Poll\ntransform t Foo from ingest checkpoint enriched\n")
-	requireDiagnostic(t, diags, "takes no operand")
+	if stmt.Checkpoint.Start.Line != 3 {
+		t.Errorf("checkpoint recorded at %s, want line 3", stmt.Checkpoint.Start)
+	}
 }
 
 // TestParseIdempotentIsBare covers the marker that SELECTS THE CHECKPOINT ANCHOR,

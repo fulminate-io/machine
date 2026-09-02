@@ -22,7 +22,7 @@ const (
 	strawmanDir       = "testdata/strawman"
 )
 
-// mandatoryValidFixtures are the ten files the valid corpus must carry. The
+// mandatoryValidFixtures are the eleven files the valid corpus must carry. The
 // corpus itself stays OPEN; only these names are required.
 //
 // This is a SUBSET gate rather than a set-equality one, and it exists because
@@ -40,6 +40,12 @@ var mandatoryValidFixtures = []string{
 	"func-after-use",
 	"func-go-aware-spans",
 	"func-nested-literals",
+	// The canonical `checkpoint <codec>` form. It was testdata/invalid's
+	// checkpoint-with-argument fixture, which existed to prove an operand was
+	// REFUSED; the clause now requires one, so the fixture inverted rather than
+	// being deleted, and it is mandatory so the corpus always demonstrates the
+	// shape authors are meant to write.
+	"checkpoint-with-codec",
 }
 
 // lockedInvalidFixtures is the closed set of forms the parser rejects.
@@ -51,7 +57,8 @@ var lockedInvalidFixtures = []string{
 	"switch-with-no-arms",
 	"else-not-last",
 	"drop-with-from",
-	"checkpoint-with-argument",
+	"checkpoint-without-codec",
+	"over-without-transport",
 	"duplicate-clause",
 	"func-missing-name",
 	"func-unterminated-body",
@@ -185,7 +192,7 @@ func splitExpectation(t *testing.T, want string) (string, string) {
 // TestInvalidCorpusCoversEveryLockedFixture asserts SET EQUALITY: the invalid
 // corpus is a closed set.
 func TestInvalidCorpusCoversEveryLockedFixture(t *testing.T) {
-	assertSetEquality(t, invalidCorpusDir, lockedInvalidFixtures, 13)
+	assertSetEquality(t, invalidCorpusDir, lockedInvalidFixtures, 14)
 }
 
 // TestAnalysisRejectCorpusCoversEveryLockedFixture asserts SET EQUALITY: the
@@ -220,11 +227,11 @@ func assertSetEquality(t *testing.T, dir string, locked []string, wantCount int)
 	t.Fatalf("%s holds %d fixtures, the locked list %d", dir, len(present), len(want))
 }
 
-// TestValidCorpusCoversEveryMandatoryFixture asserts the ten mandatory names are
-// present. The valid corpus stays OPEN, so this is a subset gate.
+// TestValidCorpusCoversEveryMandatoryFixture asserts the eleven mandatory names
+// are present. The valid corpus stays OPEN, so this is a subset gate.
 func TestValidCorpusCoversEveryMandatoryFixture(t *testing.T) {
-	if len(mandatoryValidFixtures) != 10 {
-		t.Fatalf("the mandatory list states %d fixtures; the plan locks 10", len(mandatoryValidFixtures))
+	if len(mandatoryValidFixtures) != 11 {
+		t.Fatalf("the mandatory list states %d fixtures; the plan locks 11", len(mandatoryValidFixtures))
 	}
 	present := fixtureNames(corpusFiles(t, validCorpusDir))
 	for _, name := range mandatoryValidFixtures {

@@ -77,11 +77,20 @@ func (GoSpan) isNode() {}
 //
 // From is empty on a source, which has no inputs to name.
 //
-// Checkpoint is a position rather than a bool because the clause takes no
-// arguments in v1, so its presence is the whole payload — but a bool would throw
-// away the one thing an editor and the analysis engine need, which is where the
-// clause sits. Nil means absent. Idempotent is a position for the same reason and
-// on the same terms.
+// Checkpoint carries the codec the clause names, as an opaque Go span — the same
+// shape Over carries its transport factory in, and for the same reason: the
+// operand is Go text this package does not interpret. The span carries its own
+// Start and Stop, so holding the operand costs nothing an editor or the analysis
+// engine needs. Nil means absent, and a NON-NIL Checkpoint always has NON-EMPTY
+// Text, because the parser refuses an empty operand.
+//
+// It was a bare position until the clause grew that operand. The operand is
+// REQUIRED rather than optional because a checkpoint the runtime can journal
+// needs a codec, and no default is picked on the author's behalf.
+//
+// Idempotent is still a position, for the reason Checkpoint no longer has: it
+// takes no operand at all, so its presence is the whole payload and a bool would
+// throw away the one thing a consumer needs, which is where the clause sits.
 //
 // What the clauses MEAN, which the parser does not act on: Idempotent SELECTS THE
 // ANCHOR. The recovery ledger records an UNMARKED node's COMPLETION with the
@@ -99,7 +108,7 @@ type Clauses struct {
 	Reads      []Ident
 	Writes     []Ident
 	Over       *GoSpan
-	Checkpoint *Position
+	Checkpoint *GoSpan
 	Idempotent *Position
 	OnError    *GoSpan
 	Note       *NoteBlock

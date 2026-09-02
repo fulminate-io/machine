@@ -24,7 +24,7 @@ branch screen fraudsvc.Clean from payments -> clean, suspect
 loop retry
 transform try stripe.TryEnrich from clean, retry
   reads attempt  writes by_type
-  checkpoint
+  checkpoint machine.GobCodec[stripe.Event]{}
   on error stripe.VoidCharge
   note """returns EnrichResult{Ok, Retryable}; transient failures loop below"""
 branch settle stripe.Succeeded from try -> enriched, flaky

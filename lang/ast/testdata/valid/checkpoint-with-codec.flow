@@ -1,4 +1,4 @@
 flow orders
 source ingest http.Listen[Order](":8080")
 transform charge billing.Charge from ingest
-  checkpoint charge
+  checkpoint machine.GobCodec[Order]{}
