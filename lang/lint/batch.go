@@ -6,6 +6,7 @@ package lint
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -85,7 +86,7 @@ func gather(paths []string) ([]string, error) {
 	for _, path := range paths {
 		info, err := os.Stat(path)
 		if err != nil {
-			return nil, errors.New(cannotRead + path + ": " + err.Error())
+			return nil, fmt.Errorf("%s%s: %w", cannotRead, path, err)
 		}
 		if !info.IsDir() {
 			found = append(found, path)
@@ -113,7 +114,7 @@ func walk(dir string) ([]string, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, errors.New(cannotRead + dir + ": " + err.Error())
+		return nil, fmt.Errorf("%s%s: %w", cannotRead, dir, err)
 	}
 	return found, nil
 }
@@ -130,15 +131,15 @@ func parseAll(found []string) (Batch, error) {
 	for _, path := range found {
 		src, err := os.ReadFile(path)
 		if err != nil {
-			return Batch{}, errors.New(cannotRead + path + ": " + err.Error())
+			return Batch{}, fmt.Errorf("%s%s: %w", cannotRead, path, err)
 		}
 
 		file, perr := ast.Parse(src)
 		if perr != nil {
 			diags := analysis.ParseDiagnostics(path, perr)
 			if len(diags) == 0 {
-				return Batch{}, errors.New("lint: " + path +
-					" did not parse and reported no diagnostics: " + perr.Error())
+				return Batch{}, fmt.Errorf("lint: %s did not parse and reported no diagnostics: %w",
+					path, perr)
 			}
 			batch.Parse = append(batch.Parse, diags...)
 			batch.Damaged = append(batch.Damaged, path)

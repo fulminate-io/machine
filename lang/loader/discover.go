@@ -6,6 +6,7 @@ package loader
 
 import (
 	"errors"
+	"fmt"
 	"go/token"
 	"io/fs"
 	"os"
@@ -112,7 +113,7 @@ func (p *Packages) Sources(pkgPath string) ([]string, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, errors.New(cannotRead + mod.Dir + ": " + err.Error())
+		return nil, fmt.Errorf("%s%s: %w", cannotRead, mod.Dir, err)
 	}
 
 	sort.Strings(found)
@@ -171,12 +172,12 @@ func (p *Packages) Flows(pkgPath string) ([]Flow, error) {
 		// directory, not from a caller.
 		src, err := os.ReadFile(path)
 		if err != nil {
-			return nil, errors.New(cannotRead + path + ": " + err.Error())
+			return nil, fmt.Errorf("%s%s: %w", cannotRead, path, err)
 		}
 
 		file, err := ast.Parse(src)
 		if err != nil {
-			return nil, errors.New(cannotParse + path + ": " + err.Error())
+			return nil, fmt.Errorf("%s%s: %w", cannotParse, path, err)
 		}
 
 		for _, decl := range file.Decls {

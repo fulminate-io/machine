@@ -6,6 +6,7 @@ package loader
 
 import (
 	"errors"
+	"fmt"
 	goast "go/ast"
 	"go/token"
 	"go/types"
@@ -81,7 +82,7 @@ func Load(dir string, patterns []string) (*Packages, error) {
 
 	roots, err := packages.Load(&packages.Config{Mode: loadMode, Dir: dir}, patterns...)
 	if err != nil {
-		return nil, errors.New(cannotLoad + dir + ": " + err.Error())
+		return nil, fmt.Errorf("%s%s: %w", cannotLoad, dir, err)
 	}
 
 	loaded := &Packages{byPath: map[string]*packages.Package{}}
