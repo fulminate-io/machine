@@ -92,38 +92,102 @@ func TestADottedUseResolvesRenamesAndSplices(t *testing.T) {
 			t.Error("the dependency's flow declaration was spliced in and would become a second plan")
 		}
 	}
-	// AND THE FLOW-ONLY IMPORT IS DROPPED. Nothing in this file qualifies a Go
-	// name with it, so emitting it produces `imported and not used`.
-	if declaresImport(src.File, `"example.com/upstream"`) {
-		t.Error("the import that served only the flow reference survived into the emitted declarations")
+	// AND THE IMPORT BLOCK IS LEFT ALONE. Whether a flow-referenced import is ALSO
+	// needed by the emitted Go is a question about the EMITTED Go, and answering it
+	// here — by counting the qualifier in the source text — read the import
+	// declaration's own path literal as a use of the thing it declares. The
+	// resolution now records the CANDIDATE and the emitter decides.
+	if !declaresImport(src.File, `"example.com/upstream"`) {
+		t.Error("the resolution dropped an import; that decision belongs to the emitter")
+	}
+	if reached := flowReferencedPaths([]Source{src}, imported); !reached["example.com/upstream"] {
+		t.Errorf("the flow-referenced path was not recorded as a candidate; got %v", reached)
 	}
 }
 
-// TestAnImportStillNeededByAGoReferenceIsKept is the other side of the drop, and
-// without it the drop is indistinguishable from dropping every import.
-func TestAnImportStillNeededByAGoReferenceIsKept(t *testing.T) {
-	const body = `import "example.com/upstream"
+// TestTheEmitterOmitsAFlowOnlyImportAndKeepsAGoReferencedOne is the decision
+// itself, driven at the emitter where the emitted Go exists.
+//
+// BOTH DIRECTIONS ARE HERE BECAUSE EITHER ALONE IS SATISFIED BY A CONSTANT. An
+// emitter that omitted every flow-referenced import passes the first half; one
+// that omitted none passes the second.
+func TestTheEmitterOmitsAFlowOnlyImportAndKeepsAGoReferencedOne(t *testing.T) {
+	const candidate = "example.com/upstream"
 
-func Report(f machine.Frame[upstream.Order]) upstream.Order { return f.Value() }
+	emitted := func(t *testing.T, body string) string {
+		t.Helper()
+		file, err := ast.Parse([]byte(body))
+		if err != nil {
+			t.Fatalf("the fixture does not parse: %v", err)
+		}
+		src := Source{Path: "app.flow", Src: []byte(body), File: file}
+		imported, diags := resolveImportsWith([]Source{src}, answering("Screen", upstreamFlow))
+		if len(diags) != 0 {
+			t.Fatalf("the resolution reported:\n%s", strings.Join(messagesOf(diags), "\n"))
+		}
+		programs, buildDiags := buildFile(file)
+		if len(buildDiags) != 0 {
+			t.Fatalf("the fixture must build clean:\n%s", strings.Join(messagesOf(buildDiags), "\n"))
+		}
+		deps := map[string]*Program{}
+		boundary := map[string]Boundary{"upstream.Screen": {Outputs: []string{"ok", "bad"}}}
+		for _, one := range imported {
+			deps[one.Ref] = one.Program
+		}
+		for _, p := range programs {
+			p.InputTypes = map[string]string{"ingest": "Order", "s.check": "Order", "emit": "Order"}
+			if _, declared := boundary[p.Name]; !declared {
+				boundary[p.Name] = Boundary{}
+			}
+		}
+		cfg := Config{Package: "generated", Qualifier: "acme"}
+		plans, lowerDiags := lowerFile(programs, deps, boundary, cfg)
+		if len(lowerDiags) != 0 {
+			t.Fatalf("the fixture must lower clean:\n%s", strings.Join(messagesOf(lowerDiags), "\n"))
+		}
+		out, emitDiags := Generate(Request{File: file, Programs: programs, Plans: plans, Config: cfg,
+			Source: "app.flow", FlowReferenced: flowReferencedPaths([]Source{src}, imported)})
+		if len(emitDiags) != 0 {
+			t.Fatalf("emission reported:\n%s", strings.Join(messagesOf(emitDiags), "\n"))
+		}
+
+		return string(out.Source)
+	}
+
+	t.Run("an import serving only the flow reference is omitted", func(t *testing.T) {
+		// The import's own path contains `upstream.` nowhere, but the DECLARATION
+		// does bind the name `upstream` — which is what a text count could not
+		// separate from a use.
+		got := emitted(t, `import "`+candidate+`"
+
+func Report(f machine.Frame[Order]) Order { return f.Value() }
 
 flow main
 source ingest Feed()
 use s upstream.Screen from ingest -> ok, bad
 sink emit Report from ok
 drop bad
-`
-	file, err := ast.Parse([]byte(body))
-	if err != nil {
-		t.Fatalf("the fixture does not parse: %v", err)
-	}
-	src := Source{Path: "app.flow", Src: []byte(body), File: file}
+`)
+		if strings.Contains(got, candidate) {
+			t.Errorf("an import nothing qualifies a name with was emitted:\n%s", got)
+		}
+	})
 
-	if _, diags := resolveImportsWith([]Source{src}, answering("Screen", upstreamFlow)); len(diags) != 0 {
-		t.Fatalf("the resolution reported:\n%s", strings.Join(messagesOf(diags), "\n"))
-	}
-	if !declaresImport(src.File, `"example.com/upstream"`) {
-		t.Error("an import a Go reference still qualifies was dropped; the generated file would not compile")
-	}
+	t.Run("an import a Go reference still qualifies is kept", func(t *testing.T) {
+		got := emitted(t, `import "`+candidate+`"
+
+func Report(f machine.Frame[Order]) Order { upstream.Note(); return f.Value() }
+
+flow main
+source ingest Feed()
+use s upstream.Screen from ingest -> ok, bad
+sink emit Report from ok
+drop bad
+`)
+		if !strings.Contains(got, candidate) {
+			t.Errorf("an import a Go reference qualifies was omitted; the file would not compile:\n%s", got)
+		}
+	})
 }
 
 // TestTheResolversOwnRefusalsAreCarriedBackVerbatim covers the two refusals this
@@ -288,9 +352,13 @@ drop bad
 	}
 }
 
-// TestAnImportForADifferentQualifierIsNotDropped pins that the drop is keyed on
-// the qualifier the resolved reference actually consumed.
-func TestAnImportForADifferentQualifierIsNotDropped(t *testing.T) {
+// TestOnlyAFlowReferencedPathBecomesACandidate pins which imports the emitter is
+// even allowed to consider.
+//
+// AN IMPORT THE AUTHOR WROTE PURELY FOR GO NAMES IS NEVER A CANDIDATE, so an
+// unused one survives and the compiler tells them about it — which is their
+// answer to have rather than one this package silently takes away.
+func TestOnlyAFlowReferencedPathBecomesACandidate(t *testing.T) {
 	const body = `import "example.com/upstream"
 import "example.com/other"
 
@@ -306,14 +374,24 @@ drop bad
 	}
 	src := Source{Path: "app.flow", Src: []byte(body), File: file}
 
-	if _, diags := resolveImportsWith([]Source{src}, answering("Screen", upstreamFlow)); len(diags) != 0 {
+	imported, diags := resolveImportsWith([]Source{src}, answering("Screen", upstreamFlow))
+	if len(diags) != 0 {
 		t.Fatalf("the resolution reported:\n%s", strings.Join(messagesOf(diags), "\n"))
 	}
-	if declaresImport(src.File, `"example.com/upstream"`) {
-		t.Error("the import that served only the flow reference survived")
+
+	reached := flowReferencedPaths([]Source{src}, imported)
+	if !reached["example.com/upstream"] {
+		t.Error("the path a dotted use reached through is not a candidate")
+	}
+	if reached["example.com/other"] {
+		t.Error("an import no flow reference consumed became a candidate")
+	}
+	// AND NEITHER IS REMOVED HERE. The resolution records; the emitter decides.
+	if !declaresImport(src.File, `"example.com/upstream"`) {
+		t.Error("the resolution dropped the flow-referenced import")
 	}
 	if !declaresImport(src.File, `"example.com/other"`) {
-		t.Error("an import no flow reference consumed was dropped anyway")
+		t.Error("the resolution dropped an import no flow reference consumed")
 	}
 }
 

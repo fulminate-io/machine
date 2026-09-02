@@ -221,10 +221,10 @@ func declaresFlow(body []byte, name string) bool {
 
 // resolveGoldenImports resolves a case's cross-module references, or answers
 // nothing when the case declares no upstream module.
-func resolveGoldenImports(t *testing.T, c goldenCase, source Source) map[string]*Program {
+func resolveGoldenImports(t *testing.T, c goldenCase, source Source) (map[string]*Program, map[string]bool) {
 	t.Helper()
 	if c.upstream == "" {
-		return nil
+		return nil, nil
 	}
 
 	imported, diags := resolveImportsWith([]Source{source}, fixtureResolver(c.upstream))
@@ -241,7 +241,7 @@ func resolveGoldenImports(t *testing.T, c goldenCase, source Source) map[string]
 		out[one.Ref] = one.Program
 	}
 
-	return out
+	return out, flowReferencedPaths([]Source{source}, imported)
 }
 
 // generateCase runs the whole pipeline over one fixture.
@@ -252,10 +252,11 @@ func generateCase(t *testing.T, c goldenCase) Generated {
 		t.Fatalf("%s: the fixture must parse clean: %v", c.name, err)
 	}
 	// THE IMPORTS RESOLVE BEFORE THE GRAPH IS BUILT, because resolving splices
-	// the dependency's funcs into this file's declarations and drops an import
-	// that served only a flow reference — both of which the build and the
-	// emission then see.
-	imported := resolveGoldenImports(t, c, Source{Path: "pipeline.flow", Src: []byte(c.source), File: file})
+	// the dependency's funcs into this file's declarations, which the build and
+	// the emission then see. Whether a flow-referenced import is also NEEDED by
+	// the emitted Go is decided by the emitter, against the Go it emitted.
+	imported, flowReferenced := resolveGoldenImports(t, c,
+		Source{Path: "pipeline.flow", Src: []byte(c.source), File: file})
 	programs, buildDiags := buildFile(file)
 	if len(buildDiags) != 0 {
 		t.Fatalf("%s: the fixture must build clean:\n%s", c.name, strings.Join(messagesOf(buildDiags), "\n"))
@@ -279,7 +280,8 @@ func generateCase(t *testing.T, c goldenCase) Generated {
 	if len(lowerDiags) != 0 {
 		t.Fatalf("%s: the fixture must lower clean:\n%s", c.name, strings.Join(messagesOf(lowerDiags), "\n"))
 	}
-	out, emitDiags := Generate(Request{File: file, Programs: programs, Plans: plans, Config: cfg, Source: "pipeline.flow"})
+	out, emitDiags := Generate(Request{File: file, Programs: programs, Plans: plans, Config: cfg,
+		Source: "pipeline.flow", FlowReferenced: flowReferenced})
 	if len(emitDiags) != 0 {
 		t.Fatalf("%s: emission reported:\n%s", c.name, strings.Join(messagesOf(emitDiags), "\n"))
 	}

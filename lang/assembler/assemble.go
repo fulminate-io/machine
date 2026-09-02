@@ -61,6 +61,10 @@ type Facts struct {
 	// ITS OWN. The dependency's own build generates its wiring; emitting a second
 	// copy here would declare it twice in a program that already has one.
 	Imported map[string]*Program
+	// FlowReferenced are the import PATHS a resolved dotted `use` reached
+	// through. They are the only imports the emitter may leave out, and it leaves
+	// one out only when the Go it emitted qualifies no name with it.
+	FlowReferenced map[string]bool
 }
 
 // Registration is one gob.Register call the generated package emits.
@@ -129,7 +133,7 @@ func assembleOne(source Source, cfg Config, facts Facts) (Generated, []Diagnosti
 	return Generate(Request{
 		File: source.File, Programs: programs, Plans: plans,
 		Config: cfg, Source: source.Path, Types: facts.Types,
-		Registrations: facts.Registrations,
+		Registrations: facts.Registrations, FlowReferenced: facts.FlowReferenced,
 	})
 }
 

@@ -68,8 +68,17 @@ func resolveImportsWith(sources []Source, resolve flowResolver) ([]Imported, []D
 	return imported, diags
 }
 
-// resolveFileImports resolves one file's dotted references and prunes the
-// imports that served only them.
+// resolveFileImports resolves one file's dotted references.
+//
+// IT NO LONGER PRUNES ANYTHING. Whether an import that served a flow reference
+// is ALSO needed by the emitted Go is a question about the EMITTED Go, and the
+// only honest place to answer it is where that Go exists. What this records is
+// the CANDIDATE set — the import PATHS a resolved dotted `use` reached through —
+// and the emitter decides.
+//
+// THE PATH IS THE KEY, NOT THE QUALIFIER. A qualifier is a per-file binding and
+// two files may bind the same one to different modules; a path names one module
+// for the whole run.
 func resolveFileImports(source Source, resolve flowResolver) ([]Imported, []Diagnostic) {
 	uses := dottedUses(source.File)
 	if len(uses) == 0 {
@@ -81,7 +90,6 @@ func resolveFileImports(source Source, resolve flowResolver) ([]Imported, []Diag
 	var (
 		imported []Imported
 		diags    []Diagnostic
-		consumed = map[string]int{}
 	)
 	for _, use := range uses {
 		one, useDiags := resolveOne(source, resolve, paths, use)
@@ -89,13 +97,37 @@ func resolveFileImports(source Source, resolve flowResolver) ([]Imported, []Diag
 		if one == nil {
 			continue
 		}
-		consumed[use.Flow[0].Name]++
 		imported = append(imported, *one)
 		spliceDependency(source.File, one.Source.File)
 	}
-	dropFlowOnlyImports(source, consumed)
 
 	return imported, diags
+}
+
+// flowReferencedPaths is the set of import paths a resolved dotted `use` reached
+// through, across the whole run.
+//
+// THESE ARE CANDIDATES FOR OMISSION AND NOTHING MORE. The flow language's
+// `import` serves two purposes — qualifying Go names, and naming the module a
+// dotted `use` reaches — and only the first belongs in the emitted Go. An import
+// the author wrote purely for Go names is NEVER a candidate, so an unused one
+// stays and the compiler tells them about it, which is their answer to have.
+func flowReferencedPaths(sources []Source, imported []Imported) map[string]bool {
+	if len(imported) == 0 {
+		return nil
+	}
+
+	reached := map[string]bool{}
+	for _, source := range sources {
+		paths := importPaths(source.File)
+		for _, use := range dottedUses(source.File) {
+			if path, declared := paths[use.Flow[0].Name]; declared {
+				reached[path] = true
+			}
+		}
+	}
+
+	return reached
 }
 
 // dottedUses is every `use` in a file whose reference carries a dot.
@@ -270,44 +302,6 @@ func declaresFunc(file *ast.File, name string) bool {
 	}
 
 	return false
-}
-
-// dropFlowOnlyImports removes an import that named a module for a flow reference
-// and for nothing else.
-//
-// THE FLOW LANGUAGE'S `import` SERVES TWO PURPOSES — qualifying Go names, and
-// naming the module a dotted `use` reaches — and only the FIRST belongs in the
-// emitted Go. MEASURED: leaving it in produced `"example.com/upstream" imported
-// and not used` against a generated line the author never wrote.
-//
-// USE IS DECIDED BY SCANNING THE FILE'S OWN BYTES for the qualifier in reference
-// position, and subtracting the occurrences the resolved references account for.
-// What remains is a Go reference the import is still needed for.
-func dropFlowOnlyImports(source Source, consumed map[string]int) {
-	if len(consumed) == 0 {
-		return
-	}
-
-	kept := make([]ast.Decl, 0, len(source.File.Decls))
-	for _, decl := range source.File.Decls {
-		imp, ok := decl.(ast.ImportDecl)
-		if ok && flowOnly(source.Src, qualifierOf(imp), consumed) {
-			continue
-		}
-		kept = append(kept, decl)
-	}
-	source.File.Decls = kept
-}
-
-// flowOnly reports whether every occurrence of a qualifier in the file is
-// accounted for by a resolved flow reference.
-func flowOnly(src []byte, qualifier string, consumed map[string]int) bool {
-	resolved, referenced := consumed[qualifier]
-	if !referenced || resolved == 0 {
-		return false
-	}
-
-	return strings.Count(string(src), qualifier+".") <= resolved
 }
 
 // qualifierOf is the name an import declaration binds: its alias when one is

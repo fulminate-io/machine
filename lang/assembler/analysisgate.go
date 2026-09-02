@@ -55,6 +55,7 @@ func gate(sources []Source, pkgs *loader.Packages, pkgPath string) (gateResult, 
 	imported, importDiags := resolveImports(sources, pkgs)
 	refused = append(refused, importDiags...)
 	refused = append(refused, mergeImported(&facts, imported, pkgs, pkgPath)...)
+	facts.FlowReferenced = flowReferencedPaths(sources, imported)
 
 	return gateResult{Facts: facts, Refused: refused, Disclosed: disclosed}, nil
 }

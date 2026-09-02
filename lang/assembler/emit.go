@@ -7,7 +7,10 @@ package assembler
 
 import (
 	"fmt"
+	goast "go/ast"
 	"go/format"
+	"go/parser"
+	"go/token"
 	"strings"
 
 	"github.com/whitaker-io/machine/lang/ast"
@@ -35,6 +38,13 @@ type Request struct {
 	// Registrations are the gob registrations this file's package must emit,
 	// already deduplicated and sorted by the driver.
 	Registrations []Registration
+	// FlowReferenced are the import PATHS a resolved dotted `use` reached
+	// through, and they are the only imports this emitter may omit.
+	//
+	// An import the author wrote purely to qualify Go names is never a candidate,
+	// so an unused one survives into the generated file and the compiler tells
+	// them about it — which is their answer to have.
+	FlowReferenced map[string]bool
 }
 
 // generatedMarker is line 1 of every emitted file, exactly.
@@ -78,14 +88,38 @@ func (e *emitter) synthesized() {
 // and the wiring functions come last so everything they reference is already
 // declared.
 func Generate(req Request) (Generated, []Diagnostic) {
+	e, diags := emitOnce(req, nil)
+	if len(diags) != 0 {
+		return Generated{Name: generatedName(req.Source)}, diags
+	}
+
+	// WHICH FLOW-REFERENCED IMPORTS THE EMITTED GO DOES NOT USE is a question
+	// about the emitted Go, so it is asked of the emitted Go: the pass above is
+	// read back through go/parser and every candidate whose bound name appears in
+	// no qualified reference is omitted from a second, real pass.
+	omit := unusedFlowImports(req, e.buf.String())
+	if len(omit) == 0 {
+		return e.formatted(req.Source)
+	}
+
+	final, diags := emitOnce(req, omit)
+	if len(diags) != 0 {
+		return Generated{Name: generatedName(req.Source)}, diags
+	}
+
+	return final.formatted(req.Source)
+}
+
+// emitOnce writes the whole file, omitting the named import paths.
+func emitOnce(req Request, omit map[string]bool) (*emitter, []Diagnostic) {
 	file, plans, cfg, source := req.File, req.Plans, req.Config, req.Source
 	e := &emitter{lines: map[int]ast.Position{}}
 	if diags := e.synthesize(req); len(diags) != 0 {
-		return Generated{Name: generatedName(source)}, diags
+		return e, diags
 	}
 	e.header(source)
 	e.packageClause(cfg, plans)
-	e.imports(file, plans, req.Registrations)
+	e.imports(file, plans, req.Registrations, omit)
 	e.writeln(preamble)
 	e.synthesized()
 	e.verbatimFuncs(file)
@@ -108,7 +142,87 @@ func Generate(req Request) (Generated, []Diagnostic) {
 		e.wire(plan, s)
 	}
 
-	return e.formatted(source)
+	return e, nil
+}
+
+// unusedFlowImports names the flow-referenced imports the emitted Go never
+// qualifies a name with.
+//
+// THE ANSWER IS STRUCTURAL AND IT HAS TO BE. The obvious shortcut — counting the
+// qualifier followed by a dot in the source text — reads the import declaration's
+// OWN path literal as a use of the thing it declares, so `import other
+// "other.example/screening"` counts two occurrences of `other.` where there is
+// one reference, judges the import needed, and emits Go that does not compile:
+// `"other.example/screening" imported as other and not used`. The unnamed form
+// breaks the same way whenever the path's last segment reappears as a dotted
+// segment. Parsing answers what a substring count cannot: a SelectorExpr's X
+// identifier is a use; a string literal is not.
+//
+// A FILE THAT DOES NOT PARSE OMITS NOTHING. The emitted Go is then broken for a
+// reason of its own, which formatted reports with the unformatted bytes attached;
+// dropping an import on top of that would replace the author's error with a
+// worse one.
+func unusedFlowImports(req Request, emitted string) map[string]bool {
+	candidates := flowImportCandidates(req)
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	parsed, err := parser.ParseFile(token.NewFileSet(), "", emitted, parser.SkipObjectResolution)
+	if err != nil {
+		return nil
+	}
+
+	used := qualifiedNames(parsed)
+	omit := map[string]bool{}
+	for path, name := range candidates {
+		if !used[name] {
+			omit[path] = true
+		}
+	}
+
+	return omit
+}
+
+// flowImportCandidates maps each flow-referenced import path this file declares
+// to the name it binds.
+func flowImportCandidates(req Request) map[string]string {
+	if len(req.FlowReferenced) == 0 || req.File == nil {
+		return nil
+	}
+
+	out := map[string]string{}
+	for _, decl := range req.File.Decls {
+		imp, ok := decl.(ast.ImportDecl)
+		if !ok {
+			continue
+		}
+		if path := strings.Trim(imp.Path, `"`); req.FlowReferenced[path] {
+			out[path] = qualifierOf(imp)
+		}
+	}
+
+	return out
+}
+
+// qualifiedNames is every identifier the file uses on the left of a selector.
+//
+// It over-collects on purpose: a local variable named like a package lands here
+// too. That direction is SAFE — it keeps an import — while the opposite direction
+// deletes one the code needs.
+func qualifiedNames(file *goast.File) map[string]bool {
+	out := map[string]bool{}
+	goast.Inspect(file, func(n goast.Node) bool {
+		if sel, ok := n.(*goast.SelectorExpr); ok {
+			if ident, isIdent := sel.X.(*goast.Ident); isIdent {
+				out[ident.Name] = true
+			}
+		}
+
+		return true
+	})
+
+	return out
 }
 
 // formatted runs gofmt over the emitted bytes.
@@ -268,7 +382,7 @@ func flowNames(plans []*Plan) string {
 // encoding/gob IS CONDITIONAL ON THE SAME TERMS, and for the same reason: it is
 // referenced only by the registration init below, so a file needing no
 // registration carries neither an empty init nor an unused import.
-func (e *emitter) imports(file *ast.File, plans []*Plan, regs []Registration) {
+func (e *emitter) imports(file *ast.File, plans []*Plan, regs []Registration, omit map[string]bool) {
 	e.writeln("import (")
 	if anyPlanCheckpoints(plans) || len(regs) > 0 {
 		if len(regs) > 0 {
@@ -283,6 +397,9 @@ func (e *emitter) imports(file *ast.File, plans []*Plan, regs []Registration) {
 	for _, decl := range file.Decls {
 		imp, ok := decl.(ast.ImportDecl)
 		if !ok {
+			continue
+		}
+		if omit[strings.Trim(imp.Path, `"`)] {
 			continue
 		}
 		line := "\t"
