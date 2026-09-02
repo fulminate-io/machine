@@ -16,11 +16,11 @@ import (
 // value that looks copied and silently shares or loses the rest.
 func (d *cloneDeriver) structBody(shape *types.Struct, name, spelling string, at posRange, depth int) (string, bool) {
 	var b strings.Builder
-	b.WriteString("\tout := v\n")
+	_, _ = b.WriteString("\tout := v\n")
 	for i := range shape.NumFields() {
 		field := shape.Field(i)
 		if !field.Exported() && !sameGeneratedPackage(field) {
-			d.refuse(at, "the type %q carries the unexported field %q from another package, "+
+			d.refusef(at, "the type %q carries the unexported field %q from another package, "+
 				"which generated code cannot copy; supply an explicit clone function",
 				spelling, field.Name())
 
@@ -33,9 +33,9 @@ func (d *cloneDeriver) structBody(shape *types.Struct, name, spelling string, at
 		if !ok {
 			return "", false
 		}
-		b.WriteString("\tout." + field.Name() + " = " + fieldClone + "(v." + field.Name() + ")\n")
+		_, _ = b.WriteString("\tout." + field.Name() + " = " + fieldClone + "(v." + field.Name() + ")\n")
 	}
-	b.WriteString("\n\treturn out")
+	_, _ = b.WriteString("\n\treturn out")
 
 	return d.wrap(name, spelling, b.String()), true
 }
@@ -51,10 +51,10 @@ func (d *cloneDeriver) sliceBody(shape *types.Slice, name, spelling string, at p
 		return "", false
 	}
 	var b strings.Builder
-	b.WriteString("\tif v == nil {\n\t\treturn nil\n\t}\n")
-	b.WriteString("\tout := make(" + spelling + ", len(v))\n")
-	b.WriteString("\tfor i := range v {\n\t\tout[i] = " + elem + "\n\t}\n")
-	b.WriteString("\n\treturn out")
+	_, _ = b.WriteString("\tif v == nil {\n\t\treturn nil\n\t}\n")
+	_, _ = b.WriteString("\tout := make(" + spelling + ", len(v))\n")
+	_, _ = b.WriteString("\tfor i := range v {\n\t\tout[i] = " + elem + "\n\t}\n")
+	_, _ = b.WriteString("\n\treturn out")
 
 	return d.wrap(name, spelling, b.String()), true
 }
@@ -66,9 +66,9 @@ func (d *cloneDeriver) arrayBody(shape *types.Array, name, spelling string, at p
 		return "", false
 	}
 	var b strings.Builder
-	b.WriteString("\tout := v\n")
-	b.WriteString("\tfor i := range v {\n\t\tout[i] = " + elem + "\n\t}\n")
-	b.WriteString("\n\treturn out")
+	_, _ = b.WriteString("\tout := v\n")
+	_, _ = b.WriteString("\tfor i := range v {\n\t\tout[i] = " + elem + "\n\t}\n")
+	_, _ = b.WriteString("\n\treturn out")
 
 	return d.wrap(name, spelling, b.String()), true
 }
@@ -84,10 +84,10 @@ func (d *cloneDeriver) mapBody(shape *types.Map, name, spelling string, at posRa
 		return "", false
 	}
 	var b strings.Builder
-	b.WriteString("\tif v == nil {\n\t\treturn nil\n\t}\n")
-	b.WriteString("\tout := make(" + spelling + ", len(v))\n")
-	b.WriteString("\tfor k, value := range v {\n\t\tout[" + keyClone + "] = " + valueClone + "\n\t}\n")
-	b.WriteString("\n\treturn out")
+	_, _ = b.WriteString("\tif v == nil {\n\t\treturn nil\n\t}\n")
+	_, _ = b.WriteString("\tout := make(" + spelling + ", len(v))\n")
+	_, _ = b.WriteString("\tfor k, value := range v {\n\t\tout[" + keyClone + "] = " + valueClone + "\n\t}\n")
+	_, _ = b.WriteString("\n\treturn out")
 
 	return d.wrap(name, spelling, b.String()), true
 }
@@ -101,9 +101,9 @@ func (d *cloneDeriver) pointerBody(shape *types.Pointer, name, spelling string, 
 		return "", false
 	}
 	var b strings.Builder
-	b.WriteString("\tif v == nil {\n\t\treturn nil\n\t}\n")
-	b.WriteString("\tcopied := " + target + "\n")
-	b.WriteString("\n\treturn &copied")
+	_, _ = b.WriteString("\tif v == nil {\n\t\treturn nil\n\t}\n")
+	_, _ = b.WriteString("\tcopied := " + target + "\n")
+	_, _ = b.WriteString("\n\treturn &copied")
 
 	return d.wrap(name, spelling, b.String()), true
 }

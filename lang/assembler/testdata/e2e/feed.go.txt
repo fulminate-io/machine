@@ -1,0 +1,92 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"sync"
+
+	machine "github.com/whitaker-io/machine/v4"
+)
+
+// Order is the payload the end-to-end flow carries. Tags is a SLICE on purpose:
+// it is what makes the tee's synthesized duplicator do real work.
+type Order struct {
+	ID   string
+	Seen int
+	Tags []string
+}
+
+// packetCount is how many data the transport pushes.
+const packetCount = 3
+
+// Feed is the source transport. It pushes a fixed number of packets when the
+// machine starts.
+//
+// IT MINTS DATA WITH machine.RebuildPacket, which is the exported packet
+// constructor: there is no exported path from a Frame to a Packet, so this is the
+// sanctioned way for a transport to produce one.
+func Feed() machine.EdgeFactory[Order] {
+	return func(node string, report machine.Report) (machine.Edge[Order], error) {
+		return &feedEdge{node: node, ch: make(chan machine.Packet[Order], packetCount)}, nil
+	}
+}
+
+type feedEdge struct {
+	node string
+	ch   chan machine.Packet[Order]
+	once sync.Once
+}
+
+func (e *feedEdge) Start(ctx context.Context) error {
+	e.once.Do(func() {
+		for i := range packetCount {
+			packet, err := machine.RebuildPacket(machine.FrameData{
+				ID:     fmt.Sprintf("datum-%d", i),
+				Source: e.node,
+				Node:   e.node,
+			}, Order{ID: fmt.Sprintf("order-%d", i), Tags: []string{"a"}})
+			if err != nil {
+				return
+			}
+			e.ch <- packet
+		}
+	})
+
+	return nil
+}
+
+func (e *feedEdge) Send(ctx context.Context, packet machine.Packet[Order]) error {
+	select {
+	case e.ch <- packet:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (e *feedEdge) Receive() <-chan machine.Packet[Order] { return e.ch }
+
+func (e *feedEdge) Close() error { return nil }
+
+// Interesting is the branch predicate. Everything is interesting, so every datum
+// reaches the tee and the sink.
+func Interesting(f machine.Frame[Order]) bool { return f.Value().ID != "" }
+
+// Audit is the second sink, which consumes the tee's other branch.
+func Audit(f machine.Frame[Order]) Order { return f.Value() }
+
+// done is closed once the token has been printed, so main can exit on the datum
+// rather than on a timer.
+var done = make(chan struct{})
+
+var emitOnce sync.Once
+
+// Emit prints the LOCKED TOKEN from the fixture's own code. The harness asserts
+// on the running program's stdout, so nothing but the flow actually driving data
+// through can produce it.
+func Emit(seen int) {
+	emitOnce.Do(func() {
+		fmt.Printf("flow-e2e: processed=%d\n", seen)
+		close(done)
+	})
+}

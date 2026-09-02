@@ -89,7 +89,7 @@ func generateWithTypes(t *testing.T, src, support string, types map[string]strin
 	if len(lowerDiags) != 0 {
 		t.Fatalf("the fixture must lower clean:\n%s", strings.Join(messagesOf(lowerDiags), "\n"))
 	}
-	out, emitDiags := Generate(file, programs, plans, cfg, "pipeline.flow", typed)
+	out, emitDiags := Generate(Request{File: file, Programs: programs, Plans: plans, Config: cfg, Source: "pipeline.flow", Types: typed})
 	if len(emitDiags) != 0 {
 		t.Fatalf("emission reported:\n%s", strings.Join(messagesOf(emitDiags), "\n"))
 	}
@@ -145,7 +145,7 @@ func TestUnsynthesizableCloneIsRefusedBeforeTypeResolution(t *testing.T) {
 		cfg := Config{Package: "generated", Qualifier: "acme"}
 		plans, _ := lowerFile(programs, map[string]Boundary{"split": {}}, cfg)
 
-		_, diags := Generate(file, programs, plans, cfg, "pipeline.flow", nil)
+		_, diags := Generate(Request{File: file, Programs: programs, Plans: plans, Config: cfg, Source: "pipeline.flow"})
 		if len(diags) == 0 {
 			t.Fatal("a tee and a slice var were emitted with no type information and no diagnostic")
 		}
