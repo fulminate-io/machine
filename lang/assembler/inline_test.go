@@ -271,13 +271,13 @@ func TestSubflowBindsOutputsByName(t *testing.T) {
 // lang/analysis DERIVES which outputs a flow exposes and this module CONSUMES that
 // fact. The defect this leg alone detects is a stale or divergent local derivation
 // quietly winning — two implementations of one ruled semantic drifting apart,
-// which no build, no other criterion and no runtime behaviour reveals. So a
+// which no build, no other criterion and no runtime behavior reveals. So a
 // disagreement is a refusal naming BOTH views, in both directions, never a
 // preference for either.
 func TestSubflowBindingDisagreementIsRefusedLoudly(t *testing.T) {
 	t.Run("the graph produces a name the boundary does not export", func(t *testing.T) {
 		// The stale-local-derivation case. Preferring the local view here is
-		// exactly the second-opinion behaviour the ruling forbids.
+		// exactly the second-opinion behavior the ruling forbids.
 		narrow := map[string]Boundary{"screening": {Outputs: []string{"ok"}}, "main": {}}
 		_, diags := lowerFileOf(t, subflowFixture, narrow)
 		if len(diags) == 0 {

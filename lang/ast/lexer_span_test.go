@@ -121,6 +121,39 @@ func TestClauseOperandMayBeLastBeforeASwitchBody(t *testing.T) {
 	})
 }
 
+// TestASeparatedBraceAtOffsetZeroHasNothingBeforeIt drives the one arm of
+// atSeparatedBrace no .flow source can reach.
+//
+// WHY THE ARM EXISTS AND IS NOT DELETED. The rule decides adjacency by reading the
+// byte BEFORE the cursor, so at offset zero there is no such byte and the read
+// would be out of bounds. scanGoSpan skips horizontal whitespace before the scan
+// begins, so a span never actually starts on a separated brace and the guard is
+// unreachable through the parser — which is precisely why it is driven here rather
+// than removed: it is the bounds check that makes the read safe, and an
+// unreachable guard is still what stands between a future caller and a panic.
+//
+// IT IS ALSO WHAT THE FLOOR REQUIRES. lang/ast's CI job carries COVERAGE_FLOOR at
+// 100 with zero margin, so a partially covered function fails that job on merge
+// whatever the parser can or cannot reach — measured at 99.9% over 529 blocks
+// with this arm undriven.
+func TestASeparatedBraceAtOffsetZeroHasNothingBeforeIt(t *testing.T) {
+	if (&lexer{src: []byte("{")}).atSeparatedBrace() {
+		t.Error("a brace at offset zero reported as SEPARATED; there is no byte before it, " +
+			"so it cannot be separated from anything")
+	}
+
+	// THE CONTROLS. Without them the assertion above is satisfied by a function
+	// that always returns false, which would make every brace part of the
+	// expression and reopen the swallowed-arms defect this rule exists to close.
+	if !(&lexer{src: []byte("x {"), off: 2}).atSeparatedBrace() {
+		t.Error("CONTROL FAILED: a brace preceded by a space did not report as separated, " +
+			"so the offset-zero assertion above proves nothing")
+	}
+	if (&lexer{src: []byte("x{"), off: 1}).atSeparatedBrace() {
+		t.Error("CONTROL FAILED: a brace written against the expression reported as separated")
+	}
+}
+
 // TestGoSpanIsOpaqueToQuotedLiterals proves a brace inside a string or rune
 // literal is TEXT rather than a bracket.
 //

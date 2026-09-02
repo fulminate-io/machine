@@ -91,7 +91,7 @@ func countingDriver(count *int) *Driver {
 // TestDriverLoadsPackagesOncePerGenerationRun is LEG 1 of the cost criterion.
 //
 // THE DEFECT CLASS: a driver that calls loader.Load per flow or per file. That
-// shape compiles, passes every behavioural test, and produces byte-identical
+// shape compiles, passes every behavioral test, and produces byte-identical
 // generated output — the only thing that changes is that a one-off
 // seconds-scale cost becomes a per-unit one.
 //
