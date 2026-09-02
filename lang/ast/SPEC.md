@@ -63,9 +63,11 @@ drop bad
 ```
 
 `source` opens a flow, `transform` maps a datum, `sink` ends a path. `branch`
-takes exactly two targets and routes the intact datum down one; `tee` duplicates
-into two or more. `loop` declares a re-entry point a later `send` feeds, and
-`drop` discards a path. `from` takes one or more upstream names.
+takes exactly two targets and routes the intact datum down one; `tee` copies it
+to every target it names. `loop` declares a re-entry point, and `send` is the
+only backward arrow in the language: its target may be a loop label or a node
+declared earlier. `drop` discards a path. `from` takes one or more upstream
+names.
 
 `switch` routes on a Go expression. It needs at least one arm; an `else` arm, if
 present, must come last.
@@ -91,7 +93,8 @@ typed from its body.
 
 `use` embeds another flow. The identifiers after `->` **name** outputs of the
 embedded flow: they are a set, order carries no meaning, and binding a subset is
-legal. Naming something that is not one of that flow's outputs is an error.
+legal. Naming something that is not one of that flow's outputs is an error, and
+so is binding the same name twice.
 
 ```flow
 flow screening (Order) -> ok OkResult, bad ErrResult
@@ -108,9 +111,10 @@ A flow that declares a signature consumes an implicit `in`.
 
 ## Clauses
 
-Any statement may carry `reads`, `writes`, `over`, `checkpoint`, `idempotent`,
-`on error` and `note`. They are order-free, each may appear at most once, and
-they may be written on the same line or on continuation lines.
+Every statement except the three bare forms — `drop`, `loop` and `send`, which
+take no clauses at all — may carry `reads`, `writes`, `over`, `checkpoint`,
+`idempotent`, `on error` and `note`. They are order-free, each may appear at most
+once, and they may be written on the same line or on continuation lines.
 
 `checkpoint` takes a Go-expression codec operand and journals the node.
 `idempotent` is the one clause taking no operand, and it selects the **arrival**
