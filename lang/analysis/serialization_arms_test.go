@@ -148,7 +148,7 @@ func TestTheAnalyzerStaysOutOfTheRegisteredSet(t *testing.T) {
 		names = append(names, a.Name)
 
 		if a.Name == serializationName {
-			t.Errorf("the serialization analyzer is registered, so the driver would build its Pass and it "+
+			t.Errorf("the serialization analyzer is registered, so the driver would build its Pass and it " +
 				"could never receive a package set")
 		}
 	}
