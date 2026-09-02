@@ -285,7 +285,8 @@ func (l *lowering) teeChain(n Node, options []string) {
 		}
 		l.append(Op{
 			Method: MethodTee, Receiver: receiver, Results: []string{trueVar, falseVar},
-			Node: name, Options: armOptions(options, k), Start: n.Start, Stop: n.Stop,
+			Node: name, TypeArg: l.program.InputTypes[n.Name],
+			Options: armOptions(options, k), Start: n.Start, Stop: n.Stop,
 		})
 		l.flowVar[n.Outputs[k]] = trueVar
 		receiver = falseVar

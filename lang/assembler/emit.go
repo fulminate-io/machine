@@ -28,6 +28,21 @@ type emitter struct {
 	lines map[int]ast.Position
 	// line is the generated line most recently written.
 	line int
+	// synth holds one derivation per flow, in plan order.
+	synth []*synthesis
+}
+
+// synthesized writes every derived clone and duplicator.
+func (e *emitter) synthesized() {
+	for _, s := range e.synth {
+		if body := s.Functions(); body != "" {
+			e.writeln("// Deep-copy functions derived from the payload types. A tee copies into")
+			e.writeln("// both branches and every state key requires a cloner, so these are")
+			e.writeln("// synthesized rather than assumed: a shallow copy would leave two branches")
+			e.writeln("// sharing the same backing memory, silently.")
+			e.writeln(body)
+		}
+	}
 }
 
 // Generate turns one file's plans into one generated Go file.
@@ -37,10 +52,17 @@ type emitter struct {
 // says which .flow produced it, the preamble carries the type-inference helpers,
 // and the wiring functions come last so everything they reference is already
 // declared.
-func Generate(file *ast.File, programs []*Program, plans []*Plan, cfg Config, source string) (Generated, []Diagnostic) {
+func Generate(
+	file *ast.File, programs []*Program, plans []*Plan, cfg Config, source string, typed *Types,
+) (Generated, []Diagnostic) {
 	e := &emitter{lines: map[int]ast.Position{}}
+	// THE SYNTHESIS RUNS FIRST. A tee needs a Duplicator and every var's NewKey
+	// needs a cloner, both derived from type structure, and a file missing either
+	// is refused before a line is written rather than emitted half-formed.
 	for _, p := range programs {
-		e.diags = append(e.diags, refuseUnsynthesizable(p)...)
+		s := newSynthesis(p, typed)
+		e.diags = append(e.diags, s.Diagnostics()...)
+		e.synth = append(e.synth, s)
 	}
 	if len(e.diags) != 0 {
 		return Generated{Name: generatedName(source)}, e.diags
@@ -49,10 +71,17 @@ func Generate(file *ast.File, programs []*Program, plans []*Plan, cfg Config, so
 	e.packageClause(cfg, plans)
 	e.imports(file, plans)
 	e.writeln(preamble)
+	e.synthesized()
 	e.verbatimFuncs(file)
 	e.declarations(file)
-	for _, plan := range plans {
-		e.wire(plan)
+	// The synthesis slice is built per PROGRAM in the same order the plans are,
+	// so a plan takes the derivation belonging to its own flow.
+	for i, plan := range plans {
+		var s *synthesis
+		if i < len(e.synth) {
+			s = e.synth[i]
+		}
+		e.wire(plan, s)
 	}
 
 	src := e.buf.String()
