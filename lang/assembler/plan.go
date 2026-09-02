@@ -147,4 +147,27 @@ type Plan struct {
 	// flow declares none. It is EXPOSED for the host rather than installed by
 	// Wire, because a machine's error handler is a machine.New option.
 	OnError string
+	// Ingests are the typed ingest closures Wire returns, one per source
+	// statement, in the source's own declaration order.
+	Ingests []Ingest
+}
+
+// Ingest is one source statement's exported ingest closure.
+//
+// THE RUNTIME HANDS IT BACK AND THIS PACKAGE USED TO THROW IT AWAY. Machine.Source
+// returns a Flow and an Ingest[T]; the ingest was bound to `_` because the locked
+// Wire signature exposed neither value and Go will not compile a bound-but-unread
+// name. Exporting it is what lets a host feed a flow programmatically rather than
+// only through the transport a source's `over` clause names.
+type Ingest struct {
+	// Node is the source statement's name, as the author wrote it.
+	Node string
+	// Field is the exported struct field name: the node name with its first byte
+	// upper-cased, the same transform Wire<Flow> already uses.
+	Field string
+	// Var is the Go variable Wire binds the ingest to.
+	Var string
+	// Type is the source's payload type spelling, so the field is typed
+	// machine.Ingest[Type] rather than at some erased type.
+	Type string
 }

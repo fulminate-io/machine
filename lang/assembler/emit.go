@@ -202,12 +202,24 @@ func (e *emitter) journalContract() {
 	e.writeln("// cannot reach the journal itself, only ask whether one is wired, because a")
 	e.writeln("// generated file must not learn a deployment's replication configuration.")
 	e.writeln("//")
-	e.writeln("// WHAT HAPPENS WHEN THE HOST FORGETS. Every Wire function below returns error,")
-	e.writeln("// uniformly, whether or not its flow checkpoints — the signature is one")
-	e.writeln("// contract rather than two, so a host's call site never depends on a property")
-	e.writeln("// of the .flow source it cannot see. For a flow that DOES checkpoint, Wire")
-	e.writeln("// checks for a journal BEFORE declaring any node and returns an error naming")
-	e.writeln("// the flow and machine.OptionJournal, leaving the machine untouched.")
+	e.journalRefusalContract()
+}
+
+// journalRefusalContract writes the second half of the host journal contract.
+//
+// It is split from journalContract above only because the module's linter caps a
+// function at twenty statements; the three together are one doc comment.
+func (e *emitter) journalRefusalContract() {
+	e.writeln("// WHAT HAPPENS WHEN THE HOST FORGETS. Every Wire function below returns its")
+	e.writeln("// flow's ingest struct and an error, uniformly, whether or not its flow")
+	e.writeln("// checkpoints and whether or not the host means to feed it programmatically —")
+	e.writeln("// the signature is one contract rather than two, so a host's call site never")
+	e.writeln("// depends on a property of the .flow source it cannot see. For a flow that DOES")
+	e.writeln("// checkpoint, Wire checks for a journal BEFORE declaring any node and returns")
+	e.writeln("// the ZERO ingest struct beside an error naming the flow and")
+	e.writeln("// machine.OptionJournal, leaving the machine untouched. The zero struct's")
+	e.writeln("// fields are nil funcs, so a host that ignores the error and pushes panics")
+	e.writeln("// rather than dropping the value silently.")
 	e.writeln("//")
 	e.writeln("// THE RUNTIME'S OWN REFUSAL IS A DIFFERENT ONE, and it arrives later. A")
 	e.writeln("// checkpointed node declared on a journal-less machine records a declaration")

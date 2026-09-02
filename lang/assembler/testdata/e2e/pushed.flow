@@ -1,0 +1,15 @@
+flow pushed
+note """
+The INGEST fixture. Its transport delivers NOTHING at all — Start opens the edge
+and pushes no packet — so every datum that reaches the sink arrived through the
+ingest the generated package exports.
+
+THAT IS WHY THE TRANSPORT IS EMPTY rather than merely reduced. A fixture whose
+transport also delivers proves only that SOME data moved; one whose transport
+delivers nothing proves the ingest specifically, because with the ingest
+unwired the program prints no token and the run fails on its deadline.
+"""
+
+source entry Feed()
+transform tally Tally from entry
+sink report Report from tally

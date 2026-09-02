@@ -214,7 +214,8 @@ import (
 
 func main() {
 	m := machine.New("flow-e2e")
-	if err := WireE2e(m); err != nil {
+	ingests, err := WireE2e(m)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "wiring:", err)
 		os.Exit(1)
 	}
@@ -223,6 +224,16 @@ func main() {
 	defer cancel()
 	if err := m.Start(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "start:", err)
+		os.Exit(1)
+	}
+
+	// THE IN-PROCESS PUSH, and it is load bearing rather than decorative. The
+	// transport delivers one datum FEWER than the token's count, so the count is
+	// reached only if this push actually delivered into the running graph. An
+	// ingest that is merely typed, or exported but never wired to the machine,
+	// leaves the flow one short and the token is never printed.
+	if err := ingests.Ingest(ctx, Order{ID: "order-pushed", Tags: []string{"a"}}); err != nil {
+		fmt.Fprintln(os.Stderr, "push:", err)
 		os.Exit(1)
 	}
 
@@ -254,7 +265,11 @@ import (
 
 func main() {
 	m := machine.New("flow-loop")
-	if err := WireLooped(m); err != nil {
+	// THE INGESTS ARE DELIBERATELY UNUSED HERE. This flow is fed by its
+	// transport, and Wire returns the struct anyway because the signature is one
+	// contract rather than two — a host that does not push simply ignores it,
+	// which is what this main demonstrates.
+	if _, err := WireLooped(m); err != nil {
 		fmt.Fprintln(os.Stderr, "wiring:", err)
 		os.Exit(1)
 	}

@@ -150,7 +150,12 @@ func TestTheGeneratedFileCarriesItsHeaderAndPackageDoc(t *testing.T) {
 	// worth pinning: a package doc that lost it would leave a host with no
 	// statement anywhere of who builds the journal.
 	doc := string(out.Source)
-	for _, want := range []string{"machine.OptionJournal", "THE HOST OWNS THE JOURNAL", "returns error"} {
+	for _, want := range []string{
+		"machine.OptionJournal",
+		"THE HOST OWNS THE JOURNAL",
+		"ingest struct and an error",
+		"nil funcs",
+	} {
 		if !strings.Contains(doc, want) {
 			t.Errorf("the generated package doc does not mention %q", want)
 		}
@@ -165,8 +170,20 @@ func TestWireReturnsErrorUniformly(t *testing.T) {
 		out := generateOf(t, handleFixture,
 			map[string]string{"ingest": "Order", "charge": "Order", "done": "Receipt"},
 			map[string]Boundary{"orders": {}})
-		if !strings.Contains(string(out.Source), "func WireOrders(m *machine.Machine) error {") {
-			t.Errorf("the wiring function does not return error:\n%s", out.Source)
+		// THE SIGNATURE CARRIES BOTH RESULTS UNCONDITIONALLY. A flow that
+		// checkpoints and one that does not are called identically, and so are a
+		// flow the host feeds programmatically and one driven entirely by its
+		// transport — which is the whole point of the uniform contract.
+		if !strings.Contains(string(out.Source),
+			"func WireOrders(m *machine.Machine) (OrdersIngests, error) {") {
+			t.Errorf("the wiring function does not return the ingest struct and error:\n%s", out.Source)
+		}
+		// The struct must be DECLARED and TYPED, not merely named in the
+		// signature: a signature naming an undeclared type does not compile, but
+		// one naming an empty struct for a flow that HAS a source would compile
+		// and silently expose nothing.
+		if !strings.Contains(string(out.Source), "Ingest machine.Ingest[Order]") {
+			t.Errorf("the ingest struct carries no typed field for the source:\n%s", out.Source)
 		}
 		if strings.Contains(string(out.Source), "HasJournal") {
 			t.Error("a flow with no checkpoint emitted a journal check it does not need")

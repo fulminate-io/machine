@@ -10,12 +10,16 @@
 // cannot reach the journal itself, only ask whether one is wired, because a
 // generated file must not learn a deployment's replication configuration.
 //
-// WHAT HAPPENS WHEN THE HOST FORGETS. Every Wire function below returns error,
-// uniformly, whether or not its flow checkpoints — the signature is one
-// contract rather than two, so a host's call site never depends on a property
-// of the .flow source it cannot see. For a flow that DOES checkpoint, Wire
-// checks for a journal BEFORE declaring any node and returns an error naming
-// the flow and machine.OptionJournal, leaving the machine untouched.
+// WHAT HAPPENS WHEN THE HOST FORGETS. Every Wire function below returns its
+// flow's ingest struct and an error, uniformly, whether or not its flow
+// checkpoints and whether or not the host means to feed it programmatically —
+// the signature is one contract rather than two, so a host's call site never
+// depends on a property of the .flow source it cannot see. For a flow that DOES
+// checkpoint, Wire checks for a journal BEFORE declaring any node and returns
+// the ZERO ingest struct beside an error naming the flow and
+// machine.OptionJournal, leaving the machine untouched. The zero struct's
+// fields are nil funcs, so a host that ignores the error and pushes panics
+// rather than dropping the value silently.
 //
 // THE RUNTIME'S OWN REFUSAL IS A DIFFERENT ONE, and it arrives later. A
 // checkpointed node declared on a journal-less machine records a declaration
@@ -61,14 +65,30 @@ func flowWritesOfFilter[U any](_ machine.Filter[U], refs ...machine.KeyRef) mach
 	return machine.WithWrites[U](refs...)
 }
 
-// WireRouting declares the routing flow on m.
+// RoutingIngests carries one typed ingest per source statement in the routing flow.
 //
-// IT RETURNS error UNCONDITIONALLY. A flow with no checkpoint returns nil; the
-// signature is one contract rather than two, so a caller never has to know
-// whether the .flow source happens to checkpoint, and a regeneration cannot
-// silently change how this is called.
-func WireRouting(m *machine.Machine) error {
-	ingest, _ := m.Source[Order]("ingest", machine.WithEdge(Poll()))
+// Each field pushes a value into its source as if the source's transport had
+// delivered it, so a host can feed the flow programmatically. A field is a nil
+// func on the zero struct, which is what Wire returns beside a non-nil error.
+type RoutingIngests struct {
+	// Ingest feeds the ingest source.
+	Ingest machine.Ingest[Order]
+}
+
+// WireRouting declares the routing flow on m and returns its ingests.
+//
+// IT RETURNS RoutingIngests AND error UNCONDITIONALLY. A flow with no
+// checkpoint returns a nil error, and a flow whose sources are all driven by
+// their transports returns a struct the host is free to ignore. The signature is
+// one contract rather than two, so a caller never has to know whether the .flow
+// source happens to checkpoint or to be fed programmatically, and a regeneration
+// cannot silently change how this is called.
+//
+// THE ZERO STRUCT IS NOT USABLE. On a non-nil error the returned struct is the
+// zero value and every ingest field is a nil func, so a caller that ignores the
+// error and pushes panics rather than dropping the value silently.
+func WireRouting(m *machine.Machine) (RoutingIngests, error) {
+	ingest, ingest_ingest := m.Source[Order]("ingest", machine.WithEdge(Poll()))
 	billable, routeRest := ingest.If("route", func(f machine.Frame[Order]) bool {
 		ingest := f.Value()
 		_ = ingest
@@ -88,5 +108,7 @@ func WireRouting(m *machine.Machine) error {
 	hold.Drop("hold#drain")
 	other.Send(refundable)
 
-	return nil
+	return RoutingIngests{
+		Ingest: ingest_ingest,
+	}, nil
 }

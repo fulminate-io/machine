@@ -1,0 +1,93 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"sync"
+
+	machine "github.com/whitaker-io/machine/v4"
+)
+
+// Order is the payload the pushed flow carries. It is the type the exported
+// ingest must be instantiated at, and the wrong-type leg of the typing test
+// pushes something else through the same field.
+type Order struct {
+	ID string
+}
+
+// deliveredCount is how many data the HOST pushes through the ingest. The
+// transport pushes none, so this is the whole population.
+const deliveredCount = 2
+
+// Feed is the source transport, and it DELIVERS NOTHING ON PURPOSE. Start opens
+// the edge and returns; no packet is ever minted here.
+//
+// That is what makes the token below evidence about the ingest specifically: if
+// the exported ingest were merely typed and never wired to the machine, nothing
+// at all would reach the sink and the program would fail on its deadline.
+func Feed() machine.EdgeFactory[Order] {
+	return func(node string, report machine.Report) (machine.Edge[Order], error) {
+		return &feedEdge{ch: make(chan machine.Packet[Order], deliveredCount)}, nil
+	}
+}
+
+type feedEdge struct {
+	ch chan machine.Packet[Order]
+}
+
+func (e *feedEdge) Start(ctx context.Context) error { return nil }
+
+// Send is the path the exported ingest ultimately reaches. Every datum this flow
+// ever sees arrives here.
+func (e *feedEdge) Send(ctx context.Context, packet machine.Packet[Order]) error {
+	select {
+	case e.ch <- packet:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (e *feedEdge) Receive() <-chan machine.Packet[Order] { return e.ch }
+
+func (e *feedEdge) Close() error { return nil }
+
+var (
+	mu   sync.Mutex
+	seen int
+)
+
+// Tally counts arrivals.
+func Tally(f machine.Frame[Order]) Order {
+	mu.Lock()
+	seen++
+	mu.Unlock()
+
+	return f.Value()
+}
+
+// Report prints the LOCKED TOKEN once every pushed datum has arrived.
+func Report(f machine.Frame[Order]) Order {
+	mu.Lock()
+	count := seen
+	mu.Unlock()
+	if count == deliveredCount {
+		Emit(count)
+	}
+
+	return f.Value()
+}
+
+// done is closed once the token has been printed, so main exits on the data
+// rather than on a timer.
+var done = make(chan struct{})
+
+var emitOnce sync.Once
+
+// Emit prints the locked token from the fixture's own code.
+func Emit(count int) {
+	emitOnce.Do(func() {
+		fmt.Printf("flow-push: delivered=%d\n", count)
+		close(done)
+	})
+}

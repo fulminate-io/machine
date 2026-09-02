@@ -10,30 +10,99 @@ import (
 	"unicode"
 )
 
-// wire writes one flow's handle declarations and its wiring function.
+// wire writes one flow's handle declarations, its ingest struct and its wiring
+// function.
 func (e *emitter) wire(plan *Plan, s *synthesis) {
 	e.flowErrorHandler(plan)
 	e.handles(plan, s)
-	e.writeln("// Wire" + exported(plan.Flow) + " declares the " + plan.Flow + " flow on m.")
-	e.writeln("//")
-	e.writeln("// IT RETURNS error UNCONDITIONALLY. A flow with no checkpoint returns nil; the")
-	e.writeln("// signature is one contract rather than two, so a caller never has to know")
-	e.writeln("// whether the .flow source happens to checkpoint, and a regeneration cannot")
-	e.writeln("// silently change how this is called.")
-	if planCheckpoints(plan) {
-		e.writeln("//")
-		e.writeln("// THIS FLOW CHECKPOINTS, so it needs a journal. The check below runs BEFORE the")
-		e.writeln("// first node is declared and leaves the machine untouched when it fires.")
-	}
-	e.writeln("func Wire" + exported(plan.Flow) + "(m *machine.Machine) error {")
+	e.ingestStruct(plan)
+
+	name := exported(plan.Flow)
+	e.wireDoc(plan, name)
+	e.writeln("func Wire" + name + "(m *machine.Machine) (" + name + "Ingests, error) {")
 	e.journalCheck(plan)
 	for _, op := range plan.Ops {
 		e.op(op, s)
 	}
 	e.writeln("")
-	e.writeln("\treturn nil")
+	e.ingestReturn(plan)
 	e.writeln("}")
 	e.writeln("")
+}
+
+// wireDoc writes Wire's doc comment.
+//
+// It is split from wire above only because the module's linter caps a function at
+// twenty statements; the two together are one emission.
+func (e *emitter) wireDoc(plan *Plan, name string) {
+	e.writeln("// Wire" + name + " declares the " + plan.Flow + " flow on m and returns its ingests.")
+	e.writeln("//")
+	e.writeln("// IT RETURNS " + name + "Ingests AND error UNCONDITIONALLY. A flow with no")
+	e.writeln("// checkpoint returns a nil error, and a flow whose sources are all driven by")
+	e.writeln("// their transports returns a struct the host is free to ignore. The signature is")
+	e.writeln("// one contract rather than two, so a caller never has to know whether the .flow")
+	e.writeln("// source happens to checkpoint or to be fed programmatically, and a regeneration")
+	e.writeln("// cannot silently change how this is called.")
+	e.writeln("//")
+	e.writeln("// THE ZERO STRUCT IS NOT USABLE. On a non-nil error the returned struct is the")
+	e.writeln("// zero value and every ingest field is a nil func, so a caller that ignores the")
+	e.writeln("// error and pushes panics rather than dropping the value silently.")
+	if planCheckpoints(plan) {
+		e.writeln("//")
+		e.writeln("// THIS FLOW CHECKPOINTS, so it needs a journal. The check below runs BEFORE the")
+		e.writeln("// first node is declared and leaves the machine untouched when it fires.")
+	}
+}
+
+// ingestStruct writes the per-flow ingest struct.
+//
+// IT IS DECLARED FOR EVERY FLOW, including one with no source statement, because
+// Wire's signature names it unconditionally. An empty struct is the honest
+// spelling of "this flow exposes no programmatic entry".
+//
+// WHY A RETURNED STRUCT RATHER THAN PACKAGE-LEVEL VARS: package-level values
+// would be process-global, so two Machines wiring the same flow would overwrite
+// each other's ingests — the same hazard the state-handle qualifier exists to
+// avoid. A returned value is per-call and cannot collide.
+func (e *emitter) ingestStruct(plan *Plan) {
+	name := exported(plan.Flow) + "Ingests"
+	e.writeln("// " + name + " carries one typed ingest per source statement in the " +
+		plan.Flow + " flow.")
+	e.writeln("//")
+	e.writeln("// Each field pushes a value into its source as if the source's transport had")
+	e.writeln("// delivered it, so a host can feed the flow programmatically. A field is a nil")
+	e.writeln("// func on the zero struct, which is what Wire returns beside a non-nil error.")
+	if len(plan.Ingests) == 0 {
+		e.writeln("//")
+		e.writeln("// THIS FLOW DECLARES NO SOURCE, so the struct is empty. It exists anyway")
+		e.writeln("// because Wire's signature names it whether or not the flow has one.")
+		e.writeln("type " + name + " struct{}")
+		e.writeln("")
+
+		return
+	}
+	e.writeln("type " + name + " struct {")
+	for _, in := range plan.Ingests {
+		e.writeln("\t// " + in.Field + " feeds the " + in.Node + " source.")
+		e.writeln("\t" + in.Field + " machine.Ingest[" + in.Type + "]")
+	}
+	e.writeln("}")
+	e.writeln("")
+}
+
+// ingestReturn writes Wire's success return.
+func (e *emitter) ingestReturn(plan *Plan) {
+	name := exported(plan.Flow) + "Ingests"
+	if len(plan.Ingests) == 0 {
+		e.writeln("\treturn " + name + "{}, nil")
+
+		return
+	}
+	e.writeln("\treturn " + name + "{")
+	for _, in := range plan.Ingests {
+		e.writeln("\t\t" + in.Field + ": " + in.Var + ",")
+	}
+	e.writeln("\t}, nil")
 }
 
 // flowErrorHandler exposes a flow-level `on error` handler for the HOST to
@@ -73,7 +142,8 @@ func (e *emitter) journalCheck(plan *Plan) {
 		return
 	}
 	e.writeln("\tif !m.HasJournal() {")
-	e.writeln("\t\treturn fmt.Errorf(\"" + plan.Flow + ": this flow checkpoints and needs a recovery journal; \" +")
+	e.writeln("\t\treturn " + exported(plan.Flow) + "Ingests{}, fmt.Errorf(\"" + plan.Flow +
+		": this flow checkpoints and needs a recovery journal; \" +")
 	e.writeln("\t\t\t\"build the machine with machine.OptionJournal\")")
 	e.writeln("\t}")
 	e.writeln("")

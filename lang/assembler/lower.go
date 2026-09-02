@@ -181,18 +181,42 @@ func (l *lowering) flowControl(n Node, options []string) {
 // source lowers a source: the one call that begins a chain, on the machine
 // rather than on a flow.
 func (l *lowering) source(n Node, options []string) {
-	// THE INGEST CLOSURE IS DISCARDED. Machine.Source returns a Flow and an
-	// Ingest[T]; the locked Wire signature exposes neither, so a source is driven
-	// by the transport its `over` clause names rather than fed programmatically.
-	// Whether a generated package should also EXPORT a typed Ingest is an open
-	// question on this plan, and binding it to a name nothing reads would not
-	// compile, so it is discarded explicitly rather than left dangling.
-	results := []string{varOf(n.Name), "_"}
+	// THE INGEST CLOSURE IS KEPT AND EXPORTED. Machine.Source returns a Flow and
+	// an Ingest[T]. Wire returns a per-flow struct carrying one typed field per
+	// source, so a host can feed the flow programmatically rather than only
+	// through the transport an `over` clause names.
+	payload := l.payloadType(n)
+	ingestVar := varOf(n.Name + derivedSep + "ingest")
+	results := []string{varOf(n.Name), ingestVar}
 	l.append(Op{
-		Method: MethodSource, Receiver: machineVar, Results: results, TypeArg: l.payloadType(n),
+		Method: MethodSource, Receiver: machineVar, Results: results, TypeArg: payload,
 		Node: n.Name, Ref: refOf(n), Options: options, Start: n.Start, Stop: n.Stop,
 	})
+	l.ingest(n, ingestVar, payload)
 	l.bind(n.Outputs, results[0])
+}
+
+// ingest records one source's exported ingest, refusing a field-name collision.
+//
+// THE COLLISION THE REFUSAL SET DOES NOT ALREADY COVER: `source a` and `source A`
+// are DISTINCT node names, so the duplicate-node-name member never fires, yet both
+// upper-case to the field `A`. Silently dropping one would give the host a struct
+// whose field feeds a flow it did not name. Refusing names both sources.
+func (l *lowering) ingest(n Node, ingestVar, payload string) {
+	field := exported(n.Name)
+	for _, prior := range l.plan.Ingests {
+		if prior.Field == field {
+			l.diagf(n.Start, n.Stop,
+				"sources %q and %q both export the ingest field %q, so one would shadow the "+
+					"other; rename one so the names differ by more than the case of their first letter",
+				prior.Node, n.Name, field)
+
+			return
+		}
+	}
+	l.plan.Ingests = append(l.plan.Ingests, Ingest{
+		Node: n.Name, Field: field, Var: ingestVar, Type: payload,
+	})
 }
 
 // sink lowers a sink to a Map followed by a Drop of its drain.

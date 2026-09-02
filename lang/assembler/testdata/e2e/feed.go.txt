@@ -16,8 +16,12 @@ type Order struct {
 	Tags []string
 }
 
-// packetCount is how many data the transport pushes.
-const packetCount = 3
+// packetCount is how many data the TRANSPORT pushes. It is deliberately ONE
+// FEWER than the count the token asserts: main pushes the remaining datum
+// in-process through the exported ingest, so the token is reached only if that
+// ingest actually delivered into the running graph. An ingest that is merely
+// typed, or exported and never wired, leaves the flow one datum short.
+const packetCount = 2
 
 // Feed is the source transport. It pushes a fixed number of packets when the
 // machine starts.

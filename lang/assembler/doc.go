@@ -28,7 +28,9 @@
 //   - the source's own funcs, imports, consts and params, pasted verbatim;
 //   - synthesized deep-copy functions and tee duplicators;
 //   - process-global state handle declarations;
-//   - one Wire<Flow>(m *machine.Machine) error per flow.
+//   - one <Flow>Ingests struct per flow, carrying one typed machine.Ingest field
+//     per source statement so a host can feed the flow programmatically;
+//   - one Wire<Flow>(m *machine.Machine) (<Flow>Ingests, error) per flow.
 //
 // GENERATED CODE IS A BUILD ARTIFACT. Users commit .flow sources; the Go here is
 // regenerated whole on every run and is never committed. Regeneration removes the
@@ -102,12 +104,15 @@
 // deliberately cannot reach the journal itself, because a generated file must not
 // learn a deployment's replication configuration.
 //
-// Every Wire function returns error uniformly, whether or not its flow
-// checkpoints. That is one contract rather than two, so a host's call site never
-// depends on a property of the .flow source it cannot see and a regeneration
-// cannot silently change how it is called. For a flow that does checkpoint, Wire
-// checks for a journal BEFORE declaring any node and returns an error naming the
-// flow and the option, leaving the machine untouched.
+// Every Wire function returns its flow's ingest struct and an error uniformly,
+// whether or not its flow checkpoints and whether or not the host means to feed
+// it programmatically. That is one contract rather than two, so a host's call
+// site never depends on a property of the .flow source it cannot see and a
+// regeneration cannot silently change how it is called. For a flow that does
+// checkpoint, Wire checks for a journal BEFORE declaring any node and returns the
+// ZERO ingest struct beside an error naming the flow and the option, leaving the
+// machine untouched. The zero struct's fields are nil funcs, so a host that
+// ignores the error and pushes panics rather than dropping the value silently.
 //
 // The RUNTIME's own refusal is a different one and arrives later: a checkpointed
 // node declared on a journal-less machine records a declaration error that Start
