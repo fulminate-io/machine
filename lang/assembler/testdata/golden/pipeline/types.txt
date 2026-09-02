@@ -1,0 +1,8 @@
+# The per-node input type spellings the DRIVER supplies from cross-module type
+# inference. The generator derives none of them: Machine.Source cannot infer its
+# payload type, an idempotent marker needs an explicit type argument, and a
+# completion-anchored checkpoint's codec is re-instantiated at its successor's
+# type.
+ingest=Order
+charge=Order
+done=Receipt

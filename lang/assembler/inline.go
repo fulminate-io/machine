@@ -46,6 +46,9 @@ func lowerProgram(p *Program, deps map[string]*Program, boundary map[string]Boun
 	l.deps = deps
 	l.boundary = boundary
 	l.collectHandles(p, "")
+	if p.OnError != nil {
+		l.plan.OnError = p.OnError.Handler.Text
+	}
 	l.carryCheckpointCodecs(p)
 	for _, n := range p.Nodes {
 		l.node(n)

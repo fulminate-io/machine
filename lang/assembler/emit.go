@@ -37,8 +37,14 @@ type emitter struct {
 // says which .flow produced it, the preamble carries the type-inference helpers,
 // and the wiring functions come last so everything they reference is already
 // declared.
-func Generate(file *ast.File, plans []*Plan, cfg Config, source string) (Generated, []Diagnostic) {
+func Generate(file *ast.File, programs []*Program, plans []*Plan, cfg Config, source string) (Generated, []Diagnostic) {
 	e := &emitter{lines: map[int]ast.Position{}}
+	for _, p := range programs {
+		e.diags = append(e.diags, refuseUnsynthesizable(p)...)
+	}
+	if len(e.diags) != 0 {
+		return Generated{Name: generatedName(source)}, e.diags
+	}
 	e.header(source)
 	e.packageClause(cfg, plans)
 	e.imports(file, plans)
@@ -169,10 +175,22 @@ func (e *emitter) imports(file *ast.File, plans []*Plan) {
 		if imp.Alias != nil {
 			line += imp.Alias.Name + " "
 		}
-		e.writeAt(imp.Start, line+`"`+imp.Path+`"`)
+		// The parser stores the path WITH its quotes, so re-quoting it here would
+		// emit a doubled literal that does not parse.
+		e.writeAt(imp.Start, line+quotedPath(imp.Path))
 	}
 	e.writeln(")")
 	e.writeln("")
+}
+
+// quotedPath renders an import path as a Go string literal, whether or not the
+// parser already kept its quotes.
+func quotedPath(path string) string {
+	if strings.HasPrefix(path, `"`) && strings.HasSuffix(path, `"`) {
+		return path
+	}
+
+	return `"` + path + `"`
 }
 
 // verbatimFuncs writes the func declarations the .flow source carried, pasted

@@ -11,6 +11,7 @@ import (
 
 // wire writes one flow's handle declarations and its wiring function.
 func (e *emitter) wire(plan *Plan) {
+	e.flowErrorHandler(plan)
 	e.handles(plan)
 	e.writeln("// Wire" + exported(plan.Flow) + " declares the " + plan.Flow + " flow on m.")
 	e.writeln("//")
@@ -31,6 +32,33 @@ func (e *emitter) wire(plan *Plan) {
 	e.writeln("")
 	e.writeln("\treturn nil")
 	e.writeln("}")
+	e.writeln("")
+}
+
+// flowErrorHandler exposes a flow-level `on error` handler for the HOST to
+// install.
+//
+// WIRE CANNOT INSTALL IT, and that is the runtime's shape rather than a
+// limitation of this generator: a machine's error handler is a machine.New
+// option, and Wire receives an already-built Machine. So the handler is exported
+// as a value the host passes, on exactly the terms the journal is — generated
+// code states what it needs and the host supplies it.
+//
+// A NODE-level `on error` is different and IS installed by Wire, because that one
+// is a NodeOption.
+func (e *emitter) flowErrorHandler(plan *Plan) {
+	if plan.OnError == "" {
+		return
+	}
+	name := exported(plan.Flow) + "OnError"
+	e.writeln("// " + name + " is the flow-level error handler " + plan.Flow + " declares.")
+	e.writeln("//")
+	e.writeln("// WIRE CANNOT INSTALL IT. A machine's error handler is a machine.New option and")
+	e.writeln("// Wire is handed a machine that is already built, so the host passes")
+	e.writeln("// machine.OptionErrorHandler(" + name + ") when constructing it. Without that,")
+	e.writeln("// the flow runs under the runtime's default handler and this declaration has no")
+	e.writeln("// effect.")
+	e.writeln("var " + name + " = machine.ErrorHandler[any](" + plan.OnError + ")")
 	e.writeln("")
 }
 

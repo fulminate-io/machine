@@ -143,4 +143,8 @@ type Plan struct {
 	// Handles are the state handles this flow declares, including those an
 	// inlined subflow contributes under its instance name.
 	Handles []Handle
+	// OnError is the flow-level error handler's Go expression, empty when the
+	// flow declares none. It is EXPOSED for the host rather than installed by
+	// Wire, because a machine's error handler is a machine.New option.
+	OnError string
 }

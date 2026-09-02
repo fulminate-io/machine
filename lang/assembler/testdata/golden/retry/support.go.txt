@@ -1,0 +1,13 @@
+package generated
+
+import machine "github.com/whitaker-io/machine/v4"
+
+type Order struct{ ID string }
+
+func Poll() machine.EdgeFactory[Order] { return machine.Channel[Order](0) }
+
+func Lookup(f machine.Frame[Order]) Order { return f.Value() }
+
+func Wait(f machine.Frame[Order]) Order { return f.Value() }
+
+func Store(f machine.Frame[Order]) Order { return f.Value() }

@@ -1,0 +1,12 @@
+flow routing
+source ingest Poll()
+switch route from ingest on ingest.Kind {
+  "card", "wallet" -> billable
+  IsRefund(ingest) -> refundable
+  else -> other
+}
+transform charge Bill from billable
+branch settle Succeeded from charge -> kept, lost
+sink store Store from kept
+drop lost
+sink hold Quarantine from refundable, other

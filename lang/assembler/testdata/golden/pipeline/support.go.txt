@@ -1,0 +1,29 @@
+package generated
+
+import machine "github.com/whitaker-io/machine/v4"
+
+// The Go a .flow author writes beside their source. It is NOT generated; it
+// stands in for the package the flow's references resolve into, so the golden
+// file can be compiled rather than only diffed.
+
+type Order struct {
+	ID   string
+	Kind string
+}
+
+type Receipt struct {
+	ID   string
+	Seen int
+}
+
+func Poll() machine.EdgeFactory[Order] { return machine.Channel[Order](0) }
+
+func Store(f machine.Frame[Receipt]) Receipt { return f.Value() }
+
+// PageOnCall is the flow-level handler. A machine's error handler takes
+// NodeError[any], which is why it is declared at that type.
+func PageOnCall(machine.NodeError[any]) {}
+
+// NodeFailed is the node-level handler, whose type the runtime infers from the
+// node it is attached to.
+func NodeFailed(machine.NodeError[Order]) {}

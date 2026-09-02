@@ -1,0 +1,22 @@
+package generated
+
+import machine "github.com/whitaker-io/machine/v4"
+
+type Order struct {
+	ID   string
+	Kind string
+}
+
+type Receipt struct{ ID string }
+
+func Poll() machine.EdgeFactory[Order] { return machine.Channel[Order](0) }
+
+func IsRefund(o Order) bool { return o.Kind == "refund" }
+
+func Bill(f machine.Frame[Order]) Order { return f.Value() }
+
+func Succeeded(f machine.Frame[Order]) bool { return f.Value().ID != "" }
+
+func Store(f machine.Frame[Order]) Order { return f.Value() }
+
+func Quarantine(f machine.Frame[Order]) Order { return f.Value() }
