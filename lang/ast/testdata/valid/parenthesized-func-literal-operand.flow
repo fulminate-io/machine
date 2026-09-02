@@ -1,0 +1,11 @@
+flow escapes
+source ingest Poll
+transform a Step from ingest
+  over (func() machine.Transport { return nil })
+transform b Step from a
+  checkpoint (func() machine.Codec[Order] { return nil })()
+switch route from b on b.Kind checkpoint (func() machine.Codec[Order] { return nil }) {
+  "high" -> flagged
+  else -> normal
+}
+sink hold audit.Store from flagged, normal

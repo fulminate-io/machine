@@ -340,6 +340,22 @@ func (p *parser) endOfLine(what string) Position {
 		p.advance()
 		return stop
 	}
+	if p.at(tokLBrace) {
+		// A REFUSAL THAT NAMES THE ROUTE OUT. A depth-zero `{` separated from the
+		// expression before it ends a Go operand, so a bare func literal — whose
+		// body brace gofmt always writes spaced — leaves its body behind here.
+		// Reporting only `unexpected "{"` would leave the author with no next
+		// move; naming both escapes turns a dead end into a one-character fix.
+		// The two shapes that reach this point have different routes, so both are
+		// named: parenthesize a func literal, and write a composite literal's
+		// brace against its type, which is the spelling gofmt produces anyway.
+		p.diagHeref("unexpected %s after %s: a space before a top-level brace ends a Go operand, "+
+			"so parenthesize a func literal as (func() T { ... }) and write a composite "+
+			"literal's brace against its type as T{...}", describe(p.tok), what)
+
+		return p.skipToStatementBoundary()
+	}
 	p.diagHeref("unexpected %s after %s", describe(p.tok), what)
+
 	return p.skipToStatementBoundary()
 }

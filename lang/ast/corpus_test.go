@@ -22,7 +22,7 @@ const (
 	strawmanDir       = "testdata/strawman"
 )
 
-// mandatoryValidFixtures are the eleven files the valid corpus must carry. The
+// mandatoryValidFixtures are the fourteen files the valid corpus must carry. The
 // corpus itself stays OPEN; only these names are required.
 //
 // This is a SUBSET gate rather than a set-equality one, and it exists because
@@ -46,6 +46,15 @@ var mandatoryValidFixtures = []string{
 	// being deleted, and it is mandatory so the corpus always demonstrates the
 	// shape authors are meant to write.
 	"checkpoint-with-codec",
+	// The three span-terminator shapes. A clause operand may sit LAST before a
+	// switch body because a top-level brace SEPARATED from the expression ends
+	// the span; a parenthesized func literal is the escape for the one shape
+	// gofmt always writes spaced; and a brace inside a quoted literal is text
+	// rather than structure. Each is mandatory because each is an arm of the
+	// scanner rule, and lang/ast's floor is 100 at zero margin.
+	"clause-before-switch-body",
+	"parenthesized-func-literal-operand",
+	"quoted-brace-operand",
 }
 
 // lockedInvalidFixtures is the closed set of forms the parser rejects.
@@ -64,6 +73,12 @@ var lockedInvalidFixtures = []string{
 	"func-unterminated-body",
 	"headless-statement",
 	"via-not-over",
+	// The BARE func-literal operand. Its body brace is written spaced, so the
+	// span ends before the body and the statement is left holding it. The
+	// fixture exists to pin the diagnostic's ESCAPE clause, not merely the
+	// refusal: a message reading only `unexpected "{"` leaves the author with no
+	// route, and the parenthesized form is a one-character fix.
+	"bare-func-literal-operand",
 }
 
 // lockedAnalysisRejectFixtures is the closed set of files that PARSE CLEAN and
@@ -192,7 +207,7 @@ func splitExpectation(t *testing.T, want string) (string, string) {
 // TestInvalidCorpusCoversEveryLockedFixture asserts SET EQUALITY: the invalid
 // corpus is a closed set.
 func TestInvalidCorpusCoversEveryLockedFixture(t *testing.T) {
-	assertSetEquality(t, invalidCorpusDir, lockedInvalidFixtures, 14)
+	assertSetEquality(t, invalidCorpusDir, lockedInvalidFixtures, 15)
 }
 
 // TestAnalysisRejectCorpusCoversEveryLockedFixture asserts SET EQUALITY: the
@@ -227,11 +242,11 @@ func assertSetEquality(t *testing.T, dir string, locked []string, wantCount int)
 	t.Fatalf("%s holds %d fixtures, the locked list %d", dir, len(present), len(want))
 }
 
-// TestValidCorpusCoversEveryMandatoryFixture asserts the eleven mandatory names
+// TestValidCorpusCoversEveryMandatoryFixture asserts the fourteen mandatory names
 // are present. The valid corpus stays OPEN, so this is a subset gate.
 func TestValidCorpusCoversEveryMandatoryFixture(t *testing.T) {
-	if len(mandatoryValidFixtures) != 11 {
-		t.Fatalf("the mandatory list states %d fixtures; the plan locks 11", len(mandatoryValidFixtures))
+	if len(mandatoryValidFixtures) != 14 {
+		t.Fatalf("the mandatory list states %d fixtures; the plan locks 14", len(mandatoryValidFixtures))
 	}
 	present := fixtureNames(corpusFiles(t, validCorpusDir))
 	for _, name := range mandatoryValidFixtures {

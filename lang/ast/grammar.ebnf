@@ -28,9 +28,20 @@
 //   number       a decimal literal with an optional fractional part
 //   newline      a line break; a run of blank lines collapses to one, and horizontal whitespace is never a token
 //   noteText     a raw note body, opened and closed by a triple double-quote, verbatim, with no escapes at all
-//   goSpan       opaque Go text, bracket-depth tracked, ending at a depth-zero stop token, a clause keyword or a newline; NON-EMPTY
+//   goSpan       opaque Go text, bracket-depth tracked, ending FOUR WAYS, all at depth zero: at a stop token, at a clause
+//                keyword, at a newline, or at a `{` SEPARATED from the expression before it by a space or a tab; NON-EMPTY
 //                (an empty span is not a goSpan: `over` and `checkpoint` are the clauses this decides, since a clause written
 //                 bare at end of line, or followed straight by another clause keyword, otherwise scans as a well-formed empty span)
+//                THE ADJACENCY RULE is what lets a clause carrying an operand sit LAST before a switch body. An ADJACENT `{`
+//                is part of the expression and nests as before, so `checkpoint machine.GobCodec[Order]{}` stays whole; a
+//                SEPARATED `{` is a block's brace and ends the span. Adjacency rather than parse-completeness, because
+//                `machine.GobCodec[Order]` is itself a valid Go expression and "does it parse yet" cannot tell the two braces
+//                apart — what tells them apart is that gofmt writes a composite literal's brace adjacent and a block's spaced.
+//                THE ESCAPE: a func literal's body brace is always written spaced, so a BARE func-literal operand ends its span
+//                early and is refused with a diagnostic naming the route out — parenthesize it, `(func() T { ... })` or
+//                `(func() T { ... })()`, which nests the body brace at depth one and is writable in every position.
+//                QUOTED LITERALS ARE OPAQUE: a brace inside a string or a rune is text, never a bracket, so
+//                `over pubsub.Topic("a{b")` is a well-formed operand.
 //   goFuncSpan   a func declaration's parameters, results and body as one span, brace balanced, skipping Go's literals and comments
 //
 // `number` IS REFERENCED BY NO PRODUCTION BELOW, and that is not an omission.

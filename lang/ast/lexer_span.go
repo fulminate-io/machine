@@ -111,13 +111,47 @@ func (l *lexer) trimSpanTail(start int) string {
 
 // goSpanStep consumes one lexeme of a Go span, reporting whether the span ends
 // here.
+//
+// A QUOTED LITERAL IS OPAQUE. A brace inside a string or a rune is TEXT, not
+// structure, so it must not move the depth: `over pubsub.Topic("a{b")` is legal
+// Go and legal transport configuration. skipQuoted already existed for the
+// func-span scanner and is reused unchanged here, which makes the two scanners
+// agree rather than adding a second mechanism.
 func (l *lexer) goSpanStep(depth *int, stop []tokenKind) bool {
 	c := l.src[l.off]
 	if isIdentStart(c) {
 		return l.goSpanIdentStep(*depth, stop)
 	}
-	if *depth == 0 && (c == '\n' || l.stopSetMatches(stop)) {
-		return true
+	if c == '"' || c == '\'' {
+		l.skipQuoted(c)
+		return false
+	}
+	if *depth == 0 {
+		if c == '\n' {
+			return true
+		}
+		// ADJACENCY DECIDES A BRACE, WHOEVER ASKED. The `{` case is handled ahead
+		// of the stop set rather than inside it because both paths reach this
+		// byte: the parser arrives with no `{` in its stop set and needs the
+		// terminator rule, while the EBNF recognizer derives a FOLLOW set that
+		// DOES contain `{` wherever a production writes one after a goSpan.
+		// Letting the stop set answer first would end the span at an ADJACENT
+		// brace too, truncating `machine.GobCodec[Order]{}` to
+		// `machine.GobCodec[Order]` for the recognizer while the parser kept it
+		// whole — a disagreement reported as grammar drift rather than as the
+		// scanner bug it would be. One rule for the byte keeps them identical.
+		//
+		// AN ADJACENT BRACE MUST FALL THROUGH, not return. Returning false here
+		// would report "the span does not end" without consuming the byte or
+		// counting the depth, and the scan would spin on it forever — measured as
+		// a hung suite rather than reasoned.
+		if c == '{' {
+			if l.atSeparatedBrace() {
+				return true
+			}
+		} else if l.stopSetMatches(stop) {
+			return true
+		}
 	}
 	delta := bracketDelta(c)
 	if *depth+delta < 0 {
@@ -126,6 +160,29 @@ func (l *lexer) goSpanStep(depth *int, stop []tokenKind) bool {
 	*depth += delta
 	l.advance()
 	return false
+}
+
+// atSeparatedBrace reports whether the depth-zero `{` under the cursor is
+// SEPARATED from the expression before it by horizontal whitespace, which is what
+// makes it a block's brace rather than part of the operand.
+//
+// WHY ADJACENCY RATHER THAN PARSE-COMPLETENESS. `machine.GobCodec[Order]` is
+// itself a syntactically valid Go expression — an index expression — so asking
+// "does the text so far parse?" cannot separate a composite literal's brace from
+// a body brace. What DOES separate them is that gofmt writes a composite
+// literal's brace ADJACENT to its type and a block's brace SEPARATED by a space.
+// The rule therefore follows the formatter every .flow author already runs rather
+// than inventing a convention of its own.
+//
+// A span cannot begin at a separated brace in practice: scanGoSpan skips
+// horizontal whitespace first, so a leading `{` reads as adjacent and the empty
+// operand is caught by the clause guard instead.
+func (l *lexer) atSeparatedBrace() bool {
+	if l.off == 0 {
+		return false
+	}
+	prev := l.src[l.off-1]
+	return prev == ' ' || prev == '\t'
 }
 
 // goSpanIdentStep consumes a whole identifier, reporting whether it ends the

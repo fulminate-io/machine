@@ -1,0 +1,12 @@
+flow routing
+source ingest Poll
+switch route from ingest on ingest.Kind over ratelimit.New(5) {
+  "card", "wallet" -> billable
+  else -> other
+}
+transform charge billing.Charge from billable
+switch audit from charge on charge.Kind checkpoint machine.GobCodec[Order]{} {
+  "high" -> flagged
+  else -> normal
+}
+sink hold audit.Store from other, flagged, normal

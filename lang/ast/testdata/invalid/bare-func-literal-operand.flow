@@ -1,0 +1,5 @@
+flow escapes
+source ingest Poll
+transform a Step from ingest
+  over func() machine.Transport { return nil }
+sink done audit.Store from a

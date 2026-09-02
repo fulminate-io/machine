@@ -1,0 +1,15 @@
+flow quoting
+source ingest Poll
+transform a Step from ingest
+  over pubsub.Topic("a{b")
+transform b Step from a
+  over pubsub.Topic("a}b")
+transform c Step from b
+  over routeOn('{')
+transform d Step from c
+  over routeOn('}')
+switch route from d on d.Kind over pubsub.Topic("x{y") {
+  "high" -> flagged
+  else -> normal
+}
+sink hold audit.Store from flagged, normal

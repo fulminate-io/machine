@@ -1,0 +1,1 @@
+4:33: parenthesize a func literal as (func() T { ... })
