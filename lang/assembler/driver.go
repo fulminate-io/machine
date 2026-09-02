@@ -22,6 +22,9 @@ import (
 // regeneration removes.
 const generatedSuffix = ".flow.go"
 
+// loadRoot is the pattern naming every package under the load's root directory.
+const loadRoot = "./..."
+
 // generationConcurrency is the ceiling on CONCURRENT FILE EMISSIONS.
 //
 // ITS DIMENSION IS FILES BEING EMITTED AT ONCE, and its value is the machine's
@@ -108,34 +111,10 @@ func (d *Driver) Generate(inputDir, outputDir string) error {
 	if diags := d.runChecks(sources); len(diags) != 0 {
 		return &Error{Diagnostics: diags}
 	}
-	// THE OUTPUT DIRECTORY IS CREATED BEFORE THE PATH IS DERIVED, because the
-	// derivation reads it: a first run into a directory that does not exist yet
-	// would otherwise have nothing to walk upward from. commit creates it too and
-	// MkdirAll is idempotent, so this hoist adds a directory and removes nothing.
-	if mkErr := os.MkdirAll(outputDir, 0o750); mkErr != nil {
-		return fmt.Errorf("creating %s: %w", outputDir, mkErr)
-	}
-	pkgPath, err := d.packagePath(outputDir)
-	if err != nil {
-		return err
-	}
 
-	pkgs, err := d.load(inputDir, loadPatterns(pkgPath, sources))
+	facts, err := d.gather(sources, inputDir, outputDir)
 	if err != nil {
 		return err
-	}
-	facts, refused, err := d.facts(sources, pkgs, pkgPath)
-	if err != nil {
-		return err
-	}
-	// THE REFUSAL IS BEFORE ANY FILE IS WRITTEN, which is the contract runChecks
-	// already carries and the reason neither can move after emission: a rejected
-	// program left on disk compiles.
-	if len(refused) != 0 {
-		return &Error{Diagnostics: refused}
-	}
-	if pkgs != nil {
-		facts.Types = NewTypes(pkgs, pkgPath, map[int]ast.Position{})
 	}
 
 	generated, err := d.emitAll(sources, facts)
@@ -144,6 +123,48 @@ func (d *Driver) Generate(inputDir, outputDir string) error {
 	}
 
 	return d.commit(outputDir, generated)
+}
+
+// gather resolves the package path, performs the run's single load, runs the
+// analysis gate and builds the type table.
+//
+// IT IS SPLIT FROM Generate ONLY because the module's linter caps a function's
+// cyclomatic complexity at ten; the two together are one pipeline and the order
+// within them is the contract Generate's own doc describes.
+//
+// A GATE REFUSAL RETURNS FROM HERE, before anything is staged.
+func (d *Driver) gather(sources []Source, inputDir, outputDir string) (Facts, error) {
+	// THE OUTPUT DIRECTORY IS CREATED BEFORE THE PATH IS DERIVED, because the
+	// derivation reads it: a first run into a directory that does not exist yet
+	// would otherwise have nothing to walk upward from. commit creates it too and
+	// MkdirAll is idempotent, so this hoist adds a directory and removes nothing.
+	if err := os.MkdirAll(outputDir, 0o750); err != nil {
+		return Facts{}, fmt.Errorf("creating %s: %w", outputDir, err)
+	}
+	pkgPath, err := d.packagePath(outputDir)
+	if err != nil {
+		return Facts{}, err
+	}
+
+	pkgs, err := d.load(inputDir, loadPatterns(pkgPath, sources))
+	if err != nil {
+		return Facts{}, err
+	}
+	facts, refused, err := d.facts(sources, pkgs, pkgPath)
+	if err != nil {
+		return Facts{}, err
+	}
+	// THE REFUSAL IS BEFORE ANY FILE IS WRITTEN, which is the contract runChecks
+	// already carries and the reason neither can move after emission: a rejected
+	// program left on disk compiles.
+	if len(refused) != 0 {
+		return Facts{}, &Error{Diagnostics: refused}
+	}
+	if pkgs != nil {
+		facts.Types = NewTypes(pkgs, pkgPath, map[int]ast.Position{})
+	}
+
+	return facts, nil
 }
 
 // facts gathers the answers this package consumes and never derives.
@@ -220,8 +241,8 @@ func (d *Driver) packagePath(outputDir string) (string, error) {
 // THIS WIDENS ONE CALL RATHER THAN ADDING ONE. Loading is the seconds-scale
 // operation in this toolchain and the run still performs exactly one load.
 func loadPatterns(pkgPath string, sources []Source) []string {
-	patterns := []string{"./..."}
-	seen := map[string]bool{"./...": true}
+	patterns := []string{loadRoot}
+	seen := map[string]bool{loadRoot: true}
 	add := func(pattern string) {
 		if pattern == "" || seen[pattern] {
 			return

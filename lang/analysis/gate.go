@@ -109,12 +109,11 @@ func Gate(srcs []Source, pkgs *loader.Packages, pkgPath string) (*GateResult, er
 	if err != nil {
 		return nil, err
 	}
-	if out.Inferred == nil {
-		return nil, errNoInferredTypes
-	}
-	if out.Registrations == nil {
-		return nil, errNoRegistrations
-	}
+	// NO SECOND NIL CHECK ON THE TABLES. capture is the ONLY analyzer this call
+	// names, so Run returns a nil error exactly when capture returned one — and
+	// capture returns its sentinel rather than a nil table. Re-checking here would
+	// be a branch nothing can reach, which reads to a later editor as a condition
+	// that has been seen to happen.
 	out.Diagnostics = diags
 
 	return out, nil

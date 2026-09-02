@@ -66,7 +66,8 @@ func main() {
 	out := flag.String("out", ".", "directory the generated Go is written to")
 	pkg := flag.String("package", "generated", "package clause for the generated files")
 	qualifier := flag.String("qualifier", "", "prefix for process-global state handle names")
-	pkgPath := flag.String("pkgpath", "", "import path of the generated package; derived from the output directory when empty")
+	pkgPath := flag.String("pkgpath", "",
+		"import path of the generated package; derived from the output directory when empty")
 	flag.Parse()
 
 	if *qualifier == "" {
