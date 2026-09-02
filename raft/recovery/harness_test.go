@@ -14,11 +14,11 @@ import (
 
 	"github.com/hashicorp/raft"
 
-	machine "github.com/whitaker-io/machine/v4"
 	"github.com/whitaker-io/machine/raft/checkpoint"
 	"github.com/whitaker-io/machine/raft/ledger"
 	"github.com/whitaker-io/machine/raft/membership"
 	"github.com/whitaker-io/machine/raft/transport"
+	machine "github.com/whitaker-io/machine/v4"
 )
 
 // THE DETECTOR IS THE ROOT MODULE'S JOURNAL. The assertion lives here rather than in
@@ -120,7 +120,7 @@ func followerOf(t *testing.T, nodes []*node, leader *node) *node {
 // without tearing down a raft group to do it.
 //
 // It stands in for a DEPENDENCY rather than for the code under test: the manager's
-// own behaviour is gated by its package's tests, and what matters here is what the
+// own behavior is gated by its package's tests, and what matters here is what the
 // detector does with the membership it is handed.
 type view struct {
 	mutex     sync.Mutex

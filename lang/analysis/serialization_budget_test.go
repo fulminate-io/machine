@@ -2,6 +2,7 @@
 //
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
+
 package analysis
 
 import (
@@ -32,7 +33,7 @@ const budgetPasses = 20
 // per declaration.
 //
 // THE DEFECT CLASS IT ALONE DETECTS is a per-declaration resolve. It compiles,
-// it passes every behavioural gate in the package, and it turns a one-per-run
+// it passes every behavioral gate in the package, and it turns a one-per-run
 // types.Eval into a one-per-declaration cost that a corpus declaring one type in
 // forty places pays forty times.
 func TestResolutionIsPerSpellingWhileReportingIsPerDeclaration(t *testing.T) {

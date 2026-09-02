@@ -2,6 +2,7 @@
 //
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
+
 package analysis
 
 import (
@@ -49,6 +50,14 @@ func runResolve(p *Pass) (any, error) {
 // resolveFlow reports every unresolved and every out-of-order reference in one
 // flow.
 //
+// EVERY REFERENCE THIS PASS SEES COMES FROM A STATEMENT THE PARSER SUCCESSFULLY
+// BUILT, which is the parser's recovery contract. Recovery SKIPS tokens, and
+// skipped tokens never become identifiers, so they never produce consumer-table
+// entries. That is why the pass needs no suppression for recovered regions:
+// there is nothing tabled inside one to suppress. A recovery that one day
+// RETAINED partially-parsed elements inside a bad region would change that, and
+// this pass would then have to filter them.
+//
 // Iteration is over sortedKeys rather than the map directly so the diagnostics a
 // flow produces do not depend on map ordering. The driver sorts the run's output
 // at the end, but a run that emitted a different SET on different iterations
@@ -57,9 +66,6 @@ func runResolve(p *Pass) (any, error) {
 func resolveFlow(p *Pass, src Source, flow *FlowSymbols) {
 	for _, name := range sortedNames(flow.Consumers) {
 		for _, ref := range flow.Consumers[name] {
-			if insideBadSpan(flow, ref.Pos) {
-				continue
-			}
 			checkReference(p, src, flow, name, ref)
 		}
 	}
@@ -127,36 +133,6 @@ func isSendTarget(flow *FlowSymbols, ref NameRef) bool {
 	}
 	send, ok := flow.Body[ref.Stmt].(ast.SendStmt)
 	return ok && send.Target.NamePos == ref.Pos
-}
-
-// insideBadSpan reports whether a position falls in a region the parser already
-// reported on.
-//
-// Cascading resolution noise across a half-typed line is what the error-tolerant
-// parse exists to avoid: the parser hands back a complete tree with the damage
-// localized, and an analyzer that then reported every name inside the damage
-// would undo that.
-//
-// AGAINST TODAY'S PARSER THIS NEVER FIRES, and saying so is more useful than
-// letting a reader assume it is load bearing. A BadStmt holds the span of tokens
-// the parser SKIPPED, and skipped tokens are never parsed into identifiers, so
-// they contribute nothing to the consumer table — every position a diagnostic
-// can carry comes from a statement the parser successfully built. Measured over
-// both modules' corpora: 42 files parse to a tree, 7 of them carry a BadStmt,
-// and 0 references sit inside one.
-//
-// It is kept as a guard on the parser's recovery CONTRACT rather than removed,
-// because a recovery that one day retains partially-parsed elements inside a bad
-// region would make it live immediately. TestBadSpanSuppressionDiscriminates
-// exercises the predicate directly and records the corpus observation, so the
-// guard is tested even though no fixture reaches it through an analyzer.
-func insideBadSpan(flow *FlowSymbols, pos ast.Position) bool {
-	for _, bad := range flow.Bad {
-		if pos.Offset >= bad.Start.Offset && pos.Offset < bad.Stop.Offset {
-			return true
-		}
-	}
-	return false
 }
 
 // endOfName is the position just past an identifier, which ast.Ident computes

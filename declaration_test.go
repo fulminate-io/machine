@@ -34,7 +34,7 @@ type haltingEdge[T any] struct {
 func (e *haltingEdge[T]) Start(context.Context) error         { return e.err }
 func (*haltingEdge[T]) Send(context.Context, Packet[T]) error { return nil }
 func (e *haltingEdge[T]) Receive() <-chan Packet[T]           { return e.ch }
-func (e *haltingEdge[T]) Close() error                       { e.stop.Do(func() { close(e.ch) }); return nil }
+func (e *haltingEdge[T]) Close() error                        { e.stop.Do(func() { close(e.ch) }); return nil }
 
 func TestSecondStartIsRefused(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

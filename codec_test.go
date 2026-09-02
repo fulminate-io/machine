@@ -81,7 +81,7 @@ func TestGobCodecPreservesStackValueTypes(t *testing.T) {
 
 	data, err := codec.Marshal(codecFixture(t))
 	if err != nil {
-		t.Fatalf("marshalling the fixture failed: %v", err)
+		t.Fatalf("marshaling the fixture failed: %v", err)
 	}
 	restored, err := codec.Unmarshal(data)
 	if err != nil {
@@ -131,7 +131,7 @@ func TestJSONShapedCodecLosesStackValueTypes(t *testing.T) {
 
 	data, err := codec.Marshal(codecFixture(t))
 	if err != nil {
-		t.Fatalf("marshalling the fixture failed: %v", err)
+		t.Fatalf("marshaling the fixture failed: %v", err)
 	}
 	restored, err := codec.Unmarshal(data)
 	if err != nil {
@@ -163,7 +163,7 @@ func TestGobCodecMarshalReportsAnUnregisteredStackValue(t *testing.T) {
 	}
 
 	if _, err = (GobCodec[string]{}).Marshal(packet); err == nil {
-		t.Fatal("marshalling an unregistered stack value succeeded, so gob refused nothing")
+		t.Fatal("marshaling an unregistered stack value succeeded, so gob refused nothing")
 	}
 	if !strings.Contains(err.Error(), `encoding frame "id-2" failed`) {
 		t.Errorf("the marshal error does not name the frame: %v", err)

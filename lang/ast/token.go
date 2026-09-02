@@ -2,6 +2,7 @@
 //
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
+
 package ast
 
 // tokenKind identifies what a token is. The set is closed: the lexer emits

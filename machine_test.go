@@ -240,7 +240,7 @@ func recoverPanic(t *testing.T, what string, fn func()) any {
 }
 
 // closableEdge is an inbound transport whose channel the test closes. It is how a node
-// meets a CLOSED inbound channel rather than a cancelled context: the two are separate
+// meets a CLOSED inbound channel rather than a canceled context: the two are separate
 // exits from the read loop and only cancellation is reachable through the machine.
 type closableEdge[T any] struct {
 	ch   chan Packet[T]
@@ -259,7 +259,7 @@ func (e *closableEdge[T]) Send(ctx context.Context, packet Packet[T]) error {
 }
 
 func (e *closableEdge[T]) Receive() <-chan Packet[T] { return e.ch }
-func (e *closableEdge[T]) Close() error             { e.stop.Do(func() { close(e.ch) }); return nil }
+func (e *closableEdge[T]) Close() error              { e.stop.Do(func() { close(e.ch) }); return nil }
 
 // readLoopGoroutines counts the goroutines currently inside a worker's read loop, read
 // out of a full stack dump. A read loop that RETURNS leaves nothing else observable
@@ -295,7 +295,7 @@ func TestSendUnblocksOnCancel(t *testing.T) {
 			t.Fatalf("Send returned %v, want a context.Canceled error", got)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("Send never unblocked after the context was cancelled")
+		t.Fatal("Send never unblocked after the context was canceled")
 	}
 }
 

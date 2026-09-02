@@ -2,6 +2,7 @@
 //
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
+
 package ast
 
 // DropStmt discards its input.
@@ -62,8 +63,11 @@ func (SendStmt) isStmt() {}
 
 // UseStmt embeds another flow under a local instance name.
 //
-// Flow is the dotted reference path to the embedded flow. Bindings are the
-// caller's names for that flow's outputs, bound POSITIONALLY in signature order.
+// Flow is the dotted reference path to the embedded flow. Bindings NAME the
+// embedded flow's outputs: they are a SET, order carries no meaning, and binding
+// a subset is legal. The parser keeps them in source order because that is what
+// it read, and matching them against the embedded flow's boundary belongs to
+// lang/analysis. See parseUse for why the positional rule was the defect.
 type UseStmt struct {
 	Clauses
 	Instance Ident

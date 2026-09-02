@@ -2,6 +2,7 @@
 //
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
+
 package analysis
 
 import (
@@ -16,10 +17,10 @@ var signatureDir = filepath.Join("testdata", "signature")
 // TestSignatureDeliveryAndUseArity covers both checks plus the accepting
 // direction.
 //
-// THE NAME IS DELIBERATELY UNCHANGED. Bindings are no longer checked by arity,
-// but landed criterion 6c2411eb31a4a5c3321743d9c83a50f9 runs this test BY NAME,
-// so renaming it would break a gate that has nothing to do with this change.
-// What the test asserts moved to by-name binding; what it is called did not.
+// THE NAME IS DELIBERATELY UNCHANGED. Bindings are bound BY NAME and there is no
+// arity left to check, but a landed criterion belonging to another plan runs this
+// test BY NAME, so renaming it would break a gate that has nothing to do with this
+// change. What the test asserts moved to by-name binding; what it is called did not.
 //
 // subflow-and-use.flow is the reference shape from lang/ast's VALID corpus: it
 // declares two outputs, delivers both by naming them as branch targets, and

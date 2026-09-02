@@ -2,6 +2,7 @@
 //
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
+
 package loader
 
 import (
@@ -131,7 +132,7 @@ func TestOneDeriverAnswersEachSiteIndependentlyTerminatesAndReusesItsMemo(t *tes
 				natural, MaxDepth)
 		}
 
-		// STEP TWO: assert the behaviour under the real ceiling.
+		// STEP TWO: assert the behavior under the real ceiling.
 		start := time.Now()
 		found := NewDeriver().Serializable(past, SiteConcrete)
 		elapsed := time.Since(start)
@@ -174,7 +175,7 @@ func TestOneDeriverAnswersEachSiteIndependentlyTerminatesAndReusesItsMemo(t *tes
 // lifted, MEASURED rather than derived from a frames-per-level ratio.
 //
 // It is the smallest ceiling at which the walk completes with no depth refusal,
-// found by bisection. That uses nothing but the walk's own production behaviour
+// found by bisection. That uses nothing but the walk's own production behavior
 // plus the Deriver's unexported bound, so it adds no measurement machinery to
 // the shipping type.
 func naturalDepth(t *testing.T, typ types.Type, site Site) int {

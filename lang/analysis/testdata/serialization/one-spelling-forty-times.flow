@@ -1,4 +1,4 @@
-note """serialization fixture: FORTY declarations of ONE spelling. The cost shape the contract mandates is one resolution-and-walk per (spelling, site) per run while reporting stays per declaration, so a correct run over this flow resolves once and reports forty requirements. A per-declaration resolve compiles, passes every behavioural gate in the package, and pays a types.Eval forty times."""
+note """serialization fixture: FORTY declarations of ONE spelling. The cost shape the contract mandates is one resolution-and-walk per (spelling, site) per run while reporting stays per declaration, so a correct run over this flow resolves once and reports forty requirements. A per-declaration resolve compiles, passes every behavioral gate in the package, and pays a types.Eval forty times."""
 flow Screening
 state {
   cell00 Plain

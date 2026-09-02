@@ -75,7 +75,7 @@ type Rec struct {
 
 // Collections exercises the container arms of the walk: a slice, a fixed array,
 // a map value and a map KEY each hiding the same silent-drop class. Without it
-// those arms are specified behaviour with no fixture, and a walk that forgot to
+// those arms are specified behavior with no fixture, and a walk that forgot to
 // descend into containers would look correct.
 type Collections struct {
 	Chans  []chan int

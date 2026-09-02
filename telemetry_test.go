@@ -141,7 +141,7 @@ type failingEdge[T any] struct {
 func (*failingEdge[T]) Start(context.Context) error             { return nil }
 func (e *failingEdge[T]) Send(context.Context, Packet[T]) error { return e.err }
 func (e *failingEdge[T]) Receive() <-chan Packet[T]             { return e.ch }
-func (e *failingEdge[T]) Close() error                         { e.stop.Do(func() { close(e.ch) }); return nil }
+func (e *failingEdge[T]) Close() error                          { e.stop.Do(func() { close(e.ch) }); return nil }
 
 // awaitSpan waits for a node to END a span and returns it. A span ends in guard's
 // deferred finish, so it is not observable the moment the datum leaves the node.

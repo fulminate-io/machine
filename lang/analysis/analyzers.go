@@ -2,6 +2,7 @@
 //
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
+
 package analysis
 
 // The module's analyzers are registered here, in one place and in dependency

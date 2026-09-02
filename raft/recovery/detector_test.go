@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	machine "github.com/whitaker-io/machine/v4"
 	"github.com/whitaker-io/machine/raft/checkpoint"
 	"github.com/whitaker-io/machine/raft/ledger"
+	machine "github.com/whitaker-io/machine/v4"
 )
 
 func TestADetectorReportsTheIdentityItsLedgerReports(t *testing.T) {

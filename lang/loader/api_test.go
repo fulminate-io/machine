@@ -2,6 +2,7 @@
 //
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
+
 package loader
 
 import (
@@ -22,7 +23,7 @@ const (
 )
 
 // TestTheLoadingSurfaceRefusesLoudlyAndSplitsReceivers exercises the four
-// behaviours the assembler and lane F build on, against real modules on disk.
+// behaviors the assembler and lane F build on, against real modules on disk.
 //
 // It is one test rather than four because the legs share an expensive load and
 // because leg 3's control — the CLEAN module reporting zero problems in the same

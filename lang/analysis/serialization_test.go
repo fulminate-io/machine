@@ -2,6 +2,7 @@
 //
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
+
 package analysis
 
 import (
@@ -259,7 +260,7 @@ func TestAnUnresolvableSpellingIsReportedRatherThanSkipped(t *testing.T) {
 // THE HINT COUNT IS THE SITE MAPPING. The two erased kinds carry a registration
 // hint on top of the same refusal and the two concrete kinds do not, so a kind
 // wired to the wrong loader.Site moves the numbers while every message stays
-// recognisable. Sealed is the spelling because it produces exactly one
+// recognizable. Sealed is the spelling because it produces exactly one
 // structural refusal at either site.
 func TestEveryDeclarationKindNamesItsOwnBoundary(t *testing.T) {
 	_, _, diags := deriveFixture(t, "four-kind.flow")

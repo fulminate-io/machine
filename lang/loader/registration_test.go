@@ -2,6 +2,7 @@
 //
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
+
 package loader
 
 import (
@@ -29,7 +30,7 @@ type mirrorPlain struct{ A int }
 // through an interface slot — `Encode(&v)` where v is `any`, which is the shape a
 // state entry actually reaches — and compares that outcome against what the walk
 // says. A row whose stated premise disagrees with the codec fails as a CONTROL
-// naming itself, so the fixture cannot drift away from gob's real behaviour
+// naming itself, so the fixture cannot drift away from gob's real behavior
 // without saying so.
 //
 // THE PLANTED DISAGREEMENT IS WITH THE NAIVE READING, NOT WITH GOB. A walk that

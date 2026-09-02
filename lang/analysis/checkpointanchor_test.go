@@ -2,6 +2,7 @@
 //
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
+
 package analysis
 
 import (
@@ -12,7 +13,7 @@ import (
 	"github.com/whitaker-io/machine/lang/ast"
 )
 
-// THE THREE BEHAVIOUR ARMS MUST DISAGREE WITH EACH OTHER, and that is what makes
+// THE THREE BEHAVIOR ARMS MUST DISAGREE WITH EACH OTHER, and that is what makes
 // them a set rather than three spellings of one assertion. An analyzer that
 // refuses every checkpoint on a terminal passes the refusal arm and fails the
 // marked-terminal accept; one that refuses every checkpoint anywhere passes both

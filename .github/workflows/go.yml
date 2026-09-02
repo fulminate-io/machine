@@ -498,3 +498,36 @@ jobs:
               exit 1
             }
           }'
+
+  # This repository is PUBLIC and nothing mechanically checked what shipped in it.
+  # Three knowledge-graph node references reached the tree and were found by hand;
+  # this job is the instrument that was missing.
+  leak-scan:
+    name: Leak scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # THE PATTERNS ARE WRITTEN WITH BRACKET CLASSES — fulminat[e], linear[.]app —
+      # so this workflow does not match itself. That is what lets the job stay
+      # INSIDE its own scan instead of being exempted from it.
+      #
+      # TWO EXCLUSIONS, and each is a measured false positive of the 32-hex
+      # pattern rather than a class of leak:
+      #   1. the project's own Codacy badge ids, which are public project
+      #      identifiers sitting in README's two shield URLs;
+      #   2. the OpenTelemetry trace-id literals in the edge test suites, which are
+      #      32 hex characters because that is exactly what a W3C trace id is.
+      - name: Leak scan
+        run: |
+          set -u
+          files=$(git ls-files '*.go' '*.md' '*.yml' '*.yaml' '*.ebnf' '*.txt' '*.flow')
+          test -n "$files" || { echo "no tracked file matched, so this scan checked nothing"; exit 1; }
+          pattern="FUL-[0-9]+|[0-9a-f]{32}|fulminat[e]|linear[.]app"
+          hits=$(echo "$files" | tr '\n' '\0' | xargs -0 grep -nEI "$pattern" | grep -v 'app[.]codacy[.]com/project/badge' | grep -v 'TraceIDFromHex' || true)
+          if [ -n "$hits" ]; then
+            echo "a shipped file carries a tracker id, a knowledge-graph node reference or a private backend token:"
+            echo "$hits"
+            exit 1
+          fi
+          echo "scanned $(echo "$files" | wc -l | tr -d ' ') tracked files, no leak"

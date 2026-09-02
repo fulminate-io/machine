@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	machine "github.com/whitaker-io/machine/v4"
 	"github.com/whitaker-io/machine/raft/checkpoint"
 	"github.com/whitaker-io/machine/raft/ledger"
 	"github.com/whitaker-io/machine/raft/membership"
+	machine "github.com/whitaker-io/machine/v4"
 )
 
 func TestADeadWorkersDatumIsClaimedOnceAndCompleted(t *testing.T) {

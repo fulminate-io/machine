@@ -1,4 +1,4 @@
-note """analysis check: a declared output nobody delivers. The signature promises `ok` and `bad`; the transform delivers `ok` under its own node name, but nothing ever produces the name `bad`, so a caller binding it positionally would bind a name this flow never hands back."""
+note """analysis check: a declared output nobody delivers. The signature promises `ok` and `bad`; the transform delivers `ok` under its own node name, but nothing ever produces the name `bad`, so a caller that binds `bad` BY NAME binds a name this flow never hands back."""
 flow screening (Order) -> ok OkResult, bad ErrResult
 import "github.com/acme/fraud"
 transform ok fraud.Clean from in

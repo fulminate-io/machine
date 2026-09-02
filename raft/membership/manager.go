@@ -160,8 +160,8 @@ type Manager struct {
 	// proof has to be able to run the wrong shape. The mutant it exists to catch
 	// is a join that admits with AddVoter, and a test that could not point this at
 	// the voter form could not show the group losing leadership. Production never
-	// reassigns it, and this package never calls AddVoter — corpus check
-	// a1ddee62cee62199ee99f2c9e2ca718e enforces that as a shape across the module.
+	// reassigns it, and this package never calls AddVoter — a corpus check
+	// enforces that as a shape across the module.
 	admit func(r *raft.Raft, id raft.ServerID, addr raft.ServerAddress) raft.IndexFuture
 	// resolve is the discovery seam: one configured address in, every instance
 	// behind it out. It is a field so a test can supply a set DNS cannot express,

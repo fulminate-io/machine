@@ -78,7 +78,7 @@ Three types carry the whole API.
 
 | Type | What it is |
 | --- | --- |
-| `Machine` | The supervisor. Owns the node registry, the heap store, the telemetry handles and the declaration errors. Its exported method set is deliberately closed at `Host`, `Name`, `Source` and `Start`. |
+| `Machine` | The supervisor. Owns the node registry, the heap store, the telemetry handles and the declaration errors. Its exported method set is deliberately closed at `Host`, `Name`, `Source`, `Start` and `HasJournal`, the last of which reports whether a journal is wired so a caller can refuse a flow that needs one **before** declaring any of it. |
 | `Flow[T, U]` | A declared node's outbound handle — `T` is the source payload type, `U` the current one. It holds only the machine and the emitter, so it is cheap to pass by value. |
 | `Frame[T]` | The **node-facing** envelope. It **wraps** the payload rather than traveling beside it, so a node function takes `Frame[T]` and returns a bare payload. |
 | `Packet[T]` | The **edge-facing** envelope. It carries identity, lineage and the serializable projection of the datum's stack state, and no capability-gated accessor at all. |
@@ -397,6 +397,7 @@ Machine options, passed to `machine.New`:
 | `OptionMaxConcurrency(n)` | Bounds the data a node processes at once when FIFO is off. Zero, the default, is unbounded. |
 | `OptionErrorHandler(h)` | Registers the global fallback `ErrorHandler[any]`. |
 | `OptionStore(s)` | Replaces the machine's heap `Store`. Defaults to `NewMemStore()`. |
+| `OptionJournal(j)` | Installs the recovery `Journal` the checkpointing runtime writes to. It is the **host's** to configure, which is why it is an option and never a `Machine` method. |
 | `WithTracerProvider(p)` | Sets the provider the machine resolves its tracer from. Defaults to `otel.GetTracerProvider()`. |
 | `WithMeterProvider(p)` | Sets the provider the machine resolves its meter from. Defaults to `otel.GetMeterProvider()`. |
 
@@ -404,8 +405,11 @@ Node options, passed to any builder method:
 
 | Option | Effect |
 | --- | --- |
+| `WithCheckpoint(codec)` | Journals the node's progress through its datum, taking the codec the checkpoint records are written with. The codec is required; a nil one is refused at declaration. |
+| `WithCodec(codec)` | Supplies a node's emitter codec **without** checkpointing the node, which is what the generator emits on the successor of a completion-anchored checkpoint. |
 | `WithEdge(factory)` | Selects the transport that delivers **into** the node. Defaults to an unbuffered `Channel`. |
 | `WithErrorHandler(h)` | Registers the node's typed handler, which wins over the machine's global one. |
+| `WithIdempotent()` | Marks the node safe to run again on the same datum, and thereby selects the **arrival** anchor rather than the completion default. |
 | `WithReads(refs...)` | Declares the handles the node may read. |
 | `WithWrites(refs...)` | Declares the handles the node may write. |
 

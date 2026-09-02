@@ -2,6 +2,7 @@
 //
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
+
 package loader
 
 import (
@@ -41,7 +42,7 @@ func TestTheDerivationDisagreesWithGobOnlyWhereGobIsSilent(t *testing.T) {
 	}
 
 	// EACH PROBE GETS A FRESH DERIVER. This test pins the derivation's VERDICT
-	// at a site; the memo's behaviour under a reused Deriver is a separate
+	// at a site; the memo's behavior under a reused Deriver is a separate
 	// property with its own gate. Sharing one Deriver here would make this test
 	// order-dependent and would quietly duplicate the memo gate, leaving the
 	// memo's real failure mode covered by two tests that fail together instead

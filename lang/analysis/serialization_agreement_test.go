@@ -2,6 +2,7 @@
 //
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
+
 package analysis
 
 import (
@@ -52,11 +53,11 @@ func (e *agEscaped) GobDecode(b []byte) error {
 	return nil
 }
 
-// agreementRow is one shape family, its declared codec behaviour at both sites, and
+// agreementRow is one shape family, its declared codec behavior at both sites, and
 // a witness of its own type at each.
 //
 // carriedIface and carriedConcrete are DECLARATIONS the run measures and checks
-// before any agreement leg is consulted, so a row whose codec behaviour moved fails
+// before any agreement leg is consulted, so a row whose codec behavior moved fails
 // on its own terms rather than being misread as a derivation defect.
 type agreementRow struct {
 	spelling           string
@@ -132,7 +133,7 @@ func carriedRows() []agreementRow {
 }
 
 // refusedRows are the shapes gob refuses at an interface slot until they are
-// registered, plus the two whose concrete-site behaviour is the interesting half.
+// registered, plus the two whose concrete-site behavior is the interesting half.
 func refusedRows() []agreementRow {
 	return append(unnamedCompositeRows(), namedRows()...)
 }
@@ -227,7 +228,7 @@ func namedStructRows() []agreementRow {
 // INSTRUMENT, not a one-off agreement check.
 //
 // THE DEFECT CLASS IT ALONE DETECTS is a false negative at the interface site: a
-// declaration the contract passes clean that fails at run time. No behavioural test
+// declaration the contract passes clean that fails at run time. No behavioral test
 // in this package can see it, because none of them looks at the codec at all. The
 // loader has already shipped one instance of that class; this is what makes the
 // next one visible the day it lands rather than in a generated program.
@@ -261,7 +262,7 @@ func TestEveryDerivationVerdictAgreesWithMeasuredGobAtBothSites(t *testing.T) {
 // checkRow measures the codec, checks that measurement against the row's own
 // declaration, and only then consults the derivation.
 //
-// THE ORDER IS THE POINT. A row whose codec behaviour moved fails on its own
+// THE ORDER IS THE POINT. A row whose codec behavior moved fails on its own
 // control rather than being reported as a derivation defect, which is what keeps a
 // changed codec from being misread as a broken contract.
 func checkRow(t *testing.T, pkgs *loader.Packages, deriver *loader.Deriver, row agreementRow) {

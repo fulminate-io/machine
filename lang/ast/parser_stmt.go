@@ -2,6 +2,7 @@
 //
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
+
 package ast
 
 // nodeHead is the prefix source, transform and sink share: a name, a Go

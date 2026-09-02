@@ -18,9 +18,9 @@
 #
 # THE RECORD IS DATA, NOT A HARNESS. No tokenizer dependency is added to this
 # module or to CI. TestEveryKeywordHasATokenizationRecord asserts set equality
-# between these rows and the keyword table, so a twenty-seventh keyword cannot
-# enter the language without someone measuring it first — which is exactly the
-# situation `checkpoint` and then `func` created, twice.
+# between these rows and the keyword table, so a NEW keyword cannot enter the
+# language without someone measuring it first — which is exactly the situation
+# `checkpoint` and then `func` created, twice.
 #
 # format: <keyword> o200k_base=<n> cl100k_base=<n>
 

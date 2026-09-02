@@ -18,7 +18,7 @@ type ByType map[string]int
 type Seen map[string]bool
 
 // IntArray is the row most likely to be reasoned wrong from the slice
-// behaviour: gob carries []int through an interface slot unregistered but
+// behavior: gob carries []int through an interface slot unregistered but
 // REFUSES [3]int, an array of the identical element.
 type IntArray [3]int
 

@@ -3,7 +3,9 @@ run:
   go: '1.27'
   timeout: 5m
 # include test files or not, default is true
-  tests: false
+# ON so misspell reads test files. Every OTHER enabled linter is scoped back off
+# them by the first exclusion rule below; see the measurement recorded there.
+  tests: true
 linters:
   # please, do not use `default: all`: it's not scalable during updates of golangci-lint
   default: none
@@ -206,10 +208,62 @@ linters:
   exclusions:
     generated: lax
     rules:
-      # ignore the false positive erros resulting from not including a comment above every `package` keyword
+      # MISSPELL IS THE ONLY LINTER THAT READS TEST FILES, and this rule is what
+      # makes that true. `run.tests` is a GLOBAL switch and there is no working
+      # per-linter equivalent: `golangci-lint config verify` rejects a
+      # `misspell.tests` key with a jsonschema error, while `golangci-lint run`
+      # accepts the very same config and then reports 0 issues on a planted
+      # test-file misspelling — indistinguishable from a key that cannot exist.
+      # CI runs `run`, not `verify`, so a per-linter key would look configured
+      # and do nothing at all.
+      #
+      # Turning the global switch on ALONE is the widest change, not the
+      # narrowest. Measured across all eight modules it surfaces 616 findings:
+      # goconst 224, revive 186, gocyclo 88, gosec 21, misspell 19, unparam 9,
+      # staticcheck 5, nolintlint 4, dupl 2. The 597 non-misspell findings are
+      # pre-existing test-file debt CI has never seen, and paying it down is
+      # separate work from letting CI see a British spelling.
+      #
+      # This list is every enabled linter EXCEPT misspell, and it has to be kept
+      # in step with the enable list above.
       - linters:
           - revive
-        text: should have a package comment, unless it's in another file for this package (golint)
+          - bodyclose
+          - dogsled
+          - dupl
+          - errcheck
+          - exhaustive
+          - funlen
+          - goconst
+          - gocyclo
+          - goprintffuncname
+          - gosec
+          - govet
+          - ineffassign
+          - lll
+          - nakedret
+          - nolintlint
+          - rowserrcheck
+          - copyloopvar
+          - staticcheck
+          - unconvert
+          - unparam
+          - unused
+          - whitespace
+        path: _test\.go$
+      # revive's package-comments rule, DETACHED half only. The banner sits above
+      # the package clause separated by a blank line so `go doc` renders it once
+      # per package instead of once per file, and that shape is what revive calls
+      # "package comment is detached". The other half of the rule, "should have a
+      # package comment", stays enabled: a package with no doc anywhere is still
+      # reported.
+      #
+      # This line previously carried golint's old wording, `should have a package
+      # comment, unless it's in another file for this package (golint)`, which
+      # today's revive never emits — so the exclusion matched nothing at all.
+      - linters:
+          - revive
+        text: package comment is detached
       # errcheck: Almost all programs ignore errors on these functions and in most cases it's ok
       - linters:
           - errcheck

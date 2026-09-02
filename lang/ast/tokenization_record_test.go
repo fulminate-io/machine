@@ -2,6 +2,7 @@
 //
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
+
 package ast
 
 import (
@@ -24,7 +25,7 @@ type tokenizationRow struct {
 }
 
 // atomicityExemption is one keyword admitted despite fragmenting, with the counts
-// it was admitted at and the ruling that admitted it.
+// it was admitted at and the dated ruling sentence that admitted it.
 type atomicityExemption struct {
 	counts   map[string]int
 	reason   string
@@ -36,15 +37,16 @@ type atomicityExemption struct {
 //
 // IT IS A CLOSED, NAMED LIST for the reason the contract-docs sweep gives about its
 // own survivors: an exception a sweep does not name is an exception nobody can
-// review. Each entry carries its measured counts, why it was admitted and the
-// ruling id, and the ruling id is required by the test rather than by convention —
-// an exemption with no ruling behind it cannot pass.
+// review. Each entry carries its measured counts, why it was admitted and the dated
+// ruling sentence, and that sentence is required by the test rather than by
+// convention — an exemption with no ruling behind it cannot pass.
 var atomicityExemptions = map[string]atomicityExemption{
 	textIdempotent: {
 		counts: map[string]int{"o200k_base": 3, "cl100k_base": 3},
 		reason: "the spelling was priced against its semantic precision and kept: it names the " +
 			"property the runtime keys the checkpoint anchor on, and no atomic synonym says the same thing",
-		decision: "9c4ff0672ab88db0f87e9b6863692831",
+		decision: "2026-09-01 ruling: the 3-token fragmentation was priced against the term of art and precision " +
+			"won, so `idempotent` keeps its spelling; every other keyword stays bound by the one-token invariant",
 	},
 }
 

@@ -1,4 +1,4 @@
-note """serialization fixture: ONE Go type declared FOUR ways in one flow — a state entry, a var, a declared output and the implicit input. Sealed is the spelling because it produces exactly one structural refusal at either site, so the HINT count alone separates the two erased kinds from the two concrete ones. A kind mapped to the wrong loader.Site moves those numbers while every message stays recognisable."""
+note """serialization fixture: ONE Go type declared FOUR ways in one flow — a state entry, a var, a declared output and the implicit input. Sealed is the spelling because it produces exactly one structural refusal at either site, so the HINT count alone separates the two erased kinds from the two concrete ones. A kind mapped to the wrong loader.Site moves those numbers while every message stays recognizable."""
 flow Screening (Sealed) -> ok Sealed
 state {
   cell Sealed

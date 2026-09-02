@@ -2,6 +2,7 @@
 //
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
+
 package ast
 
 import (
@@ -439,8 +440,8 @@ func TestEveryKeywordAppearsAsAGrammarTerminal(t *testing.T) {
 	}
 }
 
-// parserOnlyRules is the locked list: the five rules the parser enforces that
-// the notation cannot express, each matched on a stable substring.
+// parserOnlyRules is the locked list of the rules the parser enforces that the
+// notation cannot express, each matched on a stable substring.
 //
 // The list, the grammar header and both consuming gates are kept in exact sync.
 // countWords render a small count as the English word the header states it in.

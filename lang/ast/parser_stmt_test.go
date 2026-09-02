@@ -2,6 +2,7 @@
 //
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
+
 package ast
 
 import (
@@ -275,9 +276,13 @@ func TestParseIdempotentIsBare(t *testing.T) {
 
 // TestParseUseBindsOutputsPositionally covers the use embedding.
 //
-// The bindings are caller-chosen names for the embedded flow's outputs, matched
-// by POSITION, so more than one is required to tell a positional implementation
-// from one that only ever handles the first.
+// The parser reads a use-list as identifiers and PRESERVES THEIR SOURCE ORDER,
+// which is all this asserts; what the identifiers mean — they name the embedded
+// flow's outputs, as a set — belongs to the analysis pass. More than one binding
+// is used so an implementation that only ever handles the first is caught.
+//
+// THE NAME IS RETAINED because a landed gate belonging to another plan runs this
+// test by name. It no longer describes what the test asserts.
 func TestParseUseBindsOutputsPositionally(t *testing.T) {
 	file := mustParse(t, `flow caller
 source ingest Poll
@@ -309,7 +314,7 @@ sink out Write from ok
 	}
 	for i, want := range wantBindings {
 		if stmt.Bindings[i].Name != want {
-			t.Errorf("binding %d is %q, want %q — bindings are positional", i, stmt.Bindings[i].Name, want)
+			t.Errorf("binding %d is %q, want %q — the parser preserves source order", i, stmt.Bindings[i].Name, want)
 		}
 	}
 }

@@ -443,7 +443,7 @@ func TestManagerMembershipAgreesWithTheConfigurationTheCursorSignalled(t *testin
 		t.Fatal("Membership reports the flow as unhosted on the node that hosts it")
 	}
 	if index == 0 {
-		t.Fatal("Membership reports index 0 after a configuration was signalled")
+		t.Fatal("Membership reports index 0 after a configuration was signaled")
 	}
 	got := make([]string, 0, len(configuration.Servers))
 	for _, server := range configuration.Servers {
@@ -585,7 +585,7 @@ func TestASignalCursorFromAnotherIncarnationIsRefusedNotSilentlyEmpty(t *testing
 	}
 	if !errors.Is(batch.err, ErrCursorTooOld) {
 		t.Fatalf("err = %v, does not satisfy errors.Is against ErrCursorTooOld: a consumer keyed on the "+
-			"sentinel this plan published would not recognise it", batch.err)
+			"sentinel this plan published would not recognize it", batch.err)
 	}
 	if !errors.Is(batch.err, ErrCursorForeignIncarnation) {
 		t.Fatalf("err = %v, want it to also name the foreign incarnation so a restart is distinguishable "+
