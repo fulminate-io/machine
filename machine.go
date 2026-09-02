@@ -118,6 +118,23 @@ func New(name string, options ...Option) *Machine {
 // Name returns the machine's name.
 func (m *Machine) Name() string { return m.name }
 
+// HasJournal reports whether a journal is wired, so a caller can refuse a flow that
+// needs one BEFORE declaring any of it.
+//
+// WHY THE PREDICATE EXISTS RATHER THAN LETTING Start REFUSE. The runtime does check
+// — newWorker refuses a checkpointed node on a journal-less machine — but that
+// refusal reaches the caller only from Start, because the check calls fail, which
+// appends to the error set Start returns. Wire declares a flow; it does not start
+// one. So a generated Wire has no way to learn the fact from the runtime at the
+// moment it needs it, which is before it declares its first node. This is that fact,
+// available at declaration time.
+//
+// IT READS AND NOTHING MORE. It deliberately does not return the journal: the
+// journal is the HOST's to configure through OptionJournal, and generated code must
+// not be able to reach its configuration. A bool is the whole of what a caller
+// deciding whether to proceed needs.
+func (m *Machine) HasJournal() bool { return m.cfg.journal != nil }
+
 // HostState is the HOST-ONLY view of a machine's heap state. It exists so a program
 // can seed heap cells before Start and inspect them after, from OUTSIDE flow
 // execution. A node function must NEVER call it: it bypasses the capability gate

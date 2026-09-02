@@ -1640,3 +1640,31 @@ func TestReadLoopReturnsWhenItsInboundChannelCloses(t *testing.T) {
 		return readLoopGoroutines() == 0
 	})
 }
+
+// TestHasJournalReportsWhetherAJournalIsWired drives BOTH arms of the predicate.
+//
+// ONE ARM IS NOT A TEST OF A PREDICATE. A constant `true` satisfies the configured
+// case and is exactly the defect that matters here: a caller refusing a flow when
+// HasJournal is false would never refuse anything, and the refusal it exists to
+// raise would be silently dead. So the false arm carries equal weight, and the two
+// results are additionally asserted to DISAGREE, which no constant can satisfy in
+// either direction.
+func TestHasJournalReportsWhetherAJournalIsWired(t *testing.T) {
+	wired := New("flow-journal-wired", OptionJournal(&orderedJournal{}))
+	if !wired.HasJournal() {
+		t.Error("HasJournal reported false on a machine built with OptionJournal")
+	}
+
+	bare := New("flow-journal-absent")
+	if bare.HasJournal() {
+		t.Error("HasJournal reported true on a machine built with no journal; " +
+			"a caller gating on it would never refuse anything")
+	}
+
+	// The two arms must DISAGREE. A predicate returning a constant passes one of the
+	// assertions above whichever constant it returns, and fails this one either way.
+	if wired.HasJournal() == bare.HasJournal() {
+		t.Fatalf("HasJournal returned %v for both a journalled and a journal-less machine, "+
+			"so it is not reading the config at all", wired.HasJournal())
+	}
+}

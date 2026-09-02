@@ -28,7 +28,13 @@ type nodeConfig[T any] struct {
 	writes     []KeyRef
 	codec      Codec[T]
 	checkpoint bool
-	idempotent bool
+	// codecDeclared records that WithCodec was declared, on the same terms and for
+	// the same reason checkpoint is recorded apart from codec: WithCodec(nil) is a
+	// declaration with a missing codec and must be refused, while a node that never
+	// declared one must not be. It is deliberately NOT the checkpoint flag — a codec
+	// without a checkpoint is the whole point of that option.
+	codecDeclared bool
+	idempotent    bool
 }
 
 // NodeOption configures a node at declaration time.
@@ -77,8 +83,37 @@ func WithWrites[T any](refs ...KeyRef) NodeOption[T] {
 // The declaration is recorded SEPARATELY from the codec, because those are two
 // different facts: WithCheckpoint(nil) is a declaration with a missing codec and must
 // be refused, while a node that never declared a checkpoint must not be.
+//
+// It is WithCodec PLUS the checkpoint flag, and the two read as one mechanism: this
+// option gives a node a codec AND journals it; WithCodec gives it a codec and does
+// not.
 func WithCheckpoint[T any](codec Codec[T]) NodeOption[T] {
 	return func(c *nodeConfig[T]) { c.checkpoint = true; c.codec = codec }
+}
+
+// WithCodec gives a node a codec WITHOUT checkpointing it.
+//
+// WHY THE RUNTIME NEEDS AN OPTION SETTING ONLY HALF OF WithCheckpoint. A node anchored
+// on COMPLETION journals what it PRODUCED, and it reaches the codec for that through
+// its outbound emitter: bind copies the CONSUMER's codec into the emitter, so the
+// codec marshaling a completion record belongs to the SUCCESSOR rather than to the
+// checkpointed node. Without this option the only way to give a successor a codec was
+// WithCheckpoint, which also journals it — leaving an author whose successor should
+// not be journaled to choose between an unwanted checkpoint and marking a node
+// idempotent that is not. Both remedies make the author pay for an implementation
+// seam.
+//
+// A NIL CODEC IS REFUSED AT DECLARATION, on exactly the terms WithCheckpoint(nil) is:
+// bad input errors at the point of the mistake rather than being defaulted, because a
+// silently substituted encoding would journal bytes the reading build may not decode.
+// The declaration is recorded SEPARATELY from the codec for the reason it is there —
+// WithCodec(nil) is a declaration with a missing codec and must be refused, while a
+// node that never declared one must not be.
+//
+// It selects no anchor and implies no checkpoint. A node carrying only this option
+// journals nothing of its own.
+func WithCodec[T any](codec Codec[T]) NodeOption[T] {
+	return func(c *nodeConfig[T]) { c.codecDeclared = true; c.codec = codec }
 }
 
 // WithIdempotent marks the node safe to run again on the same datum, which SELECTS
@@ -418,6 +453,10 @@ func newWorker[I any](m *Machine, name string, opts ...NodeOption[I]) *worker[I]
 	if cfg.checkpoint && cfg.codec == nil {
 		m.fail(fmt.Errorf("machine: node %q declares a checkpoint with a nil codec; "+
 			"pass the codec that marshals its payload, as WithCheckpoint(machine.GobCodec[T]{})", name))
+	}
+	if cfg.codecDeclared && cfg.codec == nil {
+		m.fail(fmt.Errorf("machine: node %q declares a codec that is nil; "+
+			"pass the codec that marshals its payload, as WithCodec(machine.GobCodec[T]{})", name))
 	}
 	if cfg.checkpoint && m.cfg.journal == nil {
 		m.fail(fmt.Errorf("machine: node %q declares a checkpoint but the machine has no journal; "+
