@@ -277,32 +277,46 @@ func (in *inference) assign(node *GraphNode) bool {
 // type and never the predicate's bool. Taking each node's own reference result is
 // the naive reading; it compiles, builds clean, and types every branch target
 // bool.
+// EVERY REFERENCE IS RESOLVED, WHATEVER THE SHAPE CARRYING IT. Resolution and
+// application are separate questions: a branch's predicate and a sink's writer are
+// real Go references, and one that does not resolve is a defect the author wants
+// reported whether or not its result types anything. Only the APPLYING shapes take
+// the resolved type as their payload.
 func (in *inference) typeFor(node *GraphNode) (types.Type, bool) {
+	resolved, resolvable := in.resolved(node)
+
 	switch node.Kind {
 	case kindSource, kindTransform:
-		return in.applied(node)
+		if !resolvable {
+			return nil, false
+		}
+
+		yielded := carried(resolved)
+
+		return yielded, yielded != nil
 	default:
 		return in.passedThrough(node)
 	}
 }
 
-// applied resolves a node's own reference and takes what it yields.
-func (in *inference) applied(node *GraphNode) (types.Type, bool) {
+// resolved evaluates a node's reference when it carries one, reporting a refusal.
+//
+// A node naming no reference at all — a tee, drop, loop, send, switch or use — is
+// not-found silently, which is correct rather than a swallowed error.
+func (in *inference) resolved(node *GraphNode) (types.Type, bool) {
 	ref, carriesRef := refOf(in.flow.Body, node.Stmt)
 	if !carriesRef {
 		return nil, false
 	}
 
-	resolved, err := in.env.eval(spellingOf(in.file, ref))
+	evaluated, err := in.env.eval(spellingOf(in.file, ref))
 	if err != nil {
 		in.refuse(node, err)
 
 		return nil, false
 	}
 
-	yielded := carried(resolved)
-
-	return yielded, yielded != nil
+	return evaluated, true
 }
 
 // passedThrough takes the type of a node's first typed input.
@@ -515,7 +529,16 @@ func BuildInferredTypes(srcs []Source, pkgs *loader.Packages) (*InferredTypes, [
 }
 
 // runInference infers every flow in the run, one environment per FILE.
+//
+// The nil package set is refused HERE as well as in BuildInferredTypes, because
+// TypeInferenceAnalyzer is exported and a caller may hand the constructed
+// analyzer straight to Run. Inferring nothing quietly would be a silently
+// degraded lane rather than an answer.
 func runInference(p *Pass, pkgs *loader.Packages) (any, error) {
+	if pkgs == nil {
+		return nil, errNoPackages
+	}
+
 	symbols, ok := p.ResultOf[SymbolsAnalyzer].(*SymbolTable)
 	if !ok {
 		return nil, errNoSymbols
@@ -573,7 +596,10 @@ func inferFile(p *Pass, pkgs *loader.Packages, file fileRun, table *InferredType
 			},
 		}
 		in.run()
-		in.checkTypedFanIns(func(d Diagnostic) { p.Report(file.symbols.Src, d) })
+
+		into := func(d Diagnostic) { p.Report(file.symbols.Src, d) }
+		in.checkTypedFanIns(into)
+		in.checkSignatureAgreement(into)
 
 		table.flows[flow.Name] = in.typed
 		table.order = append(table.order, flow.Name)
@@ -593,4 +619,43 @@ func graphOf(file *FileGraphs, flow string) (*FlowGraph, bool) {
 	}
 
 	return nil, false
+}
+
+// checkSignatureAgreement reports a declared output type the body contradicts.
+//
+// THE SIGNATURE IS THE AUTHOR'S STATED CONTRACT AND THE BODY MUST SATISFY IT, so
+// the diagnostic names BOTH sides — the declared type and what the body infers —
+// rather than silently preferring either. The comparison is types.Identical over
+// real types resolved through the SAME environment every reference goes through,
+// not a comparison of spellings: two spellings may denote one type, and one
+// spelling may denote two.
+//
+// A DECLARED SPELLING THAT DOES NOT RESOLVE IS NOT AN AGREEMENT CLAIM. It is
+// skipped here and refused by the same path every other unresolvable reference
+// takes; reporting a disagreement between a real type and a failure to resolve
+// would name a conflict that does not exist.
+func (in *inference) checkSignatureAgreement(report func(Diagnostic)) {
+	if !in.flow.HasSignature {
+		return
+	}
+
+	for _, out := range in.flow.Outputs {
+		inferred, known := in.typed[out.Name.Name]
+		if !known {
+			continue
+		}
+
+		declared, err := in.env.eval(strings.TrimSpace(out.Type.Text))
+		if err != nil || types.Identical(declared, inferred) {
+			continue
+		}
+
+		report(Diagnostic{
+			Pos: out.Name.NamePos,
+			End: out.Name.End(),
+			Message: "flow " + in.flow.Name + " declares the output " + out.Name.Name + " as " +
+				types.TypeString(declared, nil) + " but its body produces " + types.TypeString(inferred, nil),
+			Severity: SeverityError,
+		})
+	}
 }

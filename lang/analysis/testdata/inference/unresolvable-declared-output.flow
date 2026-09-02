@@ -1,0 +1,6 @@
+note """inference arm: a declared output type spelling that does not resolve. It is NOT an agreement claim — reporting a disagreement between a real type and a failure to resolve would name a conflict that does not exist — so the signature check skips it rather than reporting the body as contradicting it."""
+import "example.com/inference/subject/orderpkg/v2"
+
+flow BadDeclared (orders.Order) -> scored orders.NoSuchTypeHere
+transform scored orders.Score from in
+sink store orders.Store from scored

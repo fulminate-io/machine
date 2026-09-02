@@ -1,0 +1,6 @@
+note """inference arm: a headered flow declaring an output no statement produces. The signature agreement check has nothing to compare against and skips it; the undelivered-output rule that reports the omission belongs to the signature analyzer, not to the inference."""
+import "example.com/inference/subject/orderpkg/v2"
+
+flow Missing (orders.Order) -> ghost orders.Scored
+transform scored orders.Score from in
+sink store orders.Store from scored

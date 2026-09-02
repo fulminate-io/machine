@@ -1,0 +1,7 @@
+note """inference arm: a reference that RESOLVES cleanly but carries no datum, because its only result is an error. The node is left untyped and nothing is reported — a resolved reference yielding nothing is a clean answer, not a refusal, and the two must not be conflated."""
+import "example.com/inference/subject/orderpkg/v2"
+
+flow onlyerr
+source ingest orders.Listen[orders.Order](":8080")
+transform failed orders.Fail from ingest
+sink store orders.Store from failed

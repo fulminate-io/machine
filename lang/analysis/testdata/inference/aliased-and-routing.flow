@@ -1,0 +1,12 @@
+note """inference arm: an ALIASED import binds under its alias rather than under the package's own declared name, and every routing shape that names no reference — tee, drop, loop and send — passes its payload through. THE LAST LEG PINS THE FIXED POINT: `spread` consumes the loop label `retry` and is declared ABOVE the send that feeds it, so `again` and `later` are typed only because the walk iterates. A single forward pass in statement order leaves them untyped."""
+import ord "example.com/inference/subject/orderpkg/v2"
+
+flow routes
+source ingest ord.Listen[ord.Order](":8080")
+transform scored ord.Score from ingest
+tee fan from scored -> keep, toss
+loop retry
+tee spread from retry -> again, later
+send keep -> retry
+drop toss
+sink out ord.Store from again, later

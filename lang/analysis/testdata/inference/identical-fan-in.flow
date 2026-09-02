@@ -1,0 +1,8 @@
+note """inference arm: a fan-in whose inputs carry the SAME type. Distinctness is types.Identical, so two edges of one identity are one identity and the join stays silent. This is the accepting control for the disagreeing fan-in."""
+import "example.com/inference/subject/orderpkg/v2"
+
+flow same
+source ingest orders.Listen[orders.Order](":8080")
+transform first orders.Score from ingest
+transform second orders.Score from ingest
+sink out orders.Store from first, second

@@ -1,0 +1,7 @@
+note """inference arm: a BARE reference naming no func this file declares. It is handed through verbatim and refused by name, rather than being typed from somewhere else."""
+import "example.com/inference/subject/orderpkg/v2"
+
+flow bareunknown
+source ingest orders.Listen[orders.Order](":8080")
+transform scored NotAFileLevelFunc from ingest
+sink store orders.Store from scored

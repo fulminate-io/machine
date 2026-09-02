@@ -1,0 +1,8 @@
+note """inference arm: a BRANCH predicate and a SINK writer whose references do not resolve. Neither shape APPLIES its reference — a branch routes without converting the datum and a sink is the end of the line — but both are real Go references, and one that does not resolve is a defect the author wants reported whether or not its result types anything. Resolution and application are separate questions."""
+import "example.com/inference/subject/orderpkg/v2"
+
+flow badrefs
+source ingest orders.Listen[orders.Order](":8080")
+branch check orders.NoSuchPredicate from ingest -> good, bad
+sink out orders.NoSuchWriter from good
+drop bad

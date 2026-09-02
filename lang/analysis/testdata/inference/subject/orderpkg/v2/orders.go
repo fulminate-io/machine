@@ -53,3 +53,13 @@ func Quarantine(s Scored) Receipt { return Receipt{ID: s.Order.ID} }
 // Receipt back into an Order, so two edges reaching one node genuinely carry
 // different type identities rather than differing only in spelling.
 func Tag(r Receipt) Order { return Order{ID: r.ID} }
+
+// Fail returns ONLY an error, so it carries no datum downstream. A reference to
+// it resolves cleanly and still yields nothing to type the next node with, which
+// is a different outcome from a reference that FAILS to resolve: one is a clean
+// answer of "nothing", the other is a refusal.
+func Fail(o Order) error {
+	_ = o
+
+	return nil
+}

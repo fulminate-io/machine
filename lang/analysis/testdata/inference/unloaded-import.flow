@@ -1,0 +1,6 @@
+note """inference arm: an import naming a package the loader never loaded. It binds NOTHING in the file's environment rather than binding a guess, so the reference that needed it refuses by name downstream instead of resolving against something invented."""
+import "example.com/never/loaded"
+
+flow unloaded
+source ingest missing.Poll
+sink out missing.Store from ingest
