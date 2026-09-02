@@ -60,6 +60,13 @@ type Op struct {
 	// Options are the emitted NodeOption expressions, verbatim and in emission
 	// order.
 	Options []string
+	// TypeArg is an explicit Go type argument the call needs, empty when the
+	// compiler can infer one.
+	//
+	// Only Machine.Source needs one: its payload type appears in its RETURN and
+	// in no argument, so nothing is available to infer from. Every other builder
+	// call takes the node function, whose signature names the type.
+	TypeArg string
 	// After names the flow node that must be declared BEFORE this op, and is set
 	// only on a Send.
 	//

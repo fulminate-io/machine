@@ -32,7 +32,7 @@ func TestEmissionOrderSatisfiesTheSendConstraint(t *testing.T) {
 			"send backoff -> retry\n"+
 			"transform enrich Lookup from ingest, retry\n"+
 			"sink done Store from enrich\n",
-			map[string]string{})
+			map[string]string{"ingest": "Order", "backoff": "Order", "enrich": "Order", "done": "Order"})
 
 		sendAt, reenteredAt := -1, -1
 		for i, op := range plan.Ops {
@@ -61,7 +61,7 @@ func TestEmissionOrderSatisfiesTheSendConstraint(t *testing.T) {
 	t.Run("everything else keeps its relative order", func(t *testing.T) {
 		// The pass moves SENDS, and nothing else. A pass that reordered node
 		// declarations would break the receiver chain each call depends on.
-		plan := planOf(t, allShapesFixture, map[string]string{})
+		plan := planOf(t, allShapesFixture, allShapesTypes)
 		var nodes []string
 		for _, op := range plan.Ops {
 			if op.Method != MethodSend {
@@ -123,7 +123,9 @@ func TestEmissionOrderSatisfiesTheSendConstraint(t *testing.T) {
 			"transform backoff Wait from enrich\n"+
 			"send backoff -> retry\n"+
 			"sink done Store from enrich\n")
-		program.InputTypes = map[string]string{}
+		program.InputTypes = map[string]string{
+			"ingest": "Order", "enrich": "Order", "backoff": "Order", "done": "Order",
+		}
 		if _, diags := lower(program); len(diags) != 0 {
 			t.Fatalf("a satisfiable graph was refused:\n%s", strings.Join(messagesOf(diags), "\n"))
 		}
@@ -144,7 +146,7 @@ func TestTheSendArgumentIsTheFlowThatPrecedesTheReenteredNode(t *testing.T) {
 		"transform backoff Wait from enrich\n"+
 		"send backoff -> retry\n"+
 		"sink done Store from enrich\n",
-		map[string]string{})
+		map[string]string{"ingest": "Order", "enrich": "Order", "backoff": "Order", "done": "Order"})
 
 	for _, op := range plan.Ops {
 		if op.Method != MethodSend {

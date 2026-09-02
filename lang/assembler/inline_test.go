@@ -53,7 +53,11 @@ func assembleFile(t *testing.T, src string, boundary map[string]Boundary) (plans
 	}
 	programs, build := buildFile(file)
 	for _, p := range programs {
-		p.InputTypes = map[string]string{}
+		// The DRIVER supplies these; the generator derives none of them.
+		p.InputTypes = map[string]string{
+			"ingest": "Order", "check": "Order", "kept": "OkResult", "lost": "ErrResult",
+			"extra": "OkResult", "first.check": "Order", "second.check": "Order",
+		}
 	}
 	plans, lowered = lowerFile(programs, boundary, Config{Package: "generated", Qualifier: "acme"})
 

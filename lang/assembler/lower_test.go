@@ -39,10 +39,7 @@ func opsFor(plan *Plan, node string) []string {
 // that every op names a method from the runtime's closed vocabulary, and that a
 // shape with no lowering REDS rather than being skipped.
 func TestLowerCoversEveryStatementShape(t *testing.T) {
-	plan := planOf(t, allShapesFixture, map[string]string{
-		"in": "Order", "t": "Order", "b": "Order", "split": "Order",
-		"route": "Order", "out": "Order", "arm": "Order",
-	})
+	plan := planOf(t, allShapesFixture, allShapesTypes)
 
 	// EVERY OP DRAWS FROM THE CLOSED SET. An op naming anything else is Go that
 	// will not compile against the runtime.
@@ -85,6 +82,14 @@ func TestLowerCoversEveryStatementShape(t *testing.T) {
 	}
 }
 
+// allShapesTypes is the driver-supplied input type table for allShapesFixture.
+// The generator derives none of it: Machine.Source cannot infer its payload type
+// and a switch arm predicate needs its subject's type spelled.
+var allShapesTypes = map[string]string{
+	"in": "Order", "t": "Order", "b": "Order", "split": "Order",
+	"route": "Order", "out": "Order", "arm": "Order",
+}
+
 // allShapesFixture writes every statement shape the grammar admits inside a flow.
 const allShapesFixture = "flow shapes\n" +
 	"source in Poll\n" +
@@ -106,6 +111,7 @@ const allShapesFixture = "flow shapes\n" +
 // the requirement is that it REFUSES rather than emitting nothing.
 func TestAShapeWithNoLoweringRedsRatherThanBeingSkipped(t *testing.T) {
 	program := graphOf(t, "flow f\nsource in Poll\nsink out Store from in\n")
+	program.InputTypes = map[string]string{"in": "Order", "out": "Order"}
 	program.Nodes = append(program.Nodes, Node{
 		Name: "future", Kind: NodeKind(99),
 		Start: program.Nodes[0].Start, Stop: program.Nodes[0].Stop,
@@ -121,6 +127,7 @@ func TestAShapeWithNoLoweringRedsRatherThanBeingSkipped(t *testing.T) {
 	}
 	// The known positive: the same program without the unknown kind lowers clean.
 	clean := graphOf(t, "flow f\nsource in Poll\nsink out Store from in\n")
+	clean.InputTypes = map[string]string{"in": "Order", "out": "Order"}
 	if _, diags := lower(clean); len(diags) != 0 {
 		t.Fatalf("the control program refused: %v", messagesOf(diags))
 	}
@@ -142,7 +149,8 @@ func TestSwitchAndTeeLowerToChains(t *testing.T) {
 			"  else -> rest\n}\n"+
 			"sink s1 Store from first\nsink s2 Store from second\n"+
 			"sink s3 Store from third\nsink s4 Store from rest\n",
-			map[string]string{})
+			map[string]string{"in": "Order", "route": "Order", "s1": "Order", "s2": "Order",
+				"s3": "Order", "s4": "Order"})
 
 		names := chainNames(plan, MethodIf)
 		want := []string{"route", "route" + derivedSep + "1", "route" + derivedSep + "2"}
@@ -157,7 +165,8 @@ func TestSwitchAndTeeLowerToChains(t *testing.T) {
 			"tee split from in -> a, b, c, d\n"+
 			"sink s1 Store from a\nsink s2 Store from b\n"+
 			"sink s3 Store from c\nsink s4 Store from d\n",
-			map[string]string{})
+			map[string]string{"in": "Order", "split": "Order", "s1": "Order", "s2": "Order",
+				"s3": "Order", "s4": "Order"})
 
 		names := chainNames(plan, MethodTee)
 		want := []string{"split", "split" + derivedSep + "1", "split" + derivedSep + "2"}
@@ -201,7 +210,8 @@ func chainNames(plan *Plan, method string) []string {
 
 // TestASinkLowersToAMapAndADrainDrop pins the shape with no direct method.
 func TestASinkLowersToAMapAndADrainDrop(t *testing.T) {
-	plan := planOf(t, "flow f\nsource in Poll\nsink out Store from in\n", map[string]string{})
+	plan := planOf(t, "flow f\nsource in Poll\nsink out Store from in\n",
+		map[string]string{"in": "Order", "out": "Order"})
 
 	var mapOp, dropOp *Op
 	for i := range plan.Ops {
