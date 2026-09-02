@@ -179,7 +179,16 @@ func (d *Deriver) walk(typ types.Type, site Site, depth int) []Finding {
 	case *types.Named:
 		found = d.named(shape, site, depth)
 	default:
-		found = d.concrete(typ, depth)
+		// THE COMPOSITE'S OWN QUESTION, asked before descending. A map, an
+		// array or a slice that is ITSELF the value in an interface slot needs
+		// registration in its own right; descending into its elements answers a
+		// different question and leaves this one unasked, which is how a
+		// map[string]int state entry came back clean while gob refused it.
+		if site == SiteInterface && needsRegistration(typ) {
+			found = append(found, Finding{Type: typ.String(), Reason: ReasonNeedsRegistration})
+		}
+
+		found = append(found, d.concrete(typ, depth)...)
 	}
 
 	d.memo[key] = found
@@ -237,6 +246,39 @@ func (d *Deriver) concrete(typ types.Type, depth int) []Finding {
 		return []Finding{{Type: typ.String(), Reason: ReasonSilentDrop}}
 	default:
 		return nil
+	}
+}
+
+// needsRegistration reports whether a value of this type, placed DIRECTLY in an
+// interface slot, must be registered with the codec before it can cross.
+//
+// THE SET IS CENSUSED, NOT REASONED. gob carries exactly three things through an
+// interface slot with no registration: a basic type, a pointer to one, and a
+// slice whose element is basic. It refuses everything else — every map, every
+// array EVEN OF A BASIC ELEMENT, nested slices, slices of named elements, and
+// unnamed structs. The array is the row a reasoned rule gets wrong: []int is
+// carried and [3]int is not, so "the element is basic" is the wrong predicate.
+//
+// A POINTER NEEDS NO ARM HERE because walk resolves *T by recursing into T at the
+// same site, so a pointer never reaches this function.
+//
+// CHAN AND FUNC ARE EXEMPT DELIBERATELY. concrete already refuses them as a
+// silent drop, which is the stronger statement; a second reason to refuse the
+// same type is noise for whoever composes the diagnostic.
+//
+// It takes no receiver because it reads nothing from the Deriver.
+func needsRegistration(typ types.Type) bool {
+	switch shape := typ.(type) {
+	case *types.Basic:
+		return false
+	case *types.Chan, *types.Signature:
+		return false
+	case *types.Slice:
+		_, basic := shape.Elem().(*types.Basic)
+
+		return !basic
+	default:
+		return true
 	}
 }
 
