@@ -66,6 +66,15 @@ func declaredTypes(flow *FlowSymbols) map[string]string {
 	if !flow.HasSignature {
 		return out
 	}
+	// THE DECLARED INPUT IS ONE OF THE TWO STATEMENTS A SIGNATURE MAKES, and the
+	// implicit `in` is the name that carries it. Without this entry a fan-in
+	// joining the input with a declared output sees ONE identity rather than two
+	// and reads as agreement — silence, which is the direction a consumer
+	// over-reads. lang/ast declares FlowSignature.Input beside Outputs for the
+	// same reason.
+	if spelling := strings.TrimSpace(flow.Input.Text); spelling != "" {
+		out[implicitInput] = spelling
+	}
 	for _, output := range flow.Outputs {
 		if spelling := strings.TrimSpace(output.Type.Text); spelling != "" {
 			out[output.Name.Name] = spelling
