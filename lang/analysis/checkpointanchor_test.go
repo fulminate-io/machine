@@ -23,7 +23,7 @@ func TestCheckpointOnAnUnmarkedTerminalIsRefusedNamingBothExits(t *testing.T) {
 	src := parseSource(t, "unmarked-terminal.flow", `flow t
 source ingest Poll
 sink done Store from ingest
-  checkpoint
+  checkpoint machine.GobCodec[Order]{}
 `)
 
 	diags := withCode(analyze(t, CheckpointAnchorAnalyzer, src), CheckpointAnchorAnalyzer.Name)
@@ -56,7 +56,7 @@ func TestCheckpointOnAnIdempotentTerminalIsAccepted(t *testing.T) {
 	src := parseSource(t, "marked-terminal.flow", `flow t
 source ingest Poll
 sink done Store from ingest
-  checkpoint  idempotent
+  checkpoint machine.GobCodec[Order]{}  idempotent
 `)
 
 	diags := withCode(analyze(t, CheckpointAnchorAnalyzer, src), CheckpointAnchorAnalyzer.Name)
@@ -86,7 +86,7 @@ func TestCheckpointOnAnUnmarkedNonTerminalIsAccepted(t *testing.T) {
 	src := parseSource(t, "unmarked-nonterminal.flow", `flow t
 source ingest Poll
 transform step Work from ingest
-  checkpoint
+  checkpoint machine.GobCodec[Order]{}
 sink done Store from step
 `)
 

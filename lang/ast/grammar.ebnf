@@ -28,7 +28,9 @@
 //   number       a decimal literal with an optional fractional part
 //   newline      a line break; a run of blank lines collapses to one, and horizontal whitespace is never a token
 //   noteText     a raw note body, opened and closed by a triple double-quote, verbatim, with no escapes at all
-//   goSpan       opaque Go text, bracket-depth tracked, ending at a depth-zero stop token, a clause keyword or a newline
+//   goSpan       opaque Go text, bracket-depth tracked, ending at a depth-zero stop token, a clause keyword or a newline; NON-EMPTY
+//                (an empty span is not a goSpan: `over` and `checkpoint` are the clauses this decides, since a clause written
+//                 bare at end of line, or followed straight by another clause keyword, otherwise scans as a well-formed empty span)
 //   goFuncSpan   a func declaration's parameters, results and body as one span, brace balanced, skipping Go's literals and comments
 //
 // `number` IS REFERENCED BY NO PRODUCTION BELOW, and that is not an omission.
@@ -150,7 +152,7 @@ Clauses    = { Reads | Writes | Over | Checkpoint | Idempotent | NodeError | Nod
 Reads      = [ newline ] "reads" ident { "," ident } .
 Writes     = [ newline ] "writes" ident { "," ident } .
 Over       = [ newline ] "over" goSpan .
-Checkpoint = [ newline ] "checkpoint" .
+Checkpoint = [ newline ] "checkpoint" goSpan .
 Idempotent = [ newline ] "idempotent" .
 NodeError  = [ newline ] "on" "error" goSpan .
 NodeNote   = [ newline ] "note" noteText .

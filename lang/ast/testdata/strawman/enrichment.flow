@@ -16,7 +16,7 @@ loop retry
 
 transform enrich Lookup from orders, retry
   reads attempt
-  checkpoint
+  checkpoint machine.GobCodec[Order]{}
 
 branch settle Succeeded from enrich -> done, flaky
 

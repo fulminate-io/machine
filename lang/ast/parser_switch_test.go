@@ -69,9 +69,22 @@ func TestParseSwitchArmsAndElse(t *testing.T) {
 
 // TestParseSwitchCarriesClauses covers the clause position, which sits between
 // the subject and the opening brace.
+//
+// THE CLAUSE ORDER HERE IS LOAD-BEARING, and it is a property of the span reader
+// rather than of the switch. A clause carrying a Go-expression operand may not be
+// the LAST clause on a switch: `{` is a BRACKET to the span reader, not a stop
+// token, so a span still open when the body's brace arrives opens a depth instead
+// of ending, swallows the arms, and the statement dies at end of file. Measured on
+// `over` before `checkpoint` ever took an operand — `... reads seen over
+// ratelimit.New(5) {` already failed with `expected "{", found end of line`, while
+// the same clause written before `reads` parsed clean. So the constraint is the
+// language's, pre-dates this clause growing a codec, and is exercised here by
+// putting checkpoint first and letting `reads` end its span.
 func TestParseSwitchCarriesClauses(t *testing.T) {
+	const codec = "machine.GobCodec[Order]{}"
+
 	file := mustParse(t, "flow s\nsource in Poll\n"+
-		"switch route from in on in.Kind reads seen checkpoint {\n\t\"a\" -> first\n}\n")
+		"switch route from in on in.Kind checkpoint "+codec+" reads seen {\n\t\"a\" -> first\n}\n")
 	stmt := switchIn(t, file)
 
 	if stmt.Subject.Text != "in.Kind" {
@@ -81,7 +94,13 @@ func TestParseSwitchCarriesClauses(t *testing.T) {
 		t.Errorf("reads clause is %v", stmt.Reads)
 	}
 	if stmt.Checkpoint == nil {
-		t.Errorf("checkpoint clause was not recorded")
+		t.Fatalf("checkpoint clause was not recorded")
+	}
+	// The operand ends at the FOLLOWING CLAUSE KEYWORD, not at the brace. An
+	// operand that read `machine.GobCodec[Order]{} reads seen` would mean the span
+	// ran past its clause, which is the failure this ordering exists to avoid.
+	if stmt.Checkpoint.Text != codec {
+		t.Errorf("the checkpoint operand is %q, want %q; the span did not end at the next clause", stmt.Checkpoint.Text, codec)
 	}
 	if len(stmt.From) != 1 || stmt.From[0].Name != "in" {
 		t.Errorf("from list is %v", stmt.From)
