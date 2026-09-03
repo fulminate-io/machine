@@ -185,3 +185,6 @@ func TestTheTwoAnchorsAreDistinctAndNamed(t *testing.T) {
 		}
 	}
 }
+
+// AwaitLeadership returns at once: this fake never withholds leadership.
+func (j *recordingJournal) AwaitLeadership(context.Context, string) error { return nil }

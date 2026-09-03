@@ -532,3 +532,6 @@ func TestTheCompletionCodecBindsWhenTheSuccessorIsDeclared(t *testing.T) {
 		t.Fatalf("the record does not decode with the successor's codec: %v", err)
 	}
 }
+
+// AwaitLeadership returns at once: this fake never withholds leadership.
+func (j *orderedJournal) AwaitLeadership(context.Context, string) error { return nil }

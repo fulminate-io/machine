@@ -5,7 +5,10 @@
 
 package machine
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // Anchor names WHEN a checkpoint was journaled relative to the node function that
 // produced it. It rides the record rather than being re-derived at resume time.
@@ -52,6 +55,16 @@ type CheckpointRecord struct {
 	Data []byte
 }
 
+// ErrNotLeader reports that this node does not lead the flow, so a leader-only
+// journal operation cannot answer here.
+//
+// THE ROOT DECLARES IT BECAUSE THE ROOT IS WHAT MUST ACT ON IT. Leadership is a
+// replication fact the implementation owns, and the root module may not import the
+// package that owns it — so without a sentinel declared HERE the resume loop cannot
+// tell a leadership refusal from a real failure, and treats both as fatal. An
+// implementation wraps this alongside whatever sentinel its own layer uses.
+var ErrNotLeader = errors.New("machine: this node does not lead the flow")
+
 // Journal is the durable progress store a machine checkpoints into.
 //
 // THE ROOT MODULE DECLARES IT AND DOES NOT IMPLEMENT IT. The replicated
@@ -77,6 +90,11 @@ type Journal interface {
 	// ends, mirroring the membership watch it is driven beside. The cursor it reads
 	// from lives on the implementation's side; this module holds none.
 	Orphans(ctx context.Context, flow string) ([]CheckpointRecord, error)
+	// AwaitLeadership BLOCKS until this node leads the flow, and returns the
+	// context's error when the context ends first. It is what turns a leadership
+	// refusal into a wait rather than an exit: recovery is leader-only, so a node
+	// that is not the leader has nothing to do until it becomes one.
+	AwaitLeadership(ctx context.Context, flow string) error
 }
 
 // OptionJournal registers the journal a machine checkpoints into.
