@@ -21,16 +21,28 @@
 # --skip-delete is the RED PROOF MODE. It runs the whole sequence except the pod
 # deletion, so no datum is ever orphaned and observations 1, 2 and 3 must go
 # unmet. A recorder that still reported PASS there would be reporting on nothing.
+#
+# --delete-leader DELETES THE POD THAT LEADS THE FLOW rather than a follower, and
+# it is a separate mode because the default mode's own comment below explains why
+# the landed recorder deliberately did NOT do this: the detector runs on the
+# leader only, so deleting the leader removed the very node that had to notice the
+# orphan. That reasoning was correct for the tree it was written against. It is no
+# longer, because the resume loop now WAITS for leadership instead of exiting on
+# the refusal, so the election is the trigger rather than a confounder. This mode
+# is the only observation that reaches that difference. It composes with
+# --skip-delete, which is how the gate proves the recorder can still go red.
 set -u
 
 CTX=""
 NS=""
 SKIP_DELETE=0
+DELETE_LEADER=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --context)      CTX="$2"; shift 2 ;;
-    --namespace)    NS="$2"; shift 2 ;;
-    --skip-delete)  SKIP_DELETE=1; shift ;;
+    --context)       CTX="$2"; shift 2 ;;
+    --namespace)     NS="$2"; shift 2 ;;
+    --skip-delete)   SKIP_DELETE=1; shift ;;
+    --delete-leader) DELETE_LEADER=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 64 ;;
   esac
 done
@@ -124,6 +136,126 @@ wait_for_three || { echo "the fleet never reached three ready pods; nothing to o
 find_leader || { echo "no pod reported state=Leader; the group has no leader to detect orphans" >&2; exit 3; }
 LEADER="$LEADER_FOUND"
 echo "leader: $LEADER"
+
+########## LEADER-KILL MODE — the observation the re-arm exists for ##########
+#
+# WHAT THIS MODE PROVES THAT THE DEFAULT ONE CANNOT. The follower-deletion case
+# below is closed by the membership promotion fix and by the detector's health
+# arm, and either would close it alone. Deleting the LEADER needs the resume
+# loop's re-arm: before it, a survivor's loop had already exited at wiring on its
+# first leadership refusal, so after the leader died no node was running detection
+# at all and the datum stayed stranded for the flow's lifetime.
+#
+# EVERY POD HOLDS BEFORE THE INGEST, and that is what makes the claim OBSERVABLE
+# rather than a race. A survivor that claims the orphan parks mid-recovery instead
+# of completing it in the same breath, so the claim sits in the ledger long enough
+# to be read; the retire that lands with completion would otherwise have erased it
+# before the recorder looked. Phase B below uses the same technique.
+#
+# NEITHER OBSERVATION IS THIS SCRIPT'S OWN BOOKKEEPING. The claim is read through
+# Ledger.Claimant, served by the harness's /recovery endpoint. The recovering pod
+# and the completing pod both name themselves through lines the FIXTURE's own func
+# bodies print, and this script prints neither token.
+if [ "$DELETE_LEADER" = "1" ]; then
+  # In red-proof mode nothing is deleted, so there is nothing to wait FOR: the
+  # long waits below would only spend minutes proving an absence the first pass
+  # already shows.
+  if [ "$SKIP_DELETE" = "1" ]; then LEADWAIT=5; RECWAIT=5; DONEWAIT=5
+  else LEADWAIT=45; RECWAIT=60; DONEWAIT=90; fi
+
+  echo "===== leader-kill mode: park a datum on the LEADER $LEADER, then delete it ====="
+  for p in $(pods); do pf "$p" >/dev/null 2>&1 && curl -sf -X POST "http://127.0.0.1:$PORT/hold" >/dev/null; done
+
+  pf "$LEADER" || exit 3
+  curl -sf -X POST "http://127.0.0.1:$PORT/ingest?id=d1" || { echo "could not ingest d1" >&2; exit 3; }
+  for _ in $(seq 1 30); do
+    K logs "$LEADER" 2>/dev/null | grep -Fq 'flow-recover: entered=d1' && break
+    sleep 2
+  done
+  K logs "$LEADER" 2>/dev/null | grep -F 'flow-recover: entered=d1' || {
+    echo "d1 never reached the checkpointed node on the leader $LEADER; there is no journaled record to orphan" >&2
+    exit 3; }
+
+  echo "--- journal before the deletion (checkpoint datums and their claimants):"
+  BEFORE=$(curl -sf "http://127.0.0.1:$PORT/recovery" || echo '[]')
+  echo "$BEFORE"
+  if [ "$BEFORE" = "[]" ]; then
+    echo "the journal holds no checkpoint at all, so nothing could be orphaned" >&2; exit 3
+  fi
+  BEFORE_CLAIMANT=$(printf '%s' "$BEFORE" | tr ',' '\n' | grep -o '"claimant":"[^"]*"' |
+    sed 's/.*:"//;s/"//' | grep -v '^$' | sort -u | tr '\n' ' ')
+  echo "--- claimants BEFORE the deletion: [$BEFORE_CLAIMANT]"
+
+  if [ "$SKIP_DELETE" = "1" ]; then
+    echo "--- RED PROOF MODE: the LEADER is NOT deleted, so leadership never moves and nothing is orphaned"
+  else
+    echo "--- deleting the LEADING pod $LEADER"
+    K delete pod "$LEADER" --wait=true >/dev/null
+  fi
+
+  # OBSERVATION 1: leadership MOVED to a survivor. It is judged against the pod
+  # that led before, so a group that simply kept its leader cannot satisfy it.
+  NEWLEADER=""
+  for _ in $(seq 1 "$LEADWAIT"); do
+    if find_leader && [ "$LEADER_FOUND" != "$LEADER" ]; then NEWLEADER="$LEADER_FOUND"; break; fi
+    sleep 2
+  done
+  if [ -n "$NEWLEADER" ]; then
+    echo "OBSERVATION MET 1: leadership moved to $NEWLEADER"
+  else
+    note "1: leadership never moved off $LEADER, so no survivor was ever in a position to detect the orphan"
+  fi
+
+  # OBSERVATION 2: a survivor's resume loop CLAIMED the dead leader's datum. Two
+  # independent witnesses, neither of them this script: the pod that re-entered
+  # the checkpointed node (the fixture's own line, and only surviving pods are
+  # searched), and the claim itself read out of the ledger.
+  echo "--- waiting for a survivor to pick d1 up and park mid-recovery"
+  RECOVERER=$(wait_saw 'flow-recover: entered=d1' "$RECWAIT") || RECOVERER=""
+  if [ -n "$NEWLEADER" ]; then pf "$NEWLEADER" >/dev/null 2>&1 || true; fi
+  DURING=$(curl -sf "http://127.0.0.1:$PORT/recovery" 2>/dev/null || echo '[]')
+  echo "--- journal during the recovery: $DURING"
+  CLAIMANT=$(printf '%s' "$DURING" | tr ',' '\n' | grep -o '"claimant":"[^"]*"' |
+    sed 's/.*:"//;s/"//' | grep -v '^$' | sort -u | tr '\n' ' ')
+  echo "--- claimants DURING the recovery: [$CLAIMANT]"
+  if [ -z "$RECOVERER" ]; then
+    note "2: no surviving pod re-entered the checkpointed node for d1, so the dead leader's datum was never claimed"
+  elif [ "$RECOVERER" = "$LEADER" ]; then
+    note "2: the only pod that re-entered d1 is the deleted leader $LEADER, which is not a survivor"
+  elif [ -z "$CLAIMANT" ]; then
+    note "2: a survivor re-entered d1 but the ledger holds no claim for it, so nothing was claimed"
+  else
+    echo "OBSERVATION MET 2: the new leader's resume loop claimed d1 for $RECOVERER (ledger claimant $CLAIMANT)"
+  fi
+
+  # OBSERVATION 3: the datum RESUMED from its checkpointed bytes and COMPLETED on
+  # a survivor. Every pod is released first, because a datum held mid-recovery is
+  # withheld by this recorder rather than by the system under test.
+  for p in $(pods); do pf "$p" >/dev/null 2>&1 && curl -sf -X POST "http://127.0.0.1:$PORT/release" >/dev/null; done
+  COMPLETER=$(wait_saw 'flow-recover: completed=d1' "$DONEWAIT") || COMPLETER=""
+  if [ -z "$COMPLETER" ]; then
+    note "3: no surviving pod printed the completion token for d1, so the datum did not resume"
+  elif [ "$COMPLETER" = "$LEADER" ]; then
+    note "3: the completion token for d1 came from the deleted leader, not a survivor"
+  else
+    echo "OBSERVATION MET 3: $COMPLETER printed the completion token for d1"
+  fi
+
+  echo "===== per-pod recovery-relevant log lines (untruncated) ====="
+  for p in $(pods); do
+    echo "--- $p"
+    K logs "$p" 2>/dev/null | grep -E 'flow-recover:|SMOKEHOST-FLOW' || true
+  done
+
+  date -u +%H:%M:%SZ
+  if [ -n "$UNMET" ]; then
+    echo "RECOVERY PROBE FAILED. Unmet observations:"
+    printf '%s' "$UNMET" | tr '|' '\n' | grep -v '^$' | sed 's/^/  - /'
+    exit 1
+  fi
+  echo "RECOVERY PROBE PASSED: the leader died, leadership moved, the new leader's resume loop claimed the dead leader's datum and a survivor completed it"
+  exit 0
+fi
 
 # The owner is a FOLLOWER, deliberately. The detector runs on the leader only, so
 # deleting the leader would remove the very node that must notice the orphan and
