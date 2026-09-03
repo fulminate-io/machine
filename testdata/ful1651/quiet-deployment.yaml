@@ -1,8 +1,8 @@
 # THE FAIL-SILENT PROBE. Identical to deployment.yaml except that every replica
 # sets MACHINE_DISABLE_LOCAL_STATS, so no node installs the local-stats callback
 # the promoter reads. It exists to RECORD what the promoter says when its stats
-# are absent, which finding 26bca6446a18292eed3dcb3d7d62859f names as a
-# fail-silent candidate for lane D.
+# are absent. A promoter that reports nothing at all in that state, rather than
+# reporting the absence, is the fail-silent candidate lane D is chasing.
 #
 # NOTHING HERE IS NAMED "nostats", AND THAT IS A MEASUREMENT REQUIREMENT RATHER
 # THAN TASTE. The criterion counts log lines mentioning stats; with the obvious
