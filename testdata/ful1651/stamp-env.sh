@@ -83,6 +83,20 @@ for pair in "$@"; do
 	test -n "$name" || { echo "stamp-env: empty env name in $pair" >&2; exit 1; }
 	test "$name" != "$pair" || { echo "stamp-env: $pair is not NAME=VALUE" >&2; exit 1; }
 
+	# A VALUE CONTAINING A DOUBLE QUOTE IS REFUSED BY NAME, BEFORE ANY WRITE.
+	# This tool emits the value as a double-quoted YAML scalar, so an embedded
+	# quote closes that scalar early: the value is written faithfully and the
+	# manifest stops parsing, which is the worst of the two failures. Refusing
+	# beats escaping — no epoch or nonce needs a quote, and a tool that quietly
+	# rewrote the value would be varying an input its caller did not choose.
+	case $value in
+	*'"'*)
+		echo "stamp-env: the value for $name contains a double quote, which cannot be written as a" \
+			"double-quoted YAML scalar unchanged; refusing rather than emitting a manifest that does not parse" >&2
+		exit 1
+		;;
+	esac
+
 	before=$(printf '%s\n' "$rendered" | STAMP_NAME="$name" awk "$awk_common"'
 		isname($0) { c++ }
 		END { print c + 0 }
