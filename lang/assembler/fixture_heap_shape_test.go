@@ -99,8 +99,10 @@ func TestNoFixtureReadModifyWritesAHeapCellAcrossTwoCalls(t *testing.T) {
 	}
 
 	// The near misses are the other half of the pair: each carries the constructs
-	// the scanner keys on, in a position where the shape is legitimate.
-	for _, quiet := range []string{"PlantedDifferentCell", "PlantedAtomic", "PlantedOtherFrame"} {
+	// the scanner keys on, in a position where the shape is legitimate. One case
+	// per axis the scanner claims to discriminate on — the cell, the idiom, the
+	// receiver, and the arity that separates the host accessors from the frame's.
+	for _, quiet := range []string{"PlantedDifferentCell", "PlantedAtomic", "PlantedOtherFrame", "PlantedHostSeed"} {
 		for _, v := range got.violations {
 			if v.fn == quiet {
 				t.Errorf("the scanner flagged %s, which is a near miss it must stay silent on", quiet)
@@ -429,9 +431,23 @@ sink out Store from plant
 //
 // PlantedOtherFrame is the receiver axis: it Loads through one frame and Saves
 // through another, which is not a read-modify-write of one cell.
+//
+// PlantedHostSeed is the ARITY axis, and it is here because the arity condition
+// was otherwise exercised by nothing: no fixture in the corpus calls the host
+// accessors today, so deleting both length checks left every assertion green
+// while the separation they enforce was still load-bearing for the next fixture
+// that seeds state the way machine_test.go already does. HostState.Load takes a
+// context and a cell and HostState.Save a context, a cell and a value, so both
+// are one argument wider than the frame accessors — but they share a receiver
+// AND a first argument, so without the length checks they pair with each other
+// on a cell named "ctx".
 const plantedGo = `package plant
 
-import machine "github.com/whitaker-io/machine/v4"
+import (
+	"context"
+
+	machine "github.com/whitaker-io/machine/v4"
+)
 
 func PlantedGo(f machine.Frame[Order]) Order {
 	n, _, _ := f.Load(plantedCell)
@@ -459,5 +475,10 @@ func PlantedOtherFrame(f, g machine.Frame[Order]) Order {
 	_ = g.Save(plantedCell, n+1)
 
 	return f.Value()
+}
+
+func PlantedHostSeed(ctx context.Context, m *machine.Machine) {
+	n, _, _ := m.Host().Load(ctx, plantedCell)
+	_ = m.Host().Save(ctx, plantedCell, n+1)
 }
 `
