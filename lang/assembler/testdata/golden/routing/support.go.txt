@@ -1,6 +1,22 @@
 package generated
 
-import machine "github.com/whitaker-io/machine/v4"
+import (
+	"fmt"
+	"os"
+	"sync"
+
+	machine "github.com/whitaker-io/machine/v4"
+)
+
+// The Go a .flow author writes beside their source. It is NOT generated; it
+// stands in for the package the flow's references resolve into, so the golden
+// file can be compiled AND RUN rather than only diffed.
+//
+// WHY THIS FIXTURE CARRIES MORE THAN THE OTHERS. `switch` is the one construct
+// in this module that no fixture executed: it appears in this .flow alone, and
+// the golden set only ever compiled it. A switch that lowers to the wrong arm
+// targets compiles perfectly, so the sinks here print a token naming WHICH SINK
+// a datum reached, and the refundable arm's predicate records its own answer.
 
 type Order struct {
 	ID   string
@@ -11,12 +27,99 @@ type Receipt struct{ ID string }
 
 func Poll() machine.EdgeFactory[Order] { return machine.Channel[Order](0) }
 
-func IsRefund(o Order) bool { return o.Kind == "refund" }
+// expectedArrivals is how many data a host pushes to exercise every arm: one
+// down the value-match arm, one down the predicate arm, one down else.
+const expectedArrivals = 3
+
+var (
+	routeMu sync.Mutex
+	// routeVerdict records, per datum, what the refundable arm's predicate
+	// ANSWERED. It is the only observable that separates the refundable arm from
+	// the else arm, because the flow routes both into the same sink.
+	routeVerdict = map[string]bool{}
+	routeArrived int
+	routeDone    = make(chan struct{})
+	routeOnce    sync.Once
+)
+
+// Done reports when every pushed datum has reached a sink, so a host exits on
+// the data rather than on a timer.
+func Done() <-chan struct{} { return routeDone }
+
+// IsRefund is the refundable arm's predicate.
+//
+// RECORDING ITS ANSWER IS WHAT MAKES THE ELSE ARM OBSERVABLE. A datum reaches
+// the else arm precisely when this returns false for it, and it is consulted
+// only for data the value-match arm did not already claim — so a datum with no
+// recorded verdict took the first arm, one recorded true took the refundable
+// arm, and one recorded false fell through to else. The sink the last two share
+// cannot tell them apart on its own.
+func IsRefund(o Order) bool {
+	refund := o.Kind == "refund"
+
+	routeMu.Lock()
+	routeVerdict[o.ID] = refund
+	routeMu.Unlock()
+
+	return refund
+}
 
 func Bill(f machine.Frame[Order]) Order { return f.Value() }
 
 func Succeeded(f machine.Frame[Order]) bool { return f.Value().ID != "" }
 
-func Store(f machine.Frame[Order]) Order { return f.Value() }
+// Store is the sink the VALUE-MATCH arm reaches, through the charge transform
+// and the settle branch.
+func Store(f machine.Frame[Order]) Order {
+	v := f.Value()
+	arrived("store", v, false)
 
-func Quarantine(f machine.Frame[Order]) Order { return f.Value() }
+	return v
+}
+
+// Quarantine is the sink the refundable and else arms converge on. Its token
+// carries the recorded predicate answer, which is what names the arm.
+func Quarantine(f machine.Frame[Order]) Order {
+	v := f.Value()
+	arrived("hold", v, true)
+
+	return v
+}
+
+// arrived prints one locked token and releases the host once every pushed datum
+// has landed.
+//
+// THE LOCK IS NOT DECORATION. The runtime dispatches every datum as its own
+// goroutine, so without it two tokens interleave on stdout and the arrival count
+// loses increments — the same defect class this fixture set was just repaired
+// for, in its package-level form.
+func arrived(sink string, o Order, withVerdict bool) {
+	routeMu.Lock()
+	defer routeMu.Unlock()
+
+	if withVerdict {
+		refund, evaluated := routeVerdict[o.ID]
+		fmt.Printf("flow-routing: sink=%s id=%s kind=%s refund=%t evaluated=%t\n",
+			sink, o.ID, o.Kind, refund, evaluated)
+	} else {
+		fmt.Printf("flow-routing: sink=%s id=%s kind=%s\n", sink, o.ID, o.Kind)
+	}
+
+	routeArrived++
+	if routeArrived >= expectedArrivals {
+		routeOnce.Do(func() { close(routeDone) })
+	}
+}
+
+// ReportFailure is the error handler a HOST installs with
+// machine.OptionErrorHandler.
+//
+// THIS FLOW DECLARES NO `on error` CLAUSE, so unlike the pipeline golden there
+// is no generated handler var for a host to pass; it supplies this one directly.
+// Without it the runtime's guard recovers a node panic, dispatch finds neither a
+// per-node nor a global handler and drops it, and any failure in here presents
+// as a program that simply never finishes.
+func ReportFailure(err machine.NodeError[any]) {
+	fmt.Fprintf(os.Stderr, "flow-routing: handler: node=%s panic=%t err=%v\n",
+		err.Node, err.Panic, err.Err)
+}
