@@ -1,0 +1,42 @@
+func Rate(f machine.Frame[Order]) Order {
+  n, err := f.Update(processed, func(v int) int { return v + 1 })
+  if err != nil {
+    panic(err)
+  }
+  f.Set(attempt, f.Get(attempt)+1)
+  out := f.Value()
+  out.Seen = n
+  return out
+}
+
+func Label(f machine.Frame[Order]) Receipt {
+  return Receipt{ID: strings.ToUpper(f.Value().ID)}
+}
+
+flow budget
+import "strings"
+
+const Retries int = 3
+param Endpoint string = ":8080"
+
+state {
+  processed int
+}
+var attempt int
+
+on error PageOnCall
+
+source ingest Poll()
+  over machine.Channel[Order](0)
+transform rate Rate from ingest
+  reads attempt, processed  writes attempt, processed
+  on error NodeFailed
+branch triage Interesting from rate -> kept, dropped
+switch route from kept on kept.Kind {
+  "card" -> billable
+  IsRefund(kept) -> refundable
+  else -> other
+}
+sink emit Label from billable
+sink audit Audit from refundable, other
+drop dropped
