@@ -1,0 +1,15 @@
+flow orders
+note """enriches each order, keeps billable ones and counts them"""
+state {
+  accepted int
+}
+source ingest Poll
+transform enrich Enrich from ingest
+switch route from enrich on enrich.Kind {
+  "card", "wallet" -> good
+  else -> bad
+}
+transform tally Count from good
+  writes accepted  note """bumps the accepted counter"""
+sink store Store from tally
+sink hold Reject from bad
