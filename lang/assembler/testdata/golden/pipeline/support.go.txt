@@ -1,10 +1,16 @@
 package generated
 
-import machine "github.com/whitaker-io/machine/v4"
+import (
+	"fmt"
+	"os"
+	"sync"
+
+	machine "github.com/whitaker-io/machine/v4"
+)
 
 // The Go a .flow author writes beside their source. It is NOT generated; it
 // stands in for the package the flow's references resolve into, so the golden
-// file can be compiled rather than only diffed.
+// file can be compiled AND RUN rather than only diffed.
 
 type Order struct {
 	ID   string
@@ -18,12 +24,48 @@ type Receipt struct {
 
 func Poll() machine.EdgeFactory[Order] { return machine.Channel[Order](0) }
 
-func Store(f machine.Frame[Receipt]) Receipt { return f.Value() }
+// done is closed once the sink has printed the token, so a host can exit on the
+// datum arriving rather than on a timer.
+var done = make(chan struct{})
+
+var emitOnce sync.Once
+
+// Done reports when a datum has reached the sink. It is what makes this golden
+// RUNNABLE rather than only compilable: a host waits on it instead of sleeping.
+func Done() <-chan struct{} { return done }
+
+// Store is the sink, and it prints the LOCKED TOKEN from the fixture's own code.
+// The assertion is on the running program's stdout, so nothing but the flow
+// actually carrying a datum through Bill to the sink can produce it, and the
+// count it prints is the one Bill wrote through the heap cell.
+func Store(f machine.Frame[Receipt]) Receipt {
+	v := f.Value()
+	emitOnce.Do(func() {
+		fmt.Printf("flow-golden: id=%s seen=%d\n", v.ID, v.Seen)
+		close(done)
+	})
+
+	return v
+}
 
 // PageOnCall is the flow-level handler. A machine's error handler takes
 // NodeError[any], which is why it is declared at that type.
-func PageOnCall(machine.NodeError[any]) {}
+//
+// IT REPORTS, AND THAT IS LOAD-BEARING. The runtime's guard RECOVERS a node
+// panic and hands it to dispatch, whose default is a silent drop, so a handler
+// with an empty body turns a capability error or a nil dereference into a
+// program that merely never finishes. Printing is what makes this fixture's
+// failures readable at all.
+func PageOnCall(err machine.NodeError[any]) {
+	fmt.Fprintf(os.Stderr, "flow-golden: flow handler: node=%s panic=%t err=%v\n",
+		err.Node, err.Panic, err.Err)
+}
 
 // NodeFailed is the node-level handler, whose type the runtime infers from the
-// node it is attached to.
-func NodeFailed(machine.NodeError[Order]) {}
+// node it is attached to. It reports for the reason PageOnCall does, and it is
+// the one that fires for the charge node: dispatch prefers the per-node handler
+// and returns without consulting the flow-level one.
+func NodeFailed(err machine.NodeError[Order]) {
+	fmt.Fprintf(os.Stderr, "flow-golden: node handler: node=%s panic=%t err=%v\n",
+		err.Node, err.Panic, err.Err)
+}

@@ -15,6 +15,13 @@ note """
 The canonical shape: a source feeding one transform that touches both handle
 kinds, then a sink. It carries a const, a param, an error handler at both the
 flow and the node level, an `over` transport clause and a verbatim func.
+
+BOTH HANDLES APPEAR IN BOTH CLAUSES ON PURPOSE. A write capability does not
+imply a read one, and Bill reads-modifies-writes each handle: Update takes read
+AND write on the cell, Get and Set take read AND write on the key. Declaring
+either half alone panics with a CapabilityError on the first datum, which a
+compile-only fixture cannot notice — so this flow is also RUN, by the criterion
+that stages the checked-in golden and requires the sink's own token.
 """
 import "strings"
 
@@ -31,6 +38,6 @@ on error PageOnCall
 source ingest Poll()
   over machine.Channel[Order](0)
 transform charge Bill from ingest
-  reads attempt  writes seen
+  reads attempt, seen  writes attempt, seen
   on error NodeFailed
 sink done Store from charge
