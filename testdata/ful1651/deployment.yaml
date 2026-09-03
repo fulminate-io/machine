@@ -73,6 +73,13 @@ spec:
             # mechanism absent on exactly the deployment that rolls.
             - name: MACHINE_CLUSTER_GENERATION
               value: "REPLACED_AT_APPLY"
+            # The per-deployment nonce the group-continuity witness is minted
+            # FROM. It is not the witness itself: the value written into the
+            # ledger also carries the writing instant and the writing node, so a
+            # group that was replaced rather than preserved mints a different
+            # one even though this nonce is unchanged across a rollout restart.
+            - name: MACHINE_SMOKE_WITNESS
+              value: "REPLACED_AT_APPLY"
             - name: MACHINE_CLUSTER_SECRET
               valueFrom:
                 secretKeyRef:

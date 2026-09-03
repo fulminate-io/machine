@@ -138,6 +138,11 @@ func main() {
 	flow := os.Getenv("MACHINE_FLOW")
 	peers := os.Getenv("MACHINE_CLUSTER_PEERS")
 	secret := os.Getenv("MACHINE_CLUSTER_SECRET")
+	// MACHINE_SMOKE_WITNESS is the per-deployment nonce the group-continuity
+	// witness is minted FROM. It is not the witness: the value written into the
+	// ledger also carries the writing instant and the writing node, so it cannot
+	// repeat across a rollout the way this nonce deliberately does.
+	smokeWitness := os.Getenv("MACHINE_SMOKE_WITNESS")
 	// LEDGER_ID exists ONLY to drive the diverged-identity shape: when it is set
 	// and differs from MACHINE_NODE_ID, the ledger reports one id and
 	// membership.Config.Node carries another, which is the disagreement
@@ -271,16 +276,30 @@ func main() {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+			// THE GROUP-CONTINUITY WITNESS IS REPORTED BEFORE members ON THE SAME
+			// LINE, and the order is load-bearing rather than cosmetic. The gate
+			// that reads this line extracts members with a GREEDY capture between
+			// the first members=" and the last quote on the line, so a witness
+			// field printed after it would be swallowed into the member list.
+			//
+			// WHY A REPLICATED DATUM AT ALL. A member list carries ids and
+			// suffrage, and three pods that bootstrapped a FRESH group after a
+			// rolling update produce exactly the same shape as the group that was
+			// supposed to survive it. A datum written before the update is present
+			// after it if and only if the log survived.
+			witness := witnessValue(ctx, manager, flow, node, smokeWitness, logger)
 			cfg, _, ok := manager.Membership(flow)
 			if !ok {
-				logger.Info("SMOKEHOST-STATE", "node", node, "flow", flow, "members", "none")
+				logger.Info("SMOKEHOST-STATE", "node", node, "flow", flow,
+					"witness", witness, "members", "none")
 				continue
 			}
 			out := ""
 			for _, s := range cfg.Servers {
 				out += fmt.Sprintf("%s/%s ", s.ID, s.Suffrage)
 			}
-			logger.Info("SMOKEHOST-STATE", "node", node, "flow", flow, "members", out)
+			logger.Info("SMOKEHOST-STATE", "node", node, "flow", flow,
+				"witness", witness, "members", out)
 
 			// STEP 4.3'S ISOLATION PROBE. It reports which branch of the landed
 			// eviction round this node's state would take, on the LEADER only,
@@ -317,6 +336,65 @@ func main() {
 				"live", fmt.Sprintf("%v", live), "members", out)
 		}
 	}
+}
+
+// witnessPrefix is the ledger prefix the group-continuity witness lives under.
+const witnessPrefix = "witness/"
+
+// witnessValue reports the group-continuity witness this node can see, and mints
+// one when this node LEADS the flow and none exists.
+//
+// THE VALUE IS MINTED AT WRITE TIME AND CANNOT REPEAT. It is the per-deployment
+// nonce, the writing instant in nanoseconds and the writing node's id. Reading
+// the nonce straight out of the environment instead would SELF-HEAL and certify
+// the failure this witness exists to detect: the nonce does not change across a
+// rollout restart, and an empty list is exactly the condition that triggers the
+// append, so a group that was replaced rather than preserved would have its new
+// leader write THE SAME value and the after would equal the before. Minted per
+// write, a persisting group returns the original value and a fresh group's
+// self-heal returns a different one.
+//
+// THE RETURNED STRING IS SPACE-TERMINATED WHEN A WITNESS EXISTS, and bare "none"
+// when it does not. That is not decoration: hclog quotes a value only when it
+// contains a space, and the reader extracts this field from between quotes, so a
+// bare value would be invisible to it while "none" is meant to be. It is the
+// same convention the members field on this line already uses.
+func witnessValue(ctx context.Context, manager *membership.Manager, flow, node, nonce string,
+	logger hclog.Logger) string {
+	l, ok := manager.Ledger(flow)
+	if !ok {
+		return "none"
+	}
+	entries, err := l.List(ctx, witnessPrefix)
+	if err != nil {
+		// AN UNREADABLE LIST IS REPORTED AS ABSENT AND NEVER AS A WITNESS. A
+		// follower forwards this read to the leader, so a failure here is a
+		// group that cannot serve a read rather than a group with no datum, and
+		// reporting a value we did not read would be the one answer that can
+		// make the gate pass on a broken group.
+		logger.Info("SMOKEHOST-WITNESS-UNREADABLE", "node", node, "flow", flow, "error", err)
+		return "none"
+	}
+	if len(entries) > 0 {
+		return strings.TrimPrefix(entries[0].Path, witnessPrefix) + " "
+	}
+	// ONLY THE LEADER MINTS, and only into an empty list. Every follower reports
+	// "none" and waits: two writers here would put two witnesses in the ledger
+	// and the reader takes the first, which would make the value a race rather
+	// than a fact about the log.
+	if l.Raft().State() != raft.Leader {
+		return "none"
+	}
+	minted := fmt.Sprintf("%s-%d-%s", nonce, time.Now().UnixNano(), node)
+	if _, err := l.Append(ctx, ledger.Entry{
+		Kind: ledger.KindSet, Path: witnessPrefix + minted, Value: []byte(minted),
+	}); err != nil {
+		logger.Info("SMOKEHOST-WITNESS-APPEND-FAILED", "node", node, "flow", flow, "error", err)
+		return "none"
+	}
+	logger.Info("SMOKEHOST-WITNESS-WROTE", "node", node, "flow", flow, "witness", minted+" ")
+
+	return minted + " "
 }
 
 // runRecoveryFlow builds a Machine whose journal IS the landed recovery detector,
