@@ -44,7 +44,11 @@ func (m *Manager) SetFlows(ctx context.Context, flows []string) error {
 			return err
 		}
 	}
-	m.peers.setMembership(m.peers.addresses(), m.hostedFlows())
+	// ONLY THE FLOW LIST IS WRITTEN HERE. This used to read the current address
+	// set back out and write it in again, which made a flow-set change a second
+	// writer of a value the refresh round owns and re-installed whatever
+	// resolution happened to be current at the moment of the call.
+	m.peers.setFlows(m.hostedFlows())
 	return nil
 }
 

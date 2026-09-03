@@ -22,7 +22,8 @@ func TestPeerFailuresReportsAnUnreachablePeerRatherThanRetrying(t *testing.T) {
 	asker, _ := testNode(t, "a-asker")
 	dead := unreachableAddress(t)
 	dials := countingDialer(asker)
-	asker.SetPeers([]string{dead}, []string{"alpha"})
+	asker.peers.setAddresses([]string{dead})
+	asker.peers.setFlows([]string{"alpha"})
 
 	view := asker.peers.statsView()
 	if _, present := view[dead]; present {
@@ -52,7 +53,8 @@ func TestPeerFailuresReportsAnUnreachablePeerRatherThanRetrying(t *testing.T) {
 	// about a client that reports everything as failed.
 	answerer, answererMux := testNode(t, "b-answerer")
 	answersFlows(answerer, "alpha")
-	asker.SetPeers([]string{answererMux.Addr().String()}, []string{"alpha"})
+	asker.peers.setAddresses([]string{answererMux.Addr().String()})
+	asker.peers.setFlows([]string{"alpha"})
 	ok := asker.peers.statsView()
 	if _, present := ok[answererMux.Addr().String()]; !present {
 		t.Fatalf("CONTROL FAILED: a reachable peer is absent from the view; failures were %v",

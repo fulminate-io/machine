@@ -80,7 +80,8 @@ func TestOnePeerConnectionServesEveryFlowInOneRound(t *testing.T) {
 	answersFlows(answerer, flows...)
 
 	dials := countingDialer(asker)
-	asker.SetPeers([]string{answererMux.Addr().String()}, flows)
+	asker.peers.setAddresses([]string{answererMux.Addr().String()})
+	asker.peers.setFlows(flows)
 
 	view := asker.peers.statsView()
 	byFlow, ok := view[answererMux.Addr().String()]
@@ -115,7 +116,8 @@ func TestManyLedFlowsCoalesceIntoOneStatsRoundPerPeer(t *testing.T) {
 	answersFlows(answerer, flows...)
 
 	dials := countingDialer(asker)
-	asker.SetPeers([]string{answererMux.Addr().String()}, flows)
+	asker.peers.setAddresses([]string{answererMux.Addr().String()})
+	asker.peers.setFlows(flows)
 
 	// ONE PROMOTER PER FLOW is the shape above this client: each asks on its own
 	// schedule. Ten independent per-flow reads inside one interval must still be
@@ -157,7 +159,8 @@ func TestASlowMembershipHandlerDoesNotDelayAnotherConnection(t *testing.T) {
 
 	// Park one handler.
 	go func() {
-		asker.SetPeers([]string{answererMux.Addr().String()}, []string{"slow"})
+		asker.peers.setAddresses([]string{answererMux.Addr().String()})
+		asker.peers.setFlows([]string{"slow"})
 		_ = asker.peers.statsView()
 	}()
 	select {
@@ -169,7 +172,8 @@ func TestASlowMembershipHandlerDoesNotDelayAnotherConnection(t *testing.T) {
 	// A SECOND, INDEPENDENT client must complete its exchange while that handler
 	// is still parked. The ceiling makes a block fail rather than pass slowly.
 	other, _ := testNode(t, "other")
-	other.SetPeers([]string{answererMux.Addr().String()}, []string{"fast"})
+	other.peers.setAddresses([]string{answererMux.Addr().String()})
+	other.peers.setFlows([]string{"fast"})
 	done := make(chan map[string]map[string]FlowStats, 1)
 	go func() { done <- other.peers.statsView() }()
 	start := time.Now()

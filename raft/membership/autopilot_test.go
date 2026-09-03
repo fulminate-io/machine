@@ -98,9 +98,17 @@ func TestAStagedJoinerIsPromotedOnceCaughtUpAndNotWhileBehind(t *testing.T) {
 			}
 		})
 		joiner.start(t)
-		// The leader has to know where to ask; discovery drives this in
-		// production and the test drives it directly.
-		leader.mgr.SetPeers([]string{joiner.addr}, []string{"alpha"})
+		// THE LEADER HAS TO KNOW WHERE TO ASK, AND DISCOVERY IS WHAT TELLS IT.
+		// This drives the registry rather than the peer set, and it is not a
+		// stylistic preference: the refresh round re-resolves into the peer set
+		// on every tick, so a set installed by hand is overwritten by the next
+		// round and the promoter starves again. The seam moved from the field to
+		// the resolver, and so does the test.
+		leader.mgr.cfg.Peers = "peers.invalid:0"
+		leader.mgr.cfg.Expect = 2
+		leader.mgr.resolve = func(context.Context, string) ([]string, error) {
+			return []string{leader.addr, joiner.addr}, nil
+		}
 
 		// A LEG THAT MAKES EITHER ANSWER MEAN SOMETHING: both arms must have
 		// formed a committed configuration carrying the joiner at all, so a group

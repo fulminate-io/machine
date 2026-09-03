@@ -40,9 +40,16 @@ func (m *Manager) Start(ctx context.Context) error {
 		}
 		m.addFlow(flow, l)
 	}
+	m.peers.setFlows(m.cfg.Flows)
+	// START STILL REFUSES ON A RESOLVE ERROR. An EMPTY but successful resolution
+	// is tolerated and always was: the place loop's count-and-lowest-id rule is
+	// what stops an empty answer being read as "nobody is out there", and under
+	// the per-round refresh below the next round finds the peers that were not
+	// published yet.
 	if err := m.refreshPeers(ctx); err != nil {
 		return err
 	}
+	m.stampResolved()
 	for _, flow := range m.cfg.Flows {
 		if err := m.placeFlow(ctx, flow); err != nil {
 			return err
@@ -132,6 +139,18 @@ func (m *Manager) supervise(flow string, pilot *flowPilot, r *raft.Raft) {
 			}
 			return
 		case <-evictions.C:
+			// THE REFRESH RUNS FIRST AND IT RUNS ON EVERY NODE, INCLUDING THE
+			// LEADER, and that ordering is the whole reason it is here rather
+			// than only inside the announce path. p.addrs has THREE consumers,
+			// not one: the announce round dials it, the stats round polls it,
+			// and the promoter reads the stats round's view through
+			// FetchServerStats. A leader is always present in its own
+			// configuration, so it never enters the announce path at all — and
+			// the leader is precisely the node that runs the promoter. Refreshed
+			// only from announceRound, the one node whose peer set decides
+			// whether a replacement is ever promoted would stay frozen for the
+			// life of the process.
+			m.refreshTargets(m.pilotCtx, flow)
 			m.evictRound(m.pilotCtx, flow)
 		case <-ticker.C:
 		}
@@ -159,17 +178,77 @@ func (m *Manager) reconcileLeadership(flow string, pilot *flowPilot, r *raft.Raf
 // refreshPeers resolves the one configured address into the instance set and
 // tells the client who to ask. With no Peers address the mechanism is absent and
 // a single-instance run stays zero-config.
+//
+// IT RESOLVES THROUGH resolveLive, WHICH IS THE EVICTION ROUND'S OWN CALL, so
+// the announce path and the eviction path share ONE refresh policy and one
+// resolver. They did not before: this side resolved exactly once, inside Start,
+// and held that answer for the life of the process while the leader's side
+// re-resolved every round. Measured consequence of that asymmetry: a replacement
+// pod announced to the previous generation's addresses for the whole of its life
+// and never reached the live group.
 func (m *Manager) refreshPeers(ctx context.Context) error {
-	if m.cfg.Peers == "" {
-		m.peers.setMembership(nil, m.cfg.Flows)
-		return nil
-	}
-	addrs, err := m.resolve(ctx, m.cfg.Peers)
+	addrs, err := m.resolveLive(ctx)
 	if err != nil {
 		return err
 	}
-	m.peers.setMembership(withoutSelf(addrs, m.cfg.Advertise), m.cfg.Flows)
+	m.peers.setAddresses(withoutSelf(addrs, m.cfg.Advertise))
 	return nil
+}
+
+// refreshInterval is how often the announce path re-resolves. IT IS THE EVICTION
+// ROUND'S OWN CADENCE, read from the same expression supervise reads, because
+// one refresh policy means one number as much as it means one resolver.
+func (m *Manager) refreshInterval() time.Duration {
+	return orDuration(m.cfg.Autopilot.ReconcileInterval, defaultEvictInterval)
+}
+
+// refreshDue reports whether the announce target set is older than the refresh
+// interval. The place loop retries every placeRetryInterval, which is fifty
+// times faster than the refresh, so without this the registry would be resolved
+// fifty times per interval per unplaced flow.
+func (m *Manager) refreshDue() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.resolvedAt.IsZero() || time.Since(m.resolvedAt) >= m.refreshInterval()
+}
+
+// stampResolved records that a resolution SUCCEEDED.
+//
+// IT IS STAMPED ON SUCCESS AND NEVER ON THE ATTEMPT. Stamping the attempt would
+// make a failed resolution hold the interval open, so a registry that came back
+// half a second later would go unread for the rest of it.
+func (m *Manager) stampResolved() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.resolvedAt = time.Now()
+}
+
+// refreshTargets re-resolves the peer set when it is due, and reports whether
+// the caller's round may proceed.
+//
+// IT WRITES THROUGH peers.setAddresses INTO p.addrs, NEVER INTO A LOCAL SLICE,
+// and that is a correctness requirement rather than a style choice. p.addrs is
+// read by three consumers: announceRound dials it, peers.round polls it for
+// stats, and flowPilot.FetchServerStats projects that view into autopilot,
+// which omits any server with no entry and leaves it at term zero, permanently
+// unhealthy and never promoted. A refresh that resolved into a per-round local
+// slice would fix the announce path and leave promotion broken forever.
+//
+// A FAILED RESOLUTION SKIPS THE ROUND RATHER THAN ANNOUNCING TO THE PREVIOUS
+// ANSWER, which is the same choice evictRound makes on the same failure and for
+// the same reason: acting on a set the registry no longer vouches for is the
+// defect, not the mitigation. The place loop retries in placeRetryInterval.
+func (m *Manager) refreshTargets(ctx context.Context, flow string) bool {
+	if !m.refreshDue() {
+		return true
+	}
+	if err := m.refreshPeers(ctx); err != nil {
+		m.logger.Warn("skipping an announce round: the registry did not resolve",
+			"flow", flow, "error", err)
+		return false
+	}
+	m.stampResolved()
+	return true
 }
 
 // withoutSelf drops this node's own advertised address from a resolved set, so a
@@ -246,6 +325,9 @@ func (m *Manager) alreadyMember(flow string) bool {
 // the walk stops after maxJoinRedirects hops rather than following a cycle.
 func (m *Manager) announceRound(ctx context.Context, flow string) map[string]announceReply {
 	answers := make(map[string]announceReply)
+	if !m.refreshTargets(ctx, flow) {
+		return answers
+	}
 	targets := m.peers.addresses()
 	for hop := 0; hop <= maxJoinRedirects && len(targets) > 0; hop++ {
 		next := make([]string, 0, len(targets))

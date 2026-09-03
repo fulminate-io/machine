@@ -179,7 +179,11 @@ type Manager struct {
 	pilotCtx    context.Context
 	pilotCancel context.CancelFunc
 
-	mu         sync.Mutex
+	mu sync.Mutex
+	// resolvedAt is when the announce target set was last re-resolved. It is
+	// what bounds the refresh to the eviction round's cadence while the place
+	// loop retries every placeRetryInterval.
+	resolvedAt time.Time
 	closed     bool
 	inflight   map[net.Conn]struct{}
 	flows      map[string]*ledger.Ledger
@@ -247,9 +251,6 @@ func (m *Manager) SetLocalStats(fn func(flow string) (FlowStats, bool)) {
 	defer m.mu.Unlock()
 	m.localStats = fn
 }
-
-// SetPeers records who this node asks and what it asks about.
-func (m *Manager) SetPeers(addrs, flows []string) { m.peers.setMembership(addrs, flows) }
 
 // Stats reports every peer's progress on one flow, served from a view refreshed
 // at most once per interval and shared by every caller.

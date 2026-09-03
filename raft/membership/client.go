@@ -43,12 +43,53 @@ func newPeers(link *transport.MembershipLink, logger hclog.Logger) *peers {
 	}
 }
 
-// setMembership records who to ask and what to ask about, and invalidates the
-// current view so the next read reflects the new set rather than the old one.
-func (p *peers) setMembership(addrs, flows []string) {
+// setAddresses records who to ask, and invalidates the current view so the next
+// read reflects the new set rather than the old one.
+//
+// ADDRESSES AND FLOWS HAVE SEPARATE WRITERS ON PURPOSE. One setter taking both
+// forced every flow-set change to restate the address set it was not changing,
+// which is a second writer of a value the refresh round owns — and a second
+// writer is how the two disagree.
+func (p *peers) setAddresses(addrs []string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// AN UNCHANGED SET IS A NO-OP, AND THAT IS A CORRECTNESS REQUIREMENT RATHER
+	// THAN AN OPTIMIZATION. Discarding the view is what makes the next read
+	// reflect the new set; doing it on every write instead of on every CHANGE
+	// destroys the interval coalescing statsView exists for, and the consumer
+	// that breaks is not the caller. Autopilot bounds its stats fetch to half
+	// its update interval, so a view invalidated on every refresh round forces a
+	// fresh round of real dials inside that budget, the fetch returns nothing,
+	// every member keeps a zero term, and nothing is ever promoted. Measured:
+	// with the view discarded unconditionally a caught-up replacement whose
+	// stats were demonstrably present in the view was never promoted.
+	if sameAddresses(p.addrs, addrs) {
+		return
+	}
 	p.addrs = append([]string(nil), addrs...)
+	p.view = nil
+}
+
+// sameAddresses reports whether two resolutions name the same set in the same
+// order. resolvePeers sorts its answer, so order is stable across rounds and an
+// ordered comparison is an equality test rather than a coincidence.
+func sameAddresses(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// setFlows records what to ask about, and invalidates the current view for the
+// reason setAddresses gives.
+func (p *peers) setFlows(flows []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.flows = append([]string(nil), flows...)
 	p.view = nil
 }
