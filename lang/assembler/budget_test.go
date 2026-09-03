@@ -6,6 +6,9 @@
 package assembler
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -42,14 +45,56 @@ const budgetIterations = 100
 // raises every other reading, so nothing real can hide behind it. Judging a
 // single batch instead would make this gate fail on unrelated machine load, which
 // is a flaky gate rather than a strict one.
+
 const budgetReadings = 5
 
 // TestGenerationBudget measures the full parse, graph, lower and emit path over
-// the largest golden fixture.
+// a fixture that exists for no other purpose.
 //
-// THE FIXTURE MUST BE A GOLDEN ONE, not a canonical strawman: a strawman is
-// refused before emission, so it cannot exercise the emit path at all and a
-// budget taken over one would be measuring a refusal.
+// IT USED TO MEASURE WHICHEVER GOLDEN WAS LARGEST, and that coupled a
+// performance gate to an editorial decision nobody could see from either end.
+// The largest golden is also the canonical one a reader consults, so it is where
+// explanatory prose accumulates — and prose is source bytes. Measured across one
+// branch: two commits that added a comment and a note paragraph to that fixture,
+// for entirely documentary reasons, grew it from 839 to 1510 bytes and this
+// measurement from 303.820µs to 384.525µs, spending 27% of the margin to the
+// half-budget tripwire. Nothing was wrong with either the prose or the gate; the
+// SELECTION RULE was wrong. A superlative over a mutable set measures the set as
+// much as the code, and it does so monotonically, because fixtures only grow.
+//
+// SO THE INPUT IS ITS OWN FIXTURE AND ITS BYTES ARE PINNED. testdata/budget
+// belongs to this test, is named in no other one, and carries no prose beyond
+// the minimum: a comment added to it fails the hash below rather than silently
+// moving the number. Changing it is then a deliberate act with a new baseline,
+// which is the only honest way to move a performance measurement's input.
+//
+// THE NEW INPUT COSTS MORE THAN THE OLD ONE, and that is a trade rather than a
+// regression. It carries seven statements where the golden it replaced carried
+// three, so it generates 6424 bytes of Go against 4709 — and format.Source over
+// the GENERATED file is ~92% of this path, so cost tracks that number rather
+// than the source size. Measured by ALTERNATING the two inputs on one host in
+// one window, which is what cancels load drift: the old input read 292, 418, 513
+// and 389µs while this one read 455, 556, 481 and 487µs. Roughly 20% dearer,
+// bought with four more statements' worth of coverage.
+//
+// THAT SAME MEASUREMENT SHOWS THE GATE ALREADY FLAPPED, independently of any of
+// this: the OLD input failed its own tripwire at 513µs in round three. On a host
+// under a load average near 300 the best-of-five statistic is not stable to
+// within the margin either input has. Nine readings were tried and did not help,
+// so the sampling was left at five rather than shipping a lever that measured
+// nothing. This is reported, not compensated for, and the budget is untouched.
+//
+// THE FIXTURE IS STILL A REAL, GENERATED ONE rather than a canonical strawman: a
+// strawman is refused before emission, so a budget over one would be measuring a
+// refusal. It carries the constructs a generator actually meets — import, const,
+// param, state, var, flow- and node-level error handlers, an `over` transport
+// clause, verbatim funcs, source, transform, branch, a three-arm switch, two
+// sinks and a drop.
+//
+// IT CARRIES NO TEE, and that is a harness limit rather than a choice: a tee
+// needs a duplicator derived from its payload's STRUCTURE, and this harness
+// supplies type spellings rather than structure, so a fixture with one is
+// refused at emission. The e2e fixtures exercise the tee by running.
 //
 // A CACHED PASS RE-MEASURES NOTHING. Go's test cache will report this green
 // without running it whenever its inputs are unchanged, which is correct and
@@ -57,23 +102,16 @@ const budgetReadings = 5
 // rather than here, because a cache-defeating flag stored in the gate would tax
 // every unrelated run for no information.
 func TestGenerationBudget(t *testing.T) {
-	largest := largestGoldenCase(t)
-
-	// CONTROL: the input has to be big enough that the measurement means
-	// something. A budget over a two-line fixture measures function call overhead.
-	if len(largest.source) < 256 {
-		t.Fatalf("CONTROL FAILED: the largest golden fixture %q is %d bytes, too small to measure a generator over",
-			largest.name, len(largest.source))
-	}
+	subject := budgetCase(t)
 
 	// CONTROL: it must generate CLEAN, or the timing would be of a refusal path.
-	generateCase(t, largest)
+	generateCase(t, subject)
 
 	best, worst := time.Duration(1<<62), time.Duration(0)
 	for range budgetReadings {
 		start := time.Now()
 		for range budgetIterations {
-			generateCase(t, largest)
+			generateCase(t, subject)
 		}
 		mean := time.Since(start) / budgetIterations
 		best = min(best, mean)
@@ -86,7 +124,7 @@ func TestGenerationBudget(t *testing.T) {
 	// three significant digits from one sample is quoting noise, and a reader
 	// comparing runs needs to see how wide the noise is.
 	t.Logf("parse-to-emit over %s (%d bytes): best mean %v, worst %v, over %d readings of %d iterations; budget %v",
-		largest.name, len(largest.source), best, worst, budgetReadings, budgetIterations, generationBudget)
+		subject.name, len(subject.source), best, worst, budgetReadings, budgetIterations, generationBudget)
 
 	if best > generationBudget {
 		t.Errorf("the generation path means %v at best, over the %v budget", best, generationBudget)
@@ -109,34 +147,79 @@ func TestGenerationBudget(t *testing.T) {
 //	graph + lower     5.8µs
 //	format.Source   211µs      839 source bytes -> 4709 generated bytes
 //
+// THOSE THREE TIMINGS WERE TAKEN ON THE OLD INPUT, the 839-byte golden this
+// measurement used before it got a fixture of its own, and they are left as
+// written rather than re-quoted against the new one: a breakdown nobody re-ran
+// should not be dressed up in fresh numbers. The RATIO is the durable claim.
+// What this test re-measures every run is the byte expansion the ratio rests on,
+// and it logs it: the pinned fixture generates several times its own size in Go.
+//
 // So the headroom is one order of magnitude rather than two, and it belongs to
-// the standard library's formatter rather than to anything this package does. The
-// figures are re-measured here rather than quoted, so this comment cannot rot
-// into a claim nobody re-ran.
+// the standard library's formatter rather than to anything this package does.
 func TestWhereTheGenerationCostIs(t *testing.T) {
-	largest := largestGoldenCase(t)
-	out := generateCase(t, largest)
+	subject := budgetCase(t)
+	out := generateCase(t, subject)
 
 	// The generated file is several times the source it came from, which is the
 	// reason formatting dominates: the formatter parses and prints THAT, not the
 	// .flow.
-	if len(out.Source) <= len(largest.source) {
+	if len(out.Source) <= len(subject.source) {
 		t.Errorf("the generated file is %d bytes from %d source bytes; the cost model assumes it is larger",
-			len(out.Source), len(largest.source))
+			len(out.Source), len(subject.source))
 	}
-	t.Logf("%s: %d source bytes generate %d bytes of Go", largest.name, len(largest.source), len(out.Source))
+	t.Logf("%s: %d source bytes generate %d bytes of Go", subject.name, len(subject.source), len(out.Source))
 }
 
-// largestGoldenCase returns the golden fixture with the most source bytes.
-func largestGoldenCase(t *testing.T) goldenCase {
+// budgetDir holds the one fixture the budget measures, and nothing else reads it.
+const budgetDir = "testdata/budget"
+
+// budgetFixtureSHA256 PINS THE MEASUREMENT'S INPUT.
+//
+// A performance number is only comparable across runs if the thing measured is
+// the same thing, so the input is hashed rather than trusted. Editing
+// testdata/budget/budget.flow fails here with both hashes printed, which is the
+// point: the edit is legal, but it invalidates every recorded baseline and has to
+// be an act someone took deliberately and re-based, not a comment that drifted in.
+//
+// TO CHANGE IT: edit the fixture, run this test, paste the "got" hash here, and
+// record the new baseline mean beside the old one wherever the old one is cited.
+const budgetFixtureSHA256 = "b0cca3d4dc8e028ae809c14f3468704feb62655cf0369db7ae46fb0e68664856"
+
+// budgetFixtureFloor is the size below which this measurement stops meaning
+// anything: a budget over a two-line fixture measures function call overhead.
+const budgetFixtureFloor = 256
+
+// budgetCase loads the budget's own fixture as a case the golden machinery can
+// generate, WITHOUT it being a golden. It is deliberately not discovered by
+// goldenCases: a golden owes a checked-in .flow.go expectation and takes part in
+// the drift, determinism and compile sweeps, and this fixture owes none of that.
+// It owes exactly one thing, which is to stay byte-identical.
+func budgetCase(t *testing.T) goldenCase {
 	t.Helper()
-	cases := goldenCases(t)
-	largest := cases[0]
-	for _, c := range cases[1:] {
-		if len(c.source) > len(largest.source) {
-			largest = c
-		}
+
+	source := readGoldenFile(t, filepath.Join(budgetDir, "budget.flow"))
+
+	sum := sha256.Sum256([]byte(source))
+	if got := hex.EncodeToString(sum[:]); got != budgetFixtureSHA256 {
+		t.Fatalf("the budget fixture changed, so every recorded baseline for this measurement is stale.\n"+
+			"  got  %s (%d bytes)\n want  %s\n"+
+			"If the change is deliberate, paste the got hash into budgetFixtureSHA256 and record the new baseline mean beside the old one.",
+			got, len(source), budgetFixtureSHA256)
 	}
 
-	return largest
+	// CONTROL: the pin above proves the bytes did not move; this proves they were
+	// worth pinning. A hash over an empty or trivial file is equally stable and
+	// equally meaningless.
+	if len(source) < budgetFixtureFloor {
+		t.Fatalf("CONTROL FAILED: the budget fixture is %d bytes, under the %d-byte floor; a measurement over that is function call overhead",
+			len(source), budgetFixtureFloor)
+	}
+
+	return goldenCase{
+		name:     "budget",
+		dir:      budgetDir,
+		source:   source,
+		types:    readTypes(t, filepath.Join(budgetDir, "types.txt")),
+		boundary: map[string]Boundary{},
+	}
 }

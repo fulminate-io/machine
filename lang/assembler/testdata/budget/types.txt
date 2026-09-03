@@ -1,0 +1,9 @@
+# The per-node input type spellings the DRIVER supplies. This fixture exists only
+# to be a STABLE input for the generation budget, so this table moves only when
+# the fixture does — and the fixture's bytes are pinned by the test.
+ingest=Order
+rate=Order
+triage=Order
+route=Order
+emit=Order
+audit=Order
