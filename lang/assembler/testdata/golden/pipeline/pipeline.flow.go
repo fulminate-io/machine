@@ -122,7 +122,7 @@ type OrdersIngests struct {
 // error and pushes panics rather than dropping the value silently.
 func WireOrders(m *machine.Machine) (OrdersIngests, error) {
 	ingest, ingest_ingest := m.Source[Order]("ingest", machine.WithEdge(Poll()), machine.WithEdge(machine.Channel[Order](0)))
-	charge := ingest.Map("charge", Bill, flowReadsOf(Bill, attempt), flowWritesOf(Bill, seen), machine.WithErrorHandler(NodeFailed))
+	charge := ingest.Map("charge", Bill, flowReadsOf(Bill, attempt, seen), flowWritesOf(Bill, attempt, seen), machine.WithErrorHandler(NodeFailed))
 	done := charge.Map("done", Store)
 	done.Drop("done#drain")
 
