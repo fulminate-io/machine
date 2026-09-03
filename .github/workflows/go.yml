@@ -512,6 +512,20 @@ jobs:
       # so this workflow does not match itself. That is what lets the job stay
       # INSIDE its own scan instead of being exempted from it.
       #
+      # THE 32-HEX CLAUSE IS BOUNDED ON BOTH SIDES, and that is a precision fix
+      # rather than a weakening. A node id is EXACTLY 32 hex characters, so an
+      # unbounded {32} also matched any longer hex run containing one — a sha256
+      # constant is 64 hex and can never be a node id, yet it hit. The boundary
+      # classes admit a 32-hex run only when what sits either side of it is not
+      # itself a hex character, so a quote, a slash or a line end still counts as
+      # a boundary while a 33rd hex character no longer does.
+      #
+      # THE ALTERNATIVE WAS AN EXCLUSION ROW FOR THE OFFENDING CONSTANT and it was
+      # rejected: an exclusion is an escape hatch that grows one line per false
+      # positive and silences the pattern for a name rather than fixing it, while
+      # the boundary removes the whole false-positive class and leaves nothing
+      # exempted.
+      #
       # TWO EXCLUSIONS, and each is a measured false positive of the 32-hex
       # pattern rather than a class of leak:
       #   1. the project's own Codacy badge ids, which are public project
@@ -523,7 +537,7 @@ jobs:
           set -u
           files=$(git ls-files '*.go' '*.md' '*.yml' '*.yaml' '*.ebnf' '*.txt' '*.flow')
           test -n "$files" || { echo "no tracked file matched, so this scan checked nothing"; exit 1; }
-          pattern="FUL-[0-9]+|[0-9a-f]{32}|fulminat[e]|linear[.]app"
+          pattern="FUL-[0-9]+|(^|[^0-9a-fA-F])[0-9a-f]{32}([^0-9a-fA-F]|$)|fulminat[e]|linear[.]app"
           hits=$(echo "$files" | tr '\n' '\0' | xargs -0 grep -nEI "$pattern" | grep -v 'app[.]codacy[.]com/project/badge' | grep -v 'TraceIDFromHex' || true)
           if [ -n "$hits" ]; then
             echo "a shipped file carries a tracker id, a knowledge-graph node reference or a private backend token:"

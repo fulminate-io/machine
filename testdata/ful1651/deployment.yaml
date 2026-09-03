@@ -67,19 +67,31 @@ spec:
               value: "smoke-peers.ful1651-smoke.svc.cluster.local:7946"
             - name: MACHINE_CLUSTER_EXPECT
               value: "3"
-            # The deployment's monotonic epoch. The apply step substitutes a
-            # real value: an acceptor refuses an announce from any other
-            # generation by name, so comparing zero against zero would leave the
-            # mechanism absent on exactly the deployment that rolls.
+            # The deployment's monotonic epoch. The readmission gate's apply step
+            # stamps a real epoch over this literal, and a strictly larger one
+            # before the second rollout, which is what makes that run exercise
+            # the refusal instead of comparing one value against itself.
+            #
+            # IT IS A VALID LITERAL AND NEVER A PLACEHOLDER TOKEN. The host parses
+            # this with strconv.ParseUint and exits 2 on a parse failure, because
+            # bad input errors here rather than defaulting to zero — so a manifest
+            # shipping an unsubstitutable token would start pods that die at
+            # config parsing for every gate that applies it WITHOUT substituting,
+            # which is what the landed phase-4 smoke criteria do.
             - name: MACHINE_CLUSTER_GENERATION
-              value: "REPLACED_AT_APPLY"
+              value: "1"
             # The per-deployment nonce the group-continuity witness is minted
             # FROM. It is not the witness itself: the value written into the
             # ledger also carries the writing instant and the writing node, so a
             # group that was replaced rather than preserved mints a different
             # one even though this nonce is unchanged across a rollout restart.
+            #
+            # A literal for the same reason as the epoch above: any string parses,
+            # but a manifest is applied unsubstituted by gates that are not this
+            # lane's, and those must get a runnable pod. The apply step stamps a
+            # fresh nonce over it.
             - name: MACHINE_SMOKE_WITNESS
-              value: "REPLACED_AT_APPLY"
+              value: "smoke-witness-baseline"
             - name: MACHINE_CLUSTER_SECRET
               valueFrom:
                 secretKeyRef:

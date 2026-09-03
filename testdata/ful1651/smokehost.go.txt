@@ -1,7 +1,13 @@
-// Command smokehost is the FUL-1651 phase-2 smoke harness. It maps the three
-// documented cluster env vars onto the landed raft packages and runs the flow
-// group, so the smoke observes the real discovery, bootstrap, eviction and
-// recovery code paths rather than a reimplementation of them.
+// Command smokehost is the phase-2 smoke harness. It maps the documented
+// cluster env vars onto the landed raft packages and runs the flow group, so
+// the smoke observes the real discovery, bootstrap, eviction and recovery code
+// paths rather than a reimplementation of them.
+//
+// THE COUNT IS DELIBERATELY NOT STATED. This sentence read "the three
+// documented cluster env vars" and was falsified the moment a fourth arrived,
+// in the one of the two places naming that number which has no compiler behind
+// it. Naming the set rather than counting it is what stops the next addition
+// repeating that.
 package main
 
 import (
