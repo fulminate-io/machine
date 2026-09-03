@@ -1,26 +1,25 @@
-func Rate(f machine.Frame[Order]) Order {
-  n, err := f.Update(processed, func(v int) int { return v + 1 })
+func Bill(f machine.Frame[Order]) Receipt {
+  count, err := f.Update(seen, func(n int) int { return n + 1 })
   if err != nil {
     panic(err)
   }
   f.Set(attempt, f.Get(attempt)+1)
-  out := f.Value()
-  out.Seen = n
-  return out
+  return Receipt{ID: strings.ToUpper(f.Value().ID), Seen: count}
 }
 
-func Label(f machine.Frame[Order]) Receipt {
-  return Receipt{ID: strings.ToUpper(f.Value().ID)}
-}
-
-flow budget
+flow orders
+note """
+The canonical shape: a source feeding one transform that touches both handle
+kinds, then a sink. It carries a const, a param, an error handler at both the
+flow and the node level, an `over` transport clause and a verbatim func.
+"""
 import "strings"
 
 const Retries int = 3
 param Endpoint string = ":8080"
 
 state {
-  processed int
+  seen int
 }
 var attempt int
 
@@ -28,15 +27,7 @@ on error PageOnCall
 
 source ingest Poll()
   over machine.Channel[Order](0)
-transform rate Rate from ingest
-  reads attempt, processed  writes attempt, processed
+transform charge Bill from ingest
+  reads attempt, seen  writes attempt, seen
   on error NodeFailed
-branch triage Interesting from rate -> kept, dropped
-switch route from kept on kept.Kind {
-  "card" -> billable
-  IsRefund(kept) -> refundable
-  else -> other
-}
-sink emit Label from billable
-sink audit Audit from refundable, other
-drop dropped
+sink done Store from charge
