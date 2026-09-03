@@ -76,11 +76,20 @@ type Journal interface {
 	// implementation submits into its own bounded window, because awaiting each
 	// datum in turn is what caps a flow at one checkpoint per disk sync.
 	Checkpoint(ctx context.Context, record CheckpointRecord) error
-	// Claim takes ownership of a datum for recovery and reports whether THIS owner
+	// Claim takes ownership of a datum for recovery and reports whether THIS node
 	// holds it. A retry by the winner returns true rather than false, so a claim
 	// replayed across a leadership change does not deny a worker the datum it
 	// already owns.
-	Claim(ctx context.Context, flow, datum, owner string) (bool, error)
+	//
+	// IT TAKES NO OWNER, and that is the point rather than an omission. The
+	// identity a claim must carry is the implementation's own replica identity,
+	// which is the namespace the leader compares a claimant against; this module
+	// does not know it and must not be asked to invent one. A caller-supplied
+	// owner is how this seam shipped a durability defect: every replica passed the
+	// same machine name, so no claim excluded anyone and the leader read every
+	// claimant as departed. The implementation stamps its own identity, exactly as
+	// it already does for a record's Owner.
+	Claim(ctx context.Context, flow, datum string) (bool, error)
 	// Retire drops a completed datum's record and its claim together. Retiring a
 	// datum that was never checkpointed is a no-op rather than an error, because
 	// completion fires for every datum whether or not its flow declared a

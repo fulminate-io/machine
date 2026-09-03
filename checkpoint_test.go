@@ -39,11 +39,15 @@ func (j *recordingJournal) Checkpoint(_ context.Context, record CheckpointRecord
 	return j.failWith
 }
 
-func (j *recordingJournal) Claim(_ context.Context, flow, datum, owner string) (bool, error) {
+// Claim records the flow and the datum only. THE OWNER SEGMENT IS GONE because the
+// seam no longer takes one: the implementation stamps its own ledger identity, so a
+// fake recording a caller-supplied owner would be recording a value the real journal
+// never sees.
+func (j *recordingJournal) Claim(_ context.Context, flow, datum string) (bool, error) {
 	j.mutex.Lock()
 	defer j.mutex.Unlock()
 
-	j.claims = append(j.claims, flow+"/"+datum+"/"+owner)
+	j.claims = append(j.claims, flow+"/"+datum)
 
 	return j.claimResult, j.claimErr
 }
@@ -111,7 +115,7 @@ func TestTheJournalSeamCarriesEachCallThrough(t *testing.T) {
 		t.Fatalf("checkpointing: %v", err)
 	}
 
-	held, err := journal.Claim(ctx, "flow-a", "datum-1", "worker-a")
+	held, err := journal.Claim(ctx, "flow-a", "datum-1")
 	if err != nil {
 		t.Fatalf("claiming: %v", err)
 	}
@@ -142,7 +146,7 @@ func TestTheJournalSeamCarriesEachCallThrough(t *testing.T) {
 		got.Node != record.Node || got.Anchor != record.Anchor || string(got.Data) != string(record.Data) {
 		t.Fatalf("the journal was handed %+v, want exactly the record given %+v", got, record)
 	}
-	if len(claims) != 1 || claims[0] != "flow-a/datum-1/worker-a" {
+	if len(claims) != 1 || claims[0] != "flow-a/datum-1" {
 		t.Fatalf("the journal was handed claims %v, want the flow, datum and owner", claims)
 	}
 	if len(retires) != 1 || retires[0] != "flow-a/datum-1" {
@@ -161,7 +165,7 @@ func TestTheJournalSeamReportsItsFailuresRatherThanSwallowingThem(t *testing.T) 
 	if err := journal.Checkpoint(ctx, CheckpointRecord{Datum: "datum-1"}); !errors.Is(err, sentinel) {
 		t.Fatalf("Checkpoint reported %v, want the journal's own error", err)
 	}
-	if _, err := journal.Claim(ctx, "flow-a", "datum-1", "worker-a"); !errors.Is(err, sentinel) {
+	if _, err := journal.Claim(ctx, "flow-a", "datum-1"); !errors.Is(err, sentinel) {
 		t.Fatalf("Claim reported %v, want the journal's own error", err)
 	}
 	if err := journal.Retire(ctx, "flow-a", "datum-1"); !errors.Is(err, sentinel) {

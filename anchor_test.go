@@ -35,7 +35,7 @@ func (j *orderedJournal) Checkpoint(_ context.Context, record CheckpointRecord) 
 	return j.failWith
 }
 
-func (j *orderedJournal) Claim(context.Context, string, string, string) (bool, error) {
+func (j *orderedJournal) Claim(context.Context, string, string) (bool, error) {
 	return true, nil
 }
 func (j *orderedJournal) Retire(context.Context, string, string) error { return nil }

@@ -49,7 +49,7 @@ func TestADepartedHoldersClaimIsRetiredAndTheDatumIsReClaimedByASurvivor(t *test
 
 	// THE CLAIM IS GONE, AND A LIVE SURVIVOR WINS IT. Before the retire-claim entry
 	// existed this returned won=false with the datum offered on every round forever.
-	won, err := detector.Claim(ctx, "flow-stranded", "datum-stranded", leader.id)
+	won, err := detector.Claim(ctx, "flow-stranded", "datum-stranded")
 	if err != nil {
 		t.Fatalf("a survivor claiming the re-offered datum: %v", err)
 	}

@@ -59,6 +59,14 @@
 // through the ordinary path. First-writer-wins is untouched, and the datum re-enters the
 // duplicate window above rather than a third one of its own.
 //
+// A CLAIM IS WRITTEN UNDER THE LEDGER'S OWN IDENTITY, and the retire mechanism above
+// rests entirely on it. A claim's claimant, a record's Owner and the alive set the
+// leader builds from the committed configuration are ONE namespace, which is what
+// lets the leader ask whether a claim's holder is still a member and get a meaningful
+// answer. The seam therefore takes no owner from its caller: while it did, every
+// replica passed the same machine name, so no claim excluded another survivor and the
+// leader read every claimant as departed and retired it in the same scan.
+//
 // # Liveness, and what this design does not prevent
 //
 // RECOVERY NO LONGER WAITS ON EVICTION. An owner that is still in the committed
@@ -91,9 +99,12 @@
 // single observation taken at removal, so that same member's eviction reads
 // not-reachable and is not suspended either. Both follow from one choice — the
 // leader's view is the only liveness authority available — and the compensating
-// mechanism is the journal's first-writer-wins claim, which still admits exactly one
-// writer even when two try. Name it plainly: THIS DESIGN PREVENTS A SECOND CLAIM,
-// NOT A SECOND ATTEMPT.
+// mechanism is the journal's first-writer-wins claim, which admits exactly one writer
+// even when two try. THAT EXCLUSION IS REAL ONLY BECAUSE THE CLAIM CARRIES THE
+// LEDGER'S IDENTITY, described above: while the claim was written under the machine's
+// name, one string shared by every replica, it admitted every survivor and the
+// compensation named here did not exist. Name the residual plainly: THIS DESIGN
+// PREVENTS A SECOND CLAIM, NOT A SECOND ATTEMPT.
 //
 // A REFUSED CURSOR DROPS THE HEALTH VIEW AND THE SUSPENSIONS WITH IT. A cursor the
 // signal log refuses means signals were dropped between this reader and the log, so

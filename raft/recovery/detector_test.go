@@ -171,25 +171,41 @@ func TestClaimReportsAJournalFailureRatherThanALostRace(t *testing.T) {
 	detector := New(leader.ledger, newView(nodes[0].id), "flow-claimerr")
 
 	// CONTROL: an ordinary claim succeeds through this same path.
-	won, err := detector.Claim(ctx, "flow-claimerr", "datum-1", nodes[0].id)
+	won, err := detector.Claim(ctx, "flow-claimerr", "datum-1")
 	if err != nil || !won {
 		t.Fatalf("CONTROL FAILED: an uncontested claim gave won=%v err=%v", won, err)
 	}
 
 	// A LOST race: reported as false, never as an error.
-	won, err = detector.Claim(ctx, "flow-claimerr", "datum-1", nodes[1].id)
+	//
+	// IT TAKES A SECOND NODE'S DETECTOR, and that is a repair rather than a
+	// flourish. This arm used to call the SAME detector twice and hand it two
+	// different owner strings, which modeled two nodes only because the seam let a
+	// caller name whoever it liked. The seam now stamps the ledger's own identity,
+	// so a second call on one detector is the WINNER RETRYING and correctly returns
+	// true; a genuine loss needs a genuinely different node.
+	otherDetector := New(followerOf(t, nodes, leader).ledger, newView(nodes[0].id), "flow-claimerr")
+	won, err = otherDetector.Claim(ctx, "flow-claimerr", "datum-1")
 	if err != nil {
 		t.Fatalf("a lost race reported an error %v; losing is the protocol working", err)
 	}
 	if won {
-		t.Fatal("a second owner won a datum another worker already holds")
+		t.Fatal("a second node won a datum another node already holds")
+	}
+
+	// THE WINNER'S OWN RETRY STILL WINS, which is the discriminating control for the
+	// arm above: an implementation that refused every later claim would satisfy it
+	// while denying a holder the datum it already owns across a leadership change.
+	retry, err := detector.Claim(ctx, "flow-claimerr", "datum-1")
+	if err != nil || !retry {
+		t.Fatalf("CONTROL FAILED: the holder's own retry gave won=%v err=%v, want true", retry, err)
 	}
 
 	// A CLOSED ledger is a real failure and reaches the caller.
 	if err := leader.ledger.Close(); err != nil {
 		t.Fatalf("closing the ledger: %v", err)
 	}
-	if _, err := detector.Claim(ctx, "flow-claimerr", "datum-2", nodes[0].id); !errors.Is(err, ledger.ErrClosed) {
+	if _, err := detector.Claim(ctx, "flow-claimerr", "datum-2"); !errors.Is(err, ledger.ErrClosed) {
 		t.Fatalf("claiming on a closed ledger gave %v, want the ledger's own refusal", err)
 	}
 }

@@ -38,11 +38,11 @@ func newResumeJournal(offer []CheckpointRecord, won bool) *resumeJournal {
 
 func (j *resumeJournal) Checkpoint(context.Context, CheckpointRecord) error { return nil }
 
-func (j *resumeJournal) Claim(_ context.Context, _, datum, owner string) (bool, error) {
+func (j *resumeJournal) Claim(_ context.Context, _, datum string) (bool, error) {
 	j.mutex.Lock()
 	defer j.mutex.Unlock()
 
-	j.claimed = append(j.claimed, datum+"/"+owner)
+	j.claimed = append(j.claimed, datum)
 
 	return j.claimWon, j.claimErr
 }
@@ -547,7 +547,7 @@ func TestRetirementReportsAJournalFailure(t *testing.T) {
 type failingRetireJournal struct{ err error }
 
 func (j *failingRetireJournal) Checkpoint(context.Context, CheckpointRecord) error { return nil }
-func (j *failingRetireJournal) Claim(context.Context, string, string, string) (bool, error) {
+func (j *failingRetireJournal) Claim(context.Context, string, string) (bool, error) {
 	return false, nil
 }
 func (j *failingRetireJournal) Retire(context.Context, string, string) error { return j.err }

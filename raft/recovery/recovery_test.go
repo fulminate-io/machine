@@ -49,7 +49,7 @@ func TestADeadWorkersDatumIsClaimedOnceAndCompleted(t *testing.T) {
 	}
 
 	// EXACTLY ONE survivor takes it.
-	won, err := detector.Claim(ctx, "flow-dead", "datum-1", nodes[0].id)
+	won, err := detector.Claim(ctx, "flow-dead", "datum-1")
 	if err != nil {
 		t.Fatalf("claiming the orphan: %v", err)
 	}
@@ -95,14 +95,16 @@ func TestTwoSurvivorsRacingForOneDatumProduceExactlyOneWinner(t *testing.T) {
 	results := make([]bool, 2)
 	errs := make([]error, 2)
 
+	// EACH DETECTOR STAMPS ITS OWN LEDGER'S IDENTITY, so there is no owner to hand
+	// in and no way for this test to model two nodes that the product does not also
+	// take. That equivalence is the point: while the seam accepted an owner, this
+	// test passed two distinct node ids and stayed green while the product passed
+	// one shared machine name to every replica.
 	wg.Add(2)
-	for i, pair := range []struct {
-		detector *Detector
-		owner    string
-	}{{first, nodes[0].id}, {second, nodes[1].id}} {
+	for i, detector := range []*Detector{first, second} {
 		go func() {
 			defer wg.Done()
-			results[i], errs[i] = pair.detector.Claim(ctx, "flow-race", "datum-1", pair.owner)
+			results[i], errs[i] = detector.Claim(ctx, "flow-race", "datum-1")
 		}()
 	}
 	wg.Wait()
@@ -433,7 +435,7 @@ func (j *recordingJournal) Checkpoint(_ context.Context, record machine.Checkpoi
 	return nil
 }
 
-func (j *recordingJournal) Claim(context.Context, string, string, string) (bool, error) {
+func (j *recordingJournal) Claim(context.Context, string, string) (bool, error) {
 	return true, nil
 }
 

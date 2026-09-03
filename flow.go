@@ -284,7 +284,7 @@ func reclaim[I, O any](ctx context.Context, w *worker[I], out *emitter[O], recor
 		return
 	}
 
-	won, err := w.machine.cfg.journal.Claim(ctx, record.Flow, record.Datum, w.machine.name)
+	won, err := w.machine.cfg.journal.Claim(ctx, record.Flow, record.Datum)
 	if err != nil {
 		w.report(ctx, fmt.Errorf("machine: claiming datum %q for node %q: %w", record.Datum, w.name, err))
 

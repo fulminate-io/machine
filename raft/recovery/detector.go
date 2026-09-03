@@ -149,13 +149,26 @@ func decodeRecord(path string, data []byte) (machine.CheckpointRecord, error) {
 	return record, nil
 }
 
-// Claim takes ownership of a datum and reports whether THIS owner holds it.
+// Claim takes ownership of a datum and reports whether THIS NODE holds it.
+//
+// THE OWNER IS STAMPED HERE, from the ledger's own identity, and the caller does not
+// supply one — the same reasoning New records for taking no identity parameter, and
+// the same thing Checkpoint already does for a record's Owner. It is not a
+// stylistic echo: the claimant is compared against the alive set, which live builds
+// from the committed configuration's server ids, so a claim written under anything
+// else is a claim in a namespace the comparison can never match. Passing an owner in
+// is how this seam shipped a durability defect — every replica handed it one shared
+// machine name, so the journal's first-writer-wins arm read every later claim as the
+// winner retrying and admitted them all, while claimWithholds read every claimant as
+// departed and retired the claim in the same scan.
 //
 // A LOST RACE IS NOT AN ERROR HERE. The journal's apply arm refuses every later
 // claimant with its own sentinel, and that refusal means another survivor won —
 // ordinary, expected, and reported as false rather than as a failure. Anything else
 // is a real error and reaches the caller.
-func (d *Detector) Claim(ctx context.Context, flow, datum, owner string) (bool, error) {
+func (d *Detector) Claim(ctx context.Context, flow, datum string) (bool, error) {
+	owner := d.ledger.LocalID()
+
 	_, err := d.ledger.Append(ctx, ledger.Entry{
 		Kind: ledger.KindClaim, Path: checkpoint.ClaimPath(datum), Value: []byte(owner),
 	})

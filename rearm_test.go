@@ -31,10 +31,10 @@ type leadershipJournal struct {
 func (j *leadershipJournal) Checkpoint(context.Context, CheckpointRecord) error { return nil }
 func (j *leadershipJournal) Retire(context.Context, string, string) error       { return nil }
 
-func (j *leadershipJournal) Claim(_ context.Context, _, datum, owner string) (bool, error) {
+func (j *leadershipJournal) Claim(_ context.Context, _, datum string) (bool, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	j.claimed = append(j.claimed, datum+"/"+owner)
+	j.claimed = append(j.claimed, datum)
 	return true, nil
 }
 
@@ -110,7 +110,7 @@ func TestTheResumeLoopReArmsWhenLeadershipArrives(t *testing.T) {
 	if awaited == 0 {
 		t.Fatalf("ARM 1: the loop never awaited leadership after a refusal (calls=%d)", calls)
 	}
-	if len(claimed) != 1 || claimed[0] != "datum-1/flow-rearm" {
+	if len(claimed) != 1 || claimed[0] != "datum-1" {
 		t.Fatalf("ARM 1: claims=%v, want the stranded datum claimed after leadership arrived", claimed)
 	}
 
