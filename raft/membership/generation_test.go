@@ -9,6 +9,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestAnAnnounceCrossingDeploymentGenerationsIsRefusedByName drives the acceptor
@@ -84,4 +85,85 @@ func TestAnAnnounceCrossingDeploymentGenerationsIsRefusedByName(t *testing.T) {
 			"the announcer's generation did not survive the wire; reply=%+v", testGeneration, reply)
 	}
 	t.Logf("both generations survived the wire: request %d, reply %d", 9, reply.Generation)
+}
+
+// TestANodeEvictedFromItsConfigurationReAnnouncesItself is the gate on the
+// residual eviction discloses. Before the re-place round the announce path had
+// two one-shot callers, so an evicted member stayed out until its process
+// restarted and the disclosure's "the joiner re-announces on its next probe" was
+// false.
+func TestANodeEvictedFromItsConfigurationReAnnouncesItself(t *testing.T) {
+	leader := newClusterNode(t, "a-leader", []string{"alpha"}, 0)
+	leader.start(t)
+	leader.awaitLeader(t, "alpha")
+
+	joiner := newClusterNode(t, "b-joiner", []string{"alpha"}, 2)
+	joiner.peering(leader.addr)
+	joiner.start(t)
+	if _, ok := suffrageIn(t, leader.raftFor(t, "alpha"), "b-joiner"); !ok {
+		t.Fatal("the joiner never reached the leader's configuration, so there is nothing to evict")
+	}
+
+	// THE JOINER'S OWN VIEW HAS TO CATCH UP FIRST, and waiting for it is a
+	// measurement rather than a convenience: staging is committed on the LEADER,
+	// and until the configuration entry reaches the joiner's own log the joiner
+	// cannot see itself in it. The re-place round announces during that window,
+	// which is one idempotent announce per round and is what the control below
+	// would otherwise read as a defect.
+	settled := time.Now().Add(20 * time.Second)
+	for time.Now().Before(settled) {
+		if _, ok := suffrageIn(t, joiner.raftFor(t, "alpha"), "b-joiner"); ok {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if _, ok := suffrageIn(t, joiner.raftFor(t, "alpha"), "b-joiner"); !ok {
+		t.Fatalf("the joiner never saw itself in its own configuration; it reads %v",
+			memberIDs(t, joiner.raftFor(t, "alpha")))
+	}
+
+	// THE CONTROL, SAME INSTRUMENT, SAME METHOD, BEFORE THE EVICTION: a node that
+	// IS in its configuration announces nothing. Without it a re-place round that
+	// dialed on every tick would pass the assertion below for the wrong reason.
+	dials := countingDialer(joiner.mgr)
+	joiner.mgr.replaceRound(context.Background(), "alpha")
+	if n := *dials; n != 0 {
+		t.Fatalf("CONTROL FAILED: a node present in its configuration made %d announce dials", n)
+	}
+	t.Log("a node present in its own configuration re-places nothing and dials nobody")
+
+	// THE EVICTION, through the same call evictOne makes.
+	if err := leader.raftFor(t, "alpha").RemoveServer("b-joiner", 0, 0).Error(); err != nil {
+		t.Fatalf("removing the joiner: %v", err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := suffrageIn(t, leader.raftFor(t, "alpha"), "b-joiner"); !ok {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if _, ok := suffrageIn(t, leader.raftFor(t, "alpha"), "b-joiner"); ok {
+		t.Fatal("the joiner was not removed, so the re-place round has nothing to repair")
+	}
+
+	// WHAT THE EVICTED NODE'S OWN RAFT BELIEVES, recorded rather than assumed: it
+	// is what decides whether alreadyMember can see the eviction at all.
+	own := memberIDs(t, joiner.raftFor(t, "alpha"))
+	t.Logf("the evicted node's OWN configuration reads %v", own)
+
+	// THE ASSERTION: one round puts it back.
+	joiner.mgr.replaceRound(context.Background(), "alpha")
+	back := time.Now().Add(20 * time.Second)
+	for time.Now().Before(back) {
+		if _, ok := suffrageIn(t, leader.raftFor(t, "alpha"), "b-joiner"); ok {
+			t.Log("the evicted node re-announced itself and is back in the committed configuration")
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+		joiner.mgr.replaceRound(context.Background(), "alpha")
+	}
+	t.Fatalf("the evicted node never re-announced itself; the leader's configuration is %v and the "+
+		"node's own is %v — the residual eviction discloses has no repair",
+		memberIDs(t, leader.raftFor(t, "alpha")), memberIDs(t, joiner.raftFor(t, "alpha")))
 }

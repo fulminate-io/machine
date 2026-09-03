@@ -153,7 +153,7 @@ func TestAStagedJoinerIsPromotedOnceCaughtUpAndNotWhileBehind(t *testing.T) {
 // without bound.
 func TestAFailedMemberIsRecordedOnceRatherThanOnEveryReport(t *testing.T) {
 	mgr, _ := testNode(t, "a-leader")
-	pilot := &flowPilot{mgr: mgr, flow: "alpha", done: make(chan struct{}), healthy: map[raft.ServerID]bool{}}
+	pilot := newPilotState(mgr, "alpha")
 
 	for i := 0; i < 5; i++ {
 		pilot.RemoveFailedServer(&autopilot.Server{ID: "b-gone"})

@@ -386,12 +386,20 @@ func addStaleNonvoter(t *testing.T, r *raft.Raft, id, addr string) {
 
 func TestAPeerSignalNeverNamesThePublishingNode(t *testing.T) {
 	mgr, _ := testNode(t, "a-leader")
-	// noteHealth is driven DIRECTLY with autopilot's FIRST published state: the
-	// one in which nothing has yet been stable for ServerStabilizationTime, so
-	// every member reads unhealthy — the leader included. That is the state in
-	// which a self-naming signal is published, and driving it by hand makes the
-	// assertion deterministic rather than a race against a reconcile round.
-	pilot := &flowPilot{mgr: mgr, flow: "alpha", done: make(chan struct{}), healthy: map[raft.ServerID]bool{}}
+	// noteHealth is driven DIRECTLY, by hand, so the assertion is deterministic
+	// rather than a race against a reconcile round.
+	//
+	// IT TAKES TWO STATES RATHER THAN ONE, and the reason is the encoding rather
+	// than the test: a FIRST sighting publishes nothing in either direction now,
+	// because autopilot marks every member unhealthy until it has been stable and
+	// publishing on that sighting told a consumer every live peer was unreachable.
+	// The state in which a self-naming signal could be published is therefore a
+	// TRANSITION from healthy to unhealthy, which is what these two calls build.
+	pilot := newPilotState(mgr, "alpha")
+	pilot.noteHealth(&autopilotState{health: map[raft.ServerID]bool{
+		raft.ServerID(mgr.cfg.Node): true,
+		"b-peer":                    true,
+	}})
 	pilot.noteHealth(&autopilotState{health: map[raft.ServerID]bool{
 		raft.ServerID(mgr.cfg.Node): false,
 		"b-peer":                    false,

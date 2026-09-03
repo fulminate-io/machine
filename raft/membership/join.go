@@ -152,6 +152,11 @@ func (m *Manager) supervise(flow string, pilot *flowPilot, r *raft.Raft) {
 			// life of the process.
 			m.refreshTargets(m.pilotCtx, flow)
 			m.evictRound(m.pilotCtx, flow)
+			// THE RE-PLACE ROUND RUNS ON EVERY NODE, unlike the eviction round
+			// beside it, which returns immediately unless this node leads. A
+			// node that has fallen out of a configuration is by definition not
+			// the one that removed it.
+			m.replaceRound(m.pilotCtx, flow)
 		case <-ticker.C:
 		}
 	}
@@ -302,19 +307,62 @@ func (m *Manager) placeOnce(ctx context.Context, flow string) (bool, string) {
 	return m.createIfRuled(flow, answers)
 }
 
-// alreadyMember reports whether this node's ledger for the flow is already in a
-// formed group. A ledger that survived a restart, or one this node created, is
+// alreadyMember reports whether this node is IN its flow's committed
+// configuration. A ledger that survived a restart, or one this node created, is
 // already placed and must not be announced again.
+//
+// IT ASKS WHETHER THIS NODE IS THERE, NOT WHETHER THE CONFIGURATION IS
+// NON-EMPTY, and the difference is the whole of the re-place round below. A
+// removed FOLLOWER is told nothing it acts on — leaveFlow records the
+// measurement — so a node evicted from a group it can still see reads a
+// perfectly populated configuration that no longer names it. Under the
+// non-empty test that node is "already placed" forever.
 func (m *Manager) alreadyMember(flow string) bool {
 	l, ok := m.Ledger(flow)
 	if !ok {
 		return false
 	}
-	future := l.Raft().GetConfiguration()
-	if future.Error() != nil {
-		return false
+	return confirmStaged(l.Raft(), raft.ServerID(m.cfg.Node)) == nil
+}
+
+// replaceRound re-announces a flow this node has fallen out of, on the same
+// ticker the eviction round runs on.
+//
+// THIS IS THE NEXT PROBE eviction's live-nonvoter residual is justified by. That
+// justification was false when it was written: placeFlow had exactly two
+// one-shot callers, Start and joinFlow, and nothing periodic ever called the
+// announce path again, so an evicted member stayed out until its process
+// restarted. Re-resolving the announce target set does not repair that on its
+// own — it makes the targets current, not the probe recurrent — so the probe is
+// here.
+//
+// IT COSTS ONE LOCAL CONFIGURATION READ PER FLOW PER ROUND in the steady state
+// and dials nothing: a node that is in its configuration returns at
+// alreadyMember without touching the network.
+//
+// THREE TRANSIENT WINDOWS, ENUMERATED, because each one makes this round
+// announce when nothing is wrong. A joiner staged on the LEADER cannot see
+// itself until the configuration entry reaches its own log, so it re-announces
+// once per round for the length of that replication lag; the announce is
+// idempotent, because a leader staging an already-present member has no effect.
+// A node whose GetConfiguration errors is treated as not-present and announces,
+// on the same idempotence, and the next round re-reads. And the removal DOES
+// reach a removed node's own log — measured converging within two seconds — so
+// this round sees an eviction after that lag rather than never.
+func (m *Manager) replaceRound(ctx context.Context, flow string) {
+	if _, ok := m.Ledger(flow); !ok {
+		return
 	}
-	return len(future.Configuration().Servers) > 0
+	if m.alreadyMember(flow) {
+		return
+	}
+	placed, reason := m.placeOnce(ctx, flow)
+	if placed {
+		m.logger.Warn("re-placed a flow this node had fallen out of", "flow", flow, "node", m.cfg.Node)
+		return
+	}
+	m.logger.Warn("a flow this node has fallen out of is not re-placed yet",
+		"flow", flow, "node", m.cfg.Node, "reason", reason)
 }
 
 // announceRound announces this node to every peer for one flow, following each

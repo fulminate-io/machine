@@ -420,10 +420,18 @@ func TestADivergedIdentityWouldMakeTheSelfExclusionFailOpen(t *testing.T) {
 		t.Fatal("CONTROL FAILED: the fixture is not diverged, so nothing below observes what divergence does")
 	}
 
-	// Autopilot's FIRST published state, in which nothing has been stable for
-	// ServerStabilizationTime yet and every member reads unhealthy — the node
-	// running this loop included, under the raft id it actually runs under.
-	pilot := &flowPilot{mgr: mgr, flow: "alpha", done: make(chan struct{}), healthy: map[raft.ServerID]bool{}}
+	// A HEALTHY STATE AND THEN AN UNHEALTHY ONE, because a peer-unreachable
+	// signal is published on a TRANSITION and never on a first sighting:
+	// autopilot marks every member unhealthy until it has been stable, so
+	// publishing on that sighting reported every live peer as unreachable. The
+	// consequence this test records is unchanged — under divergence the
+	// exclusion compares the wrong identity and the node names ITSELF — only the
+	// state sequence that reaches it is.
+	pilot := newPilotState(mgr, "alpha")
+	pilot.noteHealth(&autopilotState{health: map[raft.ServerID]bool{
+		raft.ServerID(l.LocalID()): true,
+		"b-peer":                   true,
+	}})
 	pilot.noteHealth(&autopilotState{health: map[raft.ServerID]bool{
 		raft.ServerID(l.LocalID()): false,
 		"b-peer":                   false,

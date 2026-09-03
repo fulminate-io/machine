@@ -51,6 +51,16 @@ type flowPilot struct {
 	state   *autopilot.State
 	failed  []raft.ServerID
 	healthy map[raft.ServerID]bool
+	// firstSeen is when this pilot first observed each peer at all, and it is
+	// what makes the unreachable signal mean "was reachable, now is not".
+	// Autopilot reports every member unhealthy until it has been stable for
+	// ServerStabilizationTime, so a pilot that has just taken leadership sees an
+	// all-unhealthy first state for a perfectly healthy group.
+	firstSeen map[raft.ServerID]time.Time
+	// announced records that an unreachable signal has already been published
+	// for a peer's CURRENT unhealthy episode, so the report fires once per
+	// episode and the returned signal that closes it always has an opening.
+	announced map[raft.ServerID]bool
 }
 
 // release ends this flow's supervision, once.
@@ -60,9 +70,24 @@ func (f *flowPilot) release() { f.doneOnce.Do(func() { close(f.done) }) }
 // that interface must break the build here rather than at a call site.
 var _ autopilot.ApplicationIntegration = (*flowPilot)(nil)
 
+// newPilotState builds a flow's integration WITHOUT its autopilot instance.
+//
+// IT EXISTS SO THE PER-PEER MAPS HAVE ONE INITIALIZER. noteHealth writes three
+// of them, and a map left nil there panics on write rather than misbehaving
+// quietly — which is the good failure — but only if every construction site
+// initializes every map. One site is how that stays true as fields are added.
+func newPilotState(m *Manager, flow string) *flowPilot {
+	return &flowPilot{
+		mgr: m, flow: flow, done: make(chan struct{}),
+		healthy:   map[raft.ServerID]bool{},
+		firstSeen: map[raft.ServerID]time.Time{},
+		announced: map[raft.ServerID]bool{},
+	}
+}
+
 // newFlowPilot builds the integration and the autopilot instance for one flow.
 func newFlowPilot(m *Manager, flow string, r *raft.Raft) *flowPilot {
-	f := &flowPilot{mgr: m, flow: flow, done: make(chan struct{}), healthy: map[raft.ServerID]bool{}}
+	f := newPilotState(m, flow)
 	tuning := m.cfg.Autopilot
 	f.pilot = autopilot.New(r, f,
 		autopilot.WithLogger(m.logger.Named("autopilot").With("flow", flow)),

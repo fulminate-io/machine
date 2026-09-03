@@ -104,6 +104,64 @@ type Signal struct {
 	Node  string
 	Since time.Time
 	Index uint64
+	// EvictedWhileReachable reports that the evicted member ANSWERED A CONTROL
+	// DIAL at the moment it was removed. IT IS DEFINED ONLY ON
+	// SignalPeerEvicted and is false on every other kind, which is why it is
+	// named for the eviction rather than for reachability: read on any other
+	// kind, false is the true statement that this is not an eviction of a
+	// reachable member.
+	//
+	// TRUE AND FALSE ARE NOT SYMMETRIC, AND A CONSUMER MUST KNOW WHICH IT HAS.
+	// True is positive evidence: the member answered. FALSE IS THE ABSENCE OF
+	// EVIDENCE, not evidence of absence — it means the member did not answer ONE
+	// dial from THIS leader, bounded by controlReadTimeout, so a member that is
+	// alive but partitioned from the leader at that instant reads false and a
+	// consumer treating absence as death will treat it as gone.
+	//
+	// THAT IS NOT A REGRESSION AND IT IS NOT THIS FIELD'S EXPOSURE. A consumer
+	// deciding orphanhood from the leader's view already reads a partitioned
+	// member as dead, because the leader's view is the only liveness authority
+	// available to it; this field agrees with that view rather than contradicting
+	// it, and narrows the case where it is wrong rather than widening it. The
+	// field is a ONE-DIAL FACT and is meant to be consumed as one. A second dial
+	// would not settle it either, and no consumer has asked for one.
+	//
+	// IT EXISTS BECAUSE EVICTION AND DEATH ARE NOT THE SAME EVENT. Eviction
+	// keys on absence from the orchestrator's registry, and a resolution of the
+	// right size but the wrong membership can omit a member that is perfectly
+	// alive — the residual evictionPermitted discloses. A consumer that reads an
+	// eviction as "this member is gone" would offer a live member's work beside
+	// its still-running owner, which is a single-writer violation; with this
+	// fact it can treat a reachable member's eviction as a SUSPENSION and wait
+	// for the re-place round to readmit it.
+	//
+	// THE REGISTRY CANNOT SUPPLY THIS FACT, and that is worth stating where the
+	// field is declared. absentMember returns only members whose address the
+	// resolution does NOT list, so the victim is absent from the live set BY
+	// CONSTRUCTION and the live set says the opposite of what a consumer needs.
+	// The value is a direct dial, taken at the moment of removal.
+	EvictedWhileReachable bool
+	// ReadmissionExpectedBy is the instant after which a readmission of this
+	// evicted member is no longer in flight. IT IS STAMPED ON EVERY EVICTION
+	// SIGNAL, reachable or not — a member that did not answer one dial may still
+	// return and re-place itself, so the instant is meaningful for it too, and a
+	// consumer that reads the fact as gone simply has no use for it. It is the
+	// zero value on every other kind.
+	//
+	// IT IS NOT AUTOPILOT'S STABILIZATION WINDOW, and the difference matters to
+	// the consumer rather than to this package. ServerStabilizationTime is how
+	// long autopilot waits before it will call a member healthy; it says nothing
+	// about how long a readmission takes. The quantity a consumer needs, to know
+	// how long an eviction of a REACHABLE member might still be undone, is the
+	// re-place round's own cadence: an evicted member observes its absence on
+	// its next round and re-announces on that same round, so two rounds cover
+	// the one in which it notices and the one in which it acts.
+	//
+	// CARRYING THE DEADLINE RATHER THAN THE DURATION IS DELIBERATE. A consumer
+	// that held the duration would hold a second copy of a cadence this package
+	// owns, and the two would drift; a consumer given an instant holds nothing
+	// and asks no question about which clock started it.
+	ReadmissionExpectedBy time.Time
 }
 
 // signalLog is the retained window and the broadcast channel readers park on.
@@ -301,9 +359,40 @@ func (m *Manager) watchMembership(flow string, pilot *flowPilot) {
 // THESE ARE SOURCED FROM AUTOPILOT'S STATE rather than from a second observer
 // registration, so this package hands raft no additional channel — and they are
 // LEADER-ONLY by construction, because autopilot only runs where a flow is led.
+//
+// SignalPeerUnreachable MEANS "WAS REACHABLE, NOW IS NOT", AND THE FIRST
+// SIGHTING IS WHERE THAT MEANING IS EARNED. Autopilot reports every member
+// unhealthy until it has been stable for ServerStabilizationTime, so a node
+// taking leadership for the first time publishes a first state in which every
+// member is unhealthy — for a group in which nothing is wrong. Publishing on
+// that sighting told a consumer that every live peer was unreachable for the
+// whole stabilization window after each first-time failover, and a consumer
+// reading the signal as liveness would offer every live peer's work as orphaned.
+// MEASURED: a fresh pilot's first all-unhealthy state published three
+// unreachable signals for three live peers.
+//
+// THE ENCODING, per peer, and each clause exists because the one before it is
+// not sufficient:
+//
+//	FIRST SIGHTING PUBLISHES NOTHING, in either direction. There is no prior
+//	state for a transition to be a transition FROM.
+//	HEALTHY THEN UNHEALTHY publishes SignalPeerUnreachable at once. This is the
+//	case the signal is named for and it is not delayed.
+//	STILL UNHEALTHY SINCE A FIRST SIGHTING publishes SignalPeerUnreachable once
+//	the stabilization window has passed since that sighting. WITHOUT THIS CLAUSE
+//	A GENUINELY DEAD PEER AT A FRESH LEADER'S START WOULD NEVER BE REPORTED AT
+//	ALL, because it never becomes healthy and so never makes the transition
+//	above. The cost is a bounded and named latency rather than a lost report:
+//	at most one stabilization window, which is the same window autopilot needs
+//	before it would call that peer healthy anyway.
+//	UNHEALTHY THEN HEALTHY publishes SignalPeerReturned only when an unreachable
+//	was actually published for the episode it closes, so a returned signal
+//	always has an opening and a consumer never has to reconcile a return it
+//	never saw a departure for.
 func (f *flowPilot) noteHealth(state *autopilotState) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	now := time.Now()
 	for id, healthy := range state.health {
 		// THE LOCAL NODE IS EXCLUDED UNCONDITIONALLY. Autopilot's published state
 		// carries every member including this one, and it reports every member
@@ -327,20 +416,40 @@ func (f *flowPilot) noteHealth(state *autopilotState) {
 		if string(id) == f.mgr.cfg.Node {
 			continue
 		}
-		was, seen := f.healthy[id]
-		if seen && was == healthy {
-			continue
-		}
-		f.healthy[id] = healthy
-		if !seen && healthy {
-			continue
-		}
-		kind := SignalPeerReturned
-		if !healthy {
-			kind = SignalPeerUnreachable
-		}
-		f.mgr.signals.publish(Signal{Kind: kind, Flow: f.flow, Node: string(id), Since: time.Now()})
+		f.notePeerHealth(id, healthy, now)
 	}
+}
+
+// notePeerHealth settles ONE peer's health against what this pilot last saw.
+func (f *flowPilot) notePeerHealth(id raft.ServerID, healthy bool, now time.Time) {
+	was, seen := f.healthy[id]
+	if !seen {
+		f.healthy[id] = healthy
+		f.firstSeen[id] = now
+		return
+	}
+	f.healthy[id] = healthy
+	switch {
+	case !healthy && !f.announced[id] && (was || now.Sub(f.firstSeen[id]) >= f.stabilization()):
+		f.announced[id] = true
+		f.publishPeer(SignalPeerUnreachable, id)
+	case healthy && f.announced[id]:
+		f.announced[id] = false
+		f.publishPeer(SignalPeerReturned, id)
+	}
+}
+
+// stabilization is the window a peer first seen unhealthy is given before it is
+// reported unreachable. It is READ FROM THE SAME EXPRESSION AutopilotConfig uses
+// so the suppression window and autopilot's own stabilization period cannot
+// drift apart.
+func (f *flowPilot) stabilization() time.Duration {
+	return orDuration(f.mgr.cfg.Autopilot.ServerStabilizationTime, defaultServerStabilizationTime)
+}
+
+// publishPeer records one peer-kind signal.
+func (f *flowPilot) publishPeer(kind SignalKind, id raft.ServerID) {
+	f.mgr.signals.publish(Signal{Kind: kind, Flow: f.flow, Node: string(id), Since: time.Now()})
 }
 
 // autopilotState is the slice of autopilot's published state this package reads.

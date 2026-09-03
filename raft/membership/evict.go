@@ -77,15 +77,44 @@ func (m *Manager) evictOne(flow string, r *raft.Raft, live []string) {
 	if !m.evictionPermitted(flow, servers, live, victim) {
 		return
 	}
+	// THE REACHABILITY FACT IS TAKEN HERE, after the bounds and before the
+	// removal, so it describes the member at the moment it was evicted and is
+	// paid only on the path that actually evicts.
+	reachable := m.reachableNow(flow, string(victim.Address))
 	if err := r.RemoveServer(victim.ID, 0, 0).Error(); err != nil {
 		m.logger.Warn("an eviction failed", "flow", flow, "node", string(victim.ID), "error", err)
 		return
 	}
 	m.logger.Warn("evicted a member absent from the registry",
-		"flow", flow, "node", string(victim.ID), "address", string(victim.Address), "live", len(live))
+		"flow", flow, "node", string(victim.ID), "address", string(victim.Address),
+		"live", len(live), "reachable", reachable)
 	m.signals.publish(Signal{
 		Kind: SignalPeerEvicted, Flow: flow, Node: string(victim.ID), Since: time.Now(),
+		EvictedWhileReachable: reachable,
+		ReadmissionExpectedBy: time.Now().Add(2 * m.refreshInterval()),
 	})
+}
+
+// reachableNow reports whether a member ANSWERS A CONTROL DIAL right now.
+//
+// IT IS A DIAL AND NOT A READ OF THE REGISTRY, and it has to be. The victim of
+// an eviction is by construction absent from the resolution — absentMember
+// returns nothing else — so every instrument keyed on that resolution says the
+// member is gone, including the peer set and the stats view derived from it.
+// The one thing that can distinguish a member the orchestrator has retired from
+// a member a right-size wrong-membership resolution merely failed to mention is
+// asking the member itself.
+//
+// THE COST IS ONE DIAL PER EVICTION, NOT PER ROUND. It runs after all four
+// bounds have passed and immediately before the removal, so it is paid only on
+// the path that is about to change the configuration — at most once per round,
+// and in the steady state never. A probe taken before the bounds would be paid
+// on every round that finds an absent member and then declines to remove it,
+// which is the common case under a rolling update. It is bounded by
+// controlReadTimeout like every other control exchange.
+func (m *Manager) reachableNow(flow, addr string) bool {
+	_, err := m.peers.call(addr, statsRequest{Flows: []string{flow}})
+	return err == nil
 }
 
 // evictionPermitted applies the bounds that do not depend on which member would
@@ -126,8 +155,21 @@ func (m *Manager) evictionPermitted(flow string, servers []raft.Server, live []s
 	// under a right-size wrong-membership resolution, where the unconditional
 	// subtraction happened to refuse it. The trade is deliberate and bounded — no
 	// vote is lost, the configuration never falls below the live count or below
-	// quorum, and the joiner re-announces on its next probe — and it replaces a
-	// strictly worse state, stale nonvoters accumulating without bound.
+	// quorum, and the joiner re-announces on the next re-place round, which runs
+	// on every node on this same ticker and fires exactly when a node is absent
+	// from its flow's committed configuration — and it replaces a strictly worse
+	// state, stale nonvoters accumulating without bound.
+	//
+	// THAT LAST CLAUSE WAS FALSE WHEN IT WAS FIRST WRITTEN, and it is recorded
+	// here rather than quietly corrected. The sentence read "the joiner
+	// re-announces on its next probe", and there was no next probe: the announce
+	// path had exactly two one-shot callers, Start and joinFlow, and nothing
+	// periodic ever called it again, so an evicted member stayed out until its
+	// process restarted and the recovery this trade is justified by could not
+	// occur at all. The re-place round exists to make the sentence true rather
+	// than to make it read better. A reader of this file should be able to see
+	// that a disclosed trade was once justified by a mechanism that did not
+	// exist, because that is the failure this file is most likely to repeat.
 	cost := 0
 	if victim.Suffrage == raft.Voter {
 		cost = 1
