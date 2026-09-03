@@ -11,6 +11,8 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/hashicorp/raft"
 
@@ -32,12 +34,40 @@ type Membership interface {
 	Membership(flow string) (raft.Configuration, uint64, bool)
 }
 
+// leadershipPollInterval is how often a parked detector re-reads whether this node
+// leads its flow. IT IS THE CADENCE THE MEMBERSHIP SUPERVISOR ALREADY USES —
+// raft/membership/manager.go names the same number for the same read — and a poll
+// rather than a channel because raft's NotifyCh is owned by the ledger's drain,
+// which must never park, and LeaderCh drops notifications a parked reader misses.
+const leadershipPollInterval = 50 * time.Millisecond
+
 // Detector turns a flow's membership into the datums whose worker is gone.
 type Detector struct {
 	ledger  *ledger.Ledger
 	manager Membership
 	flow    string
-	cursor  uint64
+
+	// mu guards cursor, unreachable and suspended. ONE DETECTOR SERVES EVERY
+	// CHECKPOINTED WORKER on a node, because a machine has one journal, and the
+	// root starts a resume loop PER WORKER — so a flow with two checkpointed nodes
+	// has two concurrent Orphans calls walking all three fields.
+	mu     sync.Mutex
+	cursor uint64
+	// unreachable is the leader's health view, accumulated from the peer-health
+	// signals await already receives. THE CONTRACT IT DEPENDS ON, named here so
+	// two plans cannot drift apart on it: SignalPeerUnreachable is published
+	// STABILIZED-THEN-LOST — a first sighting publishes nothing in either
+	// direction, and a peer unhealthy since its first sighting is reported once
+	// the stabilization window has passed — and SignalPeerReturned closes only an
+	// episode that was actually opened. Without that contract a first-time leader
+	// would open by naming every peer unreachable and this set would read every
+	// live peer as dead.
+	unreachable map[string]struct{}
+	// suspended holds owners EVICTED WHILE REACHABLE, against the instant their
+	// suspension expires. A live member's eviction is not a death: lane D's
+	// re-place round readmits it a round later, and until then offering its datums
+	// would put a second writer beside a running one.
+	suspended map[string]time.Time
 }
 
 // New builds a detector over one flow's ledger.
@@ -49,7 +79,11 @@ type Detector struct {
 // upstream at the membership open sites; this shape is what keeps recovery correct
 // even for a ledger opened directly, outside the manager, where that guard never runs.
 func New(l *ledger.Ledger, manager Membership, flow string) *Detector {
-	return &Detector{ledger: l, manager: manager, flow: flow}
+	return &Detector{
+		ledger: l, manager: manager, flow: flow,
+		unreachable: map[string]struct{}{},
+		suspended:   map[string]time.Time{},
+	}
 }
 
 // LocalID reports the identity this detector compares an orphan's owner against.
@@ -193,11 +227,22 @@ func (d *Detector) Orphans(ctx context.Context, flow string) ([]machine.Checkpoi
 
 		configuration, _, ok := d.manager.Membership(d.flow)
 		if !ok {
-			return nil, fmt.Errorf("recovery: flow %q has no committed membership to read: %w",
-				flow, ledger.ErrNotLeader)
+			return nil, fmt.Errorf(
+				"recovery: flow %q has no committed membership to read: %w, %w",
+				flow, ledger.ErrNotLeader, machine.ErrNotLeader)
 		}
 
-		orphans, err := d.scan(ctx, flow, live(configuration))
+		// SIGNALS ARE FOLDED BEFORE THE SCAN, never after. The configuration read
+		// above is always current, while a signal sits unread until this detector
+		// asks for it — so a round that scanned first would judge an absence it had
+		// not yet been told the reason for. That is not a narrow race: a node that
+		// has just won leadership starts with a zero cursor and scans before it has
+		// consumed anything, which is exactly the failover path this lane exists for.
+		if err := d.drain(ctx); err != nil {
+			return nil, err
+		}
+
+		orphans, err := d.scan(ctx, flow, d.live(configuration))
 		if err != nil {
 			return nil, err
 		}
@@ -288,6 +333,48 @@ func (d *Detector) claimWithholds(
 	return false, d.retireStrandedClaim(ctx, flow, datum)
 }
 
+// drain folds every signal already retained past the cursor WITHOUT parking.
+//
+// IT NEEDS NO SECOND METHOD ON THE MEMBERSHIP SEAM, and that is worth stating because
+// the obvious reading is that a non-blocking read is missing from it. Watch selects on
+// its context ONLY when it has nothing to give, so handed an already-expired one it
+// returns any retained batch immediately and otherwise reports the context at once.
+// An expired context is therefore "tell me what you have", and the cancellation it
+// reports back is this method's own rather than a failure.
+func (d *Detector) drain(ctx context.Context) error {
+	// THE CALLER'S CONTEXT IS CHECKED FIRST so the cancellation below is
+	// unambiguously ours: with a live caller context, a Canceled from Watch can only
+	// have come from the cancel on the next line.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	d.mu.Lock()
+	since := d.cursor
+	d.mu.Unlock()
+
+	expired, cancel := context.WithCancel(ctx)
+	cancel()
+
+	signals, cursor, err := d.manager.Watch(expired, since)
+	switch {
+	case err == nil:
+		d.noteHealth(signals)
+		d.setCursor(cursor)
+
+		return nil
+	case errors.Is(err, membership.ErrCursorTooOld):
+		d.resetView()
+
+		return nil
+	case errors.Is(err, context.Canceled):
+		// Nothing retained past the cursor. Not a failure.
+		return nil
+	}
+
+	return fmt.Errorf("recovery: draining membership signals for flow %q: %w", d.flow, err)
+}
+
 // await parks until the flow's membership moves.
 //
 // A REFUSED CURSOR IS NOT AN ERROR TO RETRY. The signal log refuses a cursor that
@@ -297,14 +384,22 @@ func (d *Detector) claimWithholds(
 // Under ephemeral identity a reconnect to a different incarnation is the designed
 // steady state, not an exception.
 func (d *Detector) await(ctx context.Context) error {
-	_, cursor, err := d.manager.Watch(ctx, d.cursor)
+	// THE LOCK IS NOT HELD ACROSS Watch. Watch parks until the membership moves, so
+	// a detector holding the lock across it would block every other worker's round
+	// behind one park rather than merely serializing a field read.
+	d.mu.Lock()
+	since := d.cursor
+	d.mu.Unlock()
+
+	signals, cursor, err := d.manager.Watch(ctx, since)
 	if err == nil {
-		d.cursor = cursor
+		d.noteHealth(signals)
+		d.setCursor(cursor)
 
 		return nil
 	}
 	if errors.Is(err, membership.ErrCursorTooOld) {
-		d.cursor = 0
+		d.resetView()
 
 		return nil
 	}
@@ -312,11 +407,148 @@ func (d *Detector) await(ctx context.Context) error {
 	return fmt.Errorf("recovery: reading membership signals for flow %q: %w", d.flow, err)
 }
 
-// live reports the server ids in a committed configuration.
-func live(configuration raft.Configuration) map[string]struct{} {
-	out := make(map[string]struct{}, len(configuration.Servers))
+// setCursor records the position the next round reads from.
+func (d *Detector) setCursor(cursor uint64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.cursor = cursor
+}
+
+// noteHealth folds one batch of membership signals into the leader's health view.
+//
+// THIS IS THE BATCH await USED TO DISCARD. The leader publishes a peer's health
+// transitions where it leads, and recovery is leader-only, so the fact and the
+// consumer are on the same node.
+//
+// ONLY THE TWO HEALTH KINDS CARRY HEALTH. SignalMembershipChanged names the
+// PUBLISHING node rather than a peer, by design, so reading its Node as a peer
+// would have the leader mark ITSELF unreachable. SignalPeerEvicted is deliberately
+// NOT terminal for an owner: an evicted member leaves the committed configuration
+// and the configuration arm decides it from there, and a member evicted while LIVE
+// re-announces and is readmitted, at which point it must read alive again.
+func (d *Detector) noteHealth(signals []membership.Signal) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	for _, signal := range signals {
+		if signal.Flow != d.flow {
+			continue
+		}
+		switch signal.Kind {
+		case membership.SignalPeerUnreachable:
+			d.unreachable[signal.Node] = struct{}{}
+		case membership.SignalPeerReturned:
+			delete(d.unreachable, signal.Node)
+		case membership.SignalPeerEvicted:
+			// AN EVICTION OF A REACHABLE MEMBER IS A SUSPENSION, NOT A DEATH. An
+			// eviction of an UNREACHABLE one is already decided by the health arm
+			// and needs nothing here, and a graceful SetFlows departure emits no
+			// signal at all, so both stay immediately gone — which is the failure
+			// the absence arm exists to prevent.
+			//
+			// THE DEADLINE ARRIVES ON THE SIGNAL, never computed from a window this
+			// package holds. Duplicating a duration across packages is the defect
+			// the debounce alternative was rejected for, and this quantity is not
+			// the stabilization time anyway: it is when a readmission stops being
+			// in flight, which the re-place round's cadence governs.
+			//
+			// A ZERO DEADLINE IS ALREADY PAST, so an eviction that carries none
+			// suspends nothing and the absence arm decides it — the safe direction.
+			if signal.EvictedWhileReachable {
+				d.suspended[signal.Node] = signal.ReadmissionExpectedBy
+			}
+		case membership.SignalMembershipChanged:
+		}
+	}
+}
+
+// resetView drops what a refused cursor invalidates.
+//
+// THE HEALTH VIEW GOES WITH THE CURSOR. A refused cursor means signals were
+// dropped between this reader and the log, so an accumulated view built from a
+// prefix of the stream is not trustworthy — and the honest response is to rebuild
+// it from the stream the next Watch returns. Losing it errs toward NOT offering a
+// datum, which is the safe direction: a datum offered late is recovered late, a
+// datum offered wrongly is executed twice.
+func (d *Detector) resetView() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.cursor = 0
+	d.unreachable = map[string]struct{}{}
+	d.suspended = map[string]time.Time{}
+}
+
+// AwaitLeadership parks until this node leads the flow.
+//
+// IT IS THE OTHER HALF OF THE LOUD REFUSAL. Orphans still refuses on a non-leader
+// rather than reporting an empty set, and this is what the caller does with that
+// refusal: a node that does not lead has nothing to detect until it does, so the
+// resume loop waits here instead of exiting for the flow's lifetime.
+func (d *Detector) AwaitLeadership(ctx context.Context, flow string) error {
+	ticker := time.NewTicker(leadershipPollInterval)
+	defer ticker.Stop()
+
+	for {
+		if d.requireLeader() == nil {
+			return nil
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return fmt.Errorf("recovery: awaiting leadership of flow %q: %w", flow, ctx.Err())
+		}
+	}
+}
+
+// live reports the members a detection round treats as alive: the committed
+// configuration MINUS the members the leader's health view marks unreachable.
+//
+// AN OWNER IS DEAD ON EITHER ARM. Absent from the configuration, it is gone and
+// its checkpoints are orphans, which is what this package has always done. Present
+// in the configuration and marked unreachable, it is dead too — and that arm is
+// what makes recovery independent of eviction, which knows nothing about datums
+// and refuses under a bound that has no timeout.
+//
+// THE HEALTH SET IS PRUNED TO THE CONFIGURATION HERE, and that one line carries
+// two obligations at once. It BOUNDS the set at the size of the configuration,
+// where an unpruned one would accumulate an entry per departed node forever under
+// ephemeral identity. And it is what makes an eviction NON-TERMINAL: a member
+// evicted while live is pruned out while it is absent, so when it re-announces and
+// is readmitted it reads alive again rather than staying dead on a stale entry.
+func (d *Detector) live(configuration raft.Configuration) map[string]struct{} {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	configured := make(map[string]struct{}, len(configuration.Servers))
 	for _, server := range configuration.Servers {
-		out[string(server.ID)] = struct{}{}
+		configured[string(server.ID)] = struct{}{}
+	}
+	for id := range d.unreachable {
+		if _, ok := configured[id]; !ok {
+			delete(d.unreachable, id)
+		}
+	}
+
+	out := make(map[string]struct{}, len(configured))
+	for id := range configured {
+		if _, down := d.unreachable[id]; down {
+			continue
+		}
+		out[id] = struct{}{}
+	}
+
+	// A SUSPENDED OWNER READS ALIVE WHILE IT IS ABSENT, and leaves the set on
+	// exactly two events: READMISSION, which is lane D's re-place round returning
+	// it under the same id, and EXPIRY, after which no readmission is coming and
+	// the absence arm decides it. Both clears also bound the map.
+	now := time.Now()
+	for id, until := range d.suspended {
+		if _, readmitted := configured[id]; readmitted || !now.Before(until) {
+			delete(d.suspended, id)
+
+			continue
+		}
+		out[id] = struct{}{}
 	}
 
 	return out
@@ -328,9 +560,12 @@ func (d *Detector) requireLeader() error {
 		return nil
 	}
 
+	// IT WRAPS BOTH SENTINELS, and that is the seam rather than belt-and-braces.
+	// The ledger's is what this module's own callers key on; the root module's is
+	// the only one the machine can name, because it may not import this package.
 	return fmt.Errorf(
-		"recovery: detection on flow %q runs on the leader, and this node does not lead it: %w",
-		d.flow, ledger.ErrNotLeader)
+		"recovery: detection on flow %q runs on the leader, and this node does not lead it: %w, %w",
+		d.flow, ledger.ErrNotLeader, machine.ErrNotLeader)
 }
 
 // datumOf strips the checkpoint prefix from a journaled path.

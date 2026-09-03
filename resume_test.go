@@ -556,3 +556,9 @@ func (j *failingRetireJournal) Orphans(ctx context.Context, _ string) ([]Checkpo
 
 	return nil, ctx.Err()
 }
+
+// AwaitLeadership returns at once: this fake never withholds leadership.
+func (j *resumeJournal) AwaitLeadership(context.Context, string) error { return nil }
+
+// AwaitLeadership returns at once: this fake never withholds leadership.
+func (j *failingRetireJournal) AwaitLeadership(context.Context, string) error { return nil }

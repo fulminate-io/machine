@@ -7,6 +7,7 @@ package machine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -227,16 +228,48 @@ func resume[I, O any](ctx context.Context, w *worker[I], out *emitter[O]) {
 	for {
 		records, err := w.machine.cfg.journal.Orphans(ctx, w.machine.name)
 		if err != nil {
-			if ctx.Err() == nil {
-				w.report(ctx, fmt.Errorf("machine: reading orphans for node %q: %w", w.name, err))
+			if !resumeWaits(ctx, w, err) {
+				return
 			}
 
-			return
+			continue
 		}
 		for _, record := range records {
 			reclaim(ctx, w, out, record)
 		}
 	}
+}
+
+// resumeWaits reports whether the resume loop should go round again after Orphans
+// failed, and reports the failure when it should not.
+//
+// A LEADERSHIP REFUSAL IS A WAIT AND EVERY OTHER FAILURE IS AN EXIT. Detection is
+// leader-only by design, so a node that does not lead the flow has nothing to do
+// until it does — and a loop that exited on that refusal would leave recovery running
+// only on whichever node happened to lead when the flow was wired. A journal that
+// cannot be read is the opposite: a fault the loop cannot fix by going round again,
+// so retrying it would be a lane that fires forever on one cause.
+//
+// IT IS A FUNCTION RATHER THAN A BRANCH IN resume because resume measures past the
+// module's cognitive-complexity limit with it inlined, and the inner error would
+// shadow the outer one; the decision it makes is resume's own.
+func resumeWaits[I any](ctx context.Context, w *worker[I], cause error) bool {
+	if !errors.Is(cause, ErrNotLeader) {
+		if ctx.Err() == nil {
+			w.report(ctx, fmt.Errorf("machine: reading orphans for node %q: %w", w.name, cause))
+		}
+
+		return false
+	}
+	if err := w.machine.cfg.journal.AwaitLeadership(ctx, w.machine.name); err != nil {
+		if ctx.Err() == nil {
+			w.report(ctx, fmt.Errorf("machine: awaiting leadership for node %q: %w", w.name, err))
+		}
+
+		return false
+	}
+
+	return true
 }
 
 // reclaim claims one orphaned record and re-places it if this worker won.

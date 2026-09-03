@@ -487,3 +487,6 @@ func (j *recordingJournal) replay() {
 
 	close(ready)
 }
+
+// AwaitLeadership returns at once: this recorder never withholds leadership.
+func (j *recordingJournal) AwaitLeadership(context.Context, string) error { return nil }
