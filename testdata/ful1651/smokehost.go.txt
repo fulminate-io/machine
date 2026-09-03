@@ -1,4 +1,4 @@
-// Command smokehost is the FUL-1651 phase-2 smoke harness. It maps the three
+// Command smokehost is the phase-2 smoke harness. It maps the three
 // documented cluster env vars onto the landed raft packages and runs the flow
 // group, so the smoke observes the real discovery, bootstrap, eviction and
 // recovery code paths rather than a reimplementation of them.

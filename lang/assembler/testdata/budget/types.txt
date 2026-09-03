@@ -1,8 +1,13 @@
-# The per-node input type spellings the DRIVER supplies from cross-module type
-# inference. The generator derives none of them: Machine.Source cannot infer its
-# payload type, an idempotent marker needs an explicit type argument, and a
-# completion-anchored checkpoint's codec is re-instantiated at its successor's
-# type.
+# The per-node input type spellings a DRIVER would supply from type inference.
+# The generator derives none of them, so this table stands in for that step and
+# the emitter instantiates what it names. One line per node in budget.flow.
+#
+# THIS FILE IS AN INPUT TO A PINNED PERFORMANCE MEASUREMENT, not documentation
+# beside a golden. It and budget.flow are the whole of what TestGenerationBudget
+# reads, both are covered by one digest over this directory, and a spelling
+# lengthened here moves the generated output and therefore the timing. It moves
+# only when the fixture does, and moving either means re-pinning the digest and
+# recording a new baseline beside the old one.
 ingest=Order
 charge=Order
 done=Receipt
