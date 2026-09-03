@@ -1,13 +1,13 @@
 func Bill(f machine.Frame[Order]) Receipt {
-  count, _, err := f.Load(seen)
+  // ONE UPDATE, NOT A LOAD THEN A SAVE, for the reason the e2e fixture states:
+  // the runtime dispatches every datum concurrently, so a read-modify-write
+  // split across two calls loses increments. Update returns the NEW value.
+  count, err := f.Update(seen, func(n int) int { return n + 1 })
   if err != nil {
     panic(err)
   }
-  if err := f.Save(seen, count+1); err != nil {
-    panic(err)
-  }
   f.Set(attempt, f.Get(attempt)+1)
-  return Receipt{ID: strings.ToUpper(f.Value().ID), Seen: count + 1}
+  return Receipt{ID: strings.ToUpper(f.Value().ID), Seen: count}
 }
 
 flow orders

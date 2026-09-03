@@ -1,15 +1,17 @@
 func Count(f machine.Frame[Order]) Order {
-  seen, _, err := f.Load(processed)
+  // ONE UPDATE, NOT A LOAD THEN A SAVE. The runtime dispatches every datum
+  // concurrently by default, so a read-modify-write split across two calls
+  // interleaves and loses an increment; Update performs it through the store,
+  // which NewMemStore holds its lock across. It returns the NEW value, which is
+  // what the sink's token counts.
+  seen, err := f.Update(processed, func(n int) int { return n + 1 })
   if err != nil {
-    panic(err)
-  }
-  if err := f.Save(processed, seen+1); err != nil {
     panic(err)
   }
   f.Set(attempt, f.Get(attempt)+1)
 
   out := f.Value()
-  out.Seen = seen + 1
+  out.Seen = seen
   return out
 }
 
