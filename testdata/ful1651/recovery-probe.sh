@@ -1,5 +1,5 @@
 #!/bin/bash
-# The FUL-1651 step 4.4 recovery recorder: carry-in (e), a checkpointed flow
+# The step 4.4 recovery recorder: carry-in (e), a checkpointed flow
 # surviving a REAL POD DELETION.
 #
 # WHY THIS IS A SCRIPT AND NOT CRITERION BYTES. The sequence has to release a

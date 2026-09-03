@@ -512,6 +512,14 @@ jobs:
       # so this workflow does not match itself. That is what lets the job stay
       # INSIDE its own scan instead of being exempted from it.
       #
+      # THE EXTENSION LIST IS THE OTHER HALF OF THE GATE, and it is the half that
+      # fails silently. A pattern that matches nothing reports a clean scan in
+      # exactly the words a genuinely clean tree does, so an extension missing
+      # here is invisible from the job's output. Shell scripts were missing, and a
+      # tracker id sat in a shipped .sh through a leak fix that reported success.
+      # ANY new shipped text type belongs on this line: prose in a shell script is
+      # as public as prose in a .go file.
+      #
       # THE 32-HEX CLAUSE IS BOUNDED ON BOTH SIDES, and that is a precision fix
       # rather than a weakening. A node id is EXACTLY 32 hex characters, so an
       # unbounded {32} also matched any longer hex run containing one — a sha256
@@ -535,7 +543,7 @@ jobs:
       - name: Leak scan
         run: |
           set -u
-          files=$(git ls-files '*.go' '*.md' '*.yml' '*.yaml' '*.ebnf' '*.txt' '*.flow')
+          files=$(git ls-files '*.go' '*.md' '*.yml' '*.yaml' '*.ebnf' '*.txt' '*.flow' '*.sh')
           test -n "$files" || { echo "no tracked file matched, so this scan checked nothing"; exit 1; }
           pattern="FUL-[0-9]+|(^|[^0-9a-fA-F])[0-9a-f]{32}([^0-9a-fA-F]|$)|fulminat[e]|linear[.]app"
           hits=$(echo "$files" | tr '\n' '\0' | xargs -0 grep -nEI "$pattern" | grep -v 'app[.]codacy[.]com/project/badge' | grep -v 'TraceIDFromHex' || true)
