@@ -45,7 +45,6 @@ const budgetIterations = 100
 // raises every other reading, so nothing real can hide behind it. Judging a
 // single batch instead would make this gate fail on unrelated machine load, which
 // is a flaky gate rather than a strict one.
-
 const budgetReadings = 5
 
 // TestGenerationBudget measures the full parse, graph, lower and emit path over
@@ -68,33 +67,43 @@ const budgetReadings = 5
 // moving the number. Changing it is then a deliberate act with a new baseline,
 // which is the only honest way to move a performance measurement's input.
 //
-// THE NEW INPUT COSTS MORE THAN THE OLD ONE, and that is a trade rather than a
-// regression. It carries seven statements where the golden it replaced carried
-// three, so it generates 6424 bytes of Go against 4709 — and format.Source over
-// the GENERATED file is ~92% of this path, so cost tracks that number rather
-// than the source size. Measured by ALTERNATING the two inputs on one host in
-// one window, which is what cancels load drift: the old input read 292, 418, 513
-// and 389µs while this one read 455, 556, 481 and 487µs. Roughly 20% dearer,
-// bought with four more statements' worth of coverage.
+// THE FIXTURE IS THE HISTORICAL INPUT, MINUS ITS DEFECTS AND ITS PROSE. It is
+// testdata/golden/pipeline/pipeline.flow as that file stood before this branch,
+// carrying the two corrections this branch made to it — the counter reads and
+// writes its heap cell in one Frame.Update, and the transform declares both
+// handles in both capability clauses — and none of the explanatory comment or
+// note text. So the COST baseline carries across unchanged while the fixture
+// still teaches the right shapes, and the only thing that changed about the
+// measurement is that its input can no longer drift.
 //
-// THAT SAME MEASUREMENT SHOWS THE GATE ALREADY FLAPPED, independently of any of
-// this: the OLD input failed its own tripwire at 513µs in round three. On a host
-// under a load average near 300 the best-of-five statistic is not stable to
-// within the margin either input has. Nine readings were tried and did not help,
-// so the sampling was left at five rather than shipping a lever that measured
-// nothing. This is reported, not compensated for, and the budget is untouched.
+// A RICHER FIXTURE WAS WRITTEN FIRST AND MEASURED, then discarded. Seven
+// statements instead of three, 885 source bytes generating 6424 bytes of Go
+// against this one's 816 generating 5874, and format.Source over the GENERATED
+// file is ~92% of this path, so cost tracks that number rather than the source
+// size. It came out about 20% dearer, and on a host under a load average near
+// 300 that was the difference between a suite that passed three runs of three
+// and one that failed two of three. Construct coverage belongs to the golden and
+// e2e sets, which RUN those constructs; this fixture owes exactly one thing,
+// which is to hold still.
 //
-// THE FIXTURE IS STILL A REAL, GENERATED ONE rather than a canonical strawman: a
-// strawman is refused before emission, so a budget over one would be measuring a
-// refusal. It carries the constructs a generator actually meets — import, const,
-// param, state, var, flow- and node-level error handlers, an `over` transport
-// clause, verbatim funcs, source, transform, branch, a three-arm switch, two
-// sinks and a drop.
+// KEEPING THE FIXTURE CORRECT IS NOT OPTIONAL EITHER, and that was caught rather
+// than reasoned: a first attempt froze the pre-branch bytes verbatim, which
+// reintroduced the very lost-update shape this branch removed, and the corpus
+// scanner in fixture_heap_shape_test.go failed three suite runs out of three
+// naming it. A fixture nothing executes is still a fixture someone reads.
 //
-// IT CARRIES NO TEE, and that is a harness limit rather than a choice: a tee
-// needs a duplicator derived from its payload's STRUCTURE, and this harness
-// supplies type spellings rather than structure, so a fixture with one is
-// refused at emission. The e2e fixtures exercise the tee by running.
+// IT IS A REAL, GENERATED FIXTURE rather than a canonical strawman: a strawman is
+// refused before emission, so a budget over one would be measuring a refusal. It
+// carries an import, a const, a param, state, a var, flow- and node-level error
+// handlers, an `over` transport clause, verbatim funcs, a source, a transform
+// declaring reads and writes, and a sink.
+//
+// THIS GATE FLAPS ON A LOADED HOST AND THAT IS NOT NEW. Five isolated runs of the
+// unchanged pre-branch input at load ~280 read 389.9, 379.0, 343.2, 361.8 and
+// 781.1µs — four passes and one failure, on an input nothing here touched.
+// Raising the reading count from five to nine was tried against that noise and
+// measured no benefit, so the sampling was left alone rather than shipping a
+// lever that did nothing. The budget itself is untouched.
 //
 // A CACHED PASS RE-MEASURES NOTHING. Go's test cache will report this green
 // without running it whenever its inputs are unchanged, which is correct and
@@ -147,12 +156,14 @@ func TestGenerationBudget(t *testing.T) {
 //	graph + lower     5.8µs
 //	format.Source   211µs      839 source bytes -> 4709 generated bytes
 //
-// THOSE THREE TIMINGS WERE TAKEN ON THE OLD INPUT, the 839-byte golden this
-// measurement used before it got a fixture of its own, and they are left as
-// written rather than re-quoted against the new one: a breakdown nobody re-ran
-// should not be dressed up in fresh numbers. The RATIO is the durable claim.
-// What this test re-measures every run is the byte expansion the ratio rests on,
-// and it logs it: the pinned fixture generates several times its own size in Go.
+// THOSE FOUR FIGURES ARE A SNAPSHOT OF AN OLDER GENERATOR and are left as
+// written rather than re-quoted: a breakdown nobody re-ran should not be dressed
+// up in fresh numbers. The source is very nearly the same file this test still
+// measures, but the emitter has grown since — it now emits an ingest struct, an
+// error return on Wire and the capability helpers — so the pinned 816 bytes
+// generate 5874 today rather than 4709. The RATIO is the durable claim, not the
+// absolute timings. What this test re-measures every run is the byte expansion
+// the ratio rests on, and it logs it.
 //
 // So the headroom is one order of magnitude rather than two, and it belongs to
 // the standard library's formatter rather than to anything this package does.
@@ -183,7 +194,7 @@ const budgetDir = "testdata/budget"
 //
 // TO CHANGE IT: edit the fixture, run this test, paste the "got" hash here, and
 // record the new baseline mean beside the old one wherever the old one is cited.
-const budgetFixtureSHA256 = "b0cca3d4dc8e028ae809c14f3468704feb62655cf0369db7ae46fb0e68664856"
+const budgetFixtureSHA256 = "abd11554bbbddb11fef454027d44bb6107a009b5e1aee0c7579ad36d4f642610"
 
 // budgetFixtureFloor is the size below which this measurement stops meaning
 // anything: a budget over a two-line fixture measures function call overhead.

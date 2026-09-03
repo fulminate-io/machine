@@ -1,9 +1,8 @@
-# The per-node input type spellings the DRIVER supplies. This fixture exists only
-# to be a STABLE input for the generation budget, so this table moves only when
-# the fixture does — and the fixture's bytes are pinned by the test.
+# The per-node input type spellings the DRIVER supplies from cross-module type
+# inference. The generator derives none of them: Machine.Source cannot infer its
+# payload type, an idempotent marker needs an explicit type argument, and a
+# completion-anchored checkpoint's codec is re-instantiated at its successor's
+# type.
 ingest=Order
-rate=Order
-triage=Order
-route=Order
-emit=Order
-audit=Order
+charge=Order
+done=Receipt
