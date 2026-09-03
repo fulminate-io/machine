@@ -113,7 +113,7 @@ func TestAnUnreachablePeerRaisesALeaderDrivenSignal(t *testing.T) {
 
 	// A member that never answers: staged, present, and silent.
 	ghost := unreachableAddress(t)
-	reply := leader.mgr.answerAnnounce(announce{Node: "b-ghost", Address: ghost, Flows: []string{"alpha"}})
+	reply := leader.mgr.answerAnnounce(announce{Node: "b-ghost", Address: ghost, Flows: []string{"alpha"}, Generation: testGeneration})
 	if len(reply.Staged) != 1 {
 		t.Fatalf("the ghost was not staged: %+v", reply)
 	}

@@ -67,6 +67,12 @@ spec:
               value: "smoke-peers.ful1651-smoke.svc.cluster.local:7946"
             - name: MACHINE_CLUSTER_EXPECT
               value: "3"
+            # The deployment's monotonic epoch. The apply step substitutes a
+            # real value: an acceptor refuses an announce from any other
+            # generation by name, so comparing zero against zero would leave the
+            # mechanism absent on exactly the deployment that rolls.
+            - name: MACHINE_CLUSTER_GENERATION
+              value: "REPLACED_AT_APPLY"
             - name: MACHINE_CLUSTER_SECRET
               valueFrom:
                 secretKeyRef:

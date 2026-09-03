@@ -33,14 +33,52 @@ func (m *Manager) addFlow(flow string, l *ledger.Ledger) {
 // answer per flow and never a single verdict for the request.
 func (m *Manager) answerAnnounce(req announce) announceReply {
 	reply := announceReply{
-		Node:      m.cfg.Node,
-		Redirects: make(map[string]string, len(req.Flows)),
-		Refused:   make(map[string]string, len(req.Flows)),
+		Node:       m.cfg.Node,
+		Generation: m.cfg.Generation,
+		Redirects:  make(map[string]string, len(req.Flows)),
+		Refused:    make(map[string]string, len(req.Flows)),
+	}
+	// THE GENERATION IS CHECKED ONCE, FOR THE WHOLE REQUEST, because it is a
+	// property of the ANNOUNCER rather than of any flow it names. Every named
+	// flow is refused by name for the reason answerOneFlow gives: a silent
+	// omission is indistinguishable from a lost message.
+	if err := admissibleGeneration(m.cfg.Generation, req.Generation); err != nil {
+		for _, flow := range req.Flows {
+			reply.Refused[flow] = err.Error()
+		}
+		return reply
 	}
 	for _, flow := range req.Flows {
 		m.answerOneFlow(flow, req, &reply)
 	}
 	return reply
+}
+
+// admissibleGeneration refuses an announce whose deployment generation is not
+// this node's, in either direction and naming which.
+//
+// EQUAL ADMITS, AND EQUAL IS THE ONLY THING THAT DOES. A cluster that never
+// declares a generation runs every node at zero, which is equal everywhere, so
+// the mechanism is absent rather than universally refusing; Config.validate is
+// what stops a cluster with a Peers address from reaching that state by
+// accident.
+//
+// THE OLDER DIRECTION IS REFUSED TOO, and that is this plan's choice rather than
+// the ruling's. Admitting a member that is being terminated puts a doomed
+// identity into a healthy configuration, which eviction then has to remove at
+// one member per round under bound 3 — and the vote accounting in bound 2 is
+// what made that removal slow in the first place.
+func admissibleGeneration(mine, theirs uint64) error {
+	switch {
+	case theirs == mine:
+		return nil
+	case theirs > mine:
+		return fmt.Errorf("%w: this node is generation %d and the announcer is the newer generation %d",
+			ErrGenerationMismatch, mine, theirs)
+	default:
+		return fmt.Errorf("%w: this node is generation %d and the announcer is the older generation %d",
+			ErrGenerationMismatch, mine, theirs)
+	}
 }
 
 // answerOneFlow settles one flow of an announce.

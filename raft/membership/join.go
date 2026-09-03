@@ -337,6 +337,26 @@ func (m *Manager) announceRound(ctx context.Context, flow string) map[string]ann
 				m.logger.Warn("an announce did not reach a peer", "peer", addr, "flow", flow, "error", err)
 				continue
 			}
+			// A FOREIGN-GENERATION ANSWER IS NOT AN ANSWER. It is dropped here,
+			// once, rather than filtered at each of its three readers: it must
+			// not count toward Config.Expect, because a node that has heard only
+			// from the outgoing deployment has not finished looking; it must not
+			// enter the lowest-id comparison, because the creation decision is
+			// single-writer only among nodes that can form the group; and it
+			// must not be followed as a redirect to a leader that is leaving.
+			//
+			// COUNTING IT TOWARD Expect WHILE EXCLUDING IT FROM lowestID IS THE
+			// SPECIFIC WRONG-BUT-REASONABLE VARIANT: three new pods would each
+			// satisfy Expect from the outgoing deployment alone and each find
+			// itself the lowest id among a set of one, producing three
+			// single-voter groups that can never merge — precisely the
+			// split-brain createIfRuled exists to prevent.
+			if reply.Generation != m.cfg.Generation {
+				m.logger.Warn("an announce reached a peer of another deployment generation",
+					"peer", addr, "flow", flow,
+					"generation", m.cfg.Generation, "peer_generation", reply.Generation)
+				continue
+			}
 			answers[addr] = reply
 			if to, ok := reply.Redirects[flow]; ok && answers[to].Node == "" {
 				next = append(next, to)
@@ -353,9 +373,10 @@ func (m *Manager) announceTo(ctx context.Context, addr, flow string) (announceRe
 		return announceReply{}, err
 	}
 	reply, err := m.peers.call(addr, announce{
-		Node:    m.cfg.Node,
-		Address: m.cfg.Advertise,
-		Flows:   []string{flow},
+		Node:       m.cfg.Node,
+		Address:    m.cfg.Advertise,
+		Flows:      []string{flow},
+		Generation: m.cfg.Generation,
 	})
 	if err != nil {
 		return announceReply{}, err

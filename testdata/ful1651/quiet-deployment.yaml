@@ -51,6 +51,12 @@ spec:
               value: "quiet-peers.ful1651-smoke.svc.cluster.local:7946"
             - name: MACHINE_CLUSTER_EXPECT
               value: "3"
+            # REQUIRED WHENEVER MACHINE_CLUSTER_PEERS IS SET, and refused rather
+            # than defaulted, so this manifest carries a literal. This lane is
+            # never rolled, so the epoch is fixed rather than substituted the way
+            # deployment.yaml's is.
+            - name: MACHINE_CLUSTER_GENERATION
+              value: "1"
             - name: MACHINE_CLUSTER_SECRET
               valueFrom:
                 secretKeyRef:

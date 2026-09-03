@@ -65,7 +65,7 @@ func TestCommitsSurviveAJoinWhoseJoinerIsUnreachable(t *testing.T) {
 	t.Log("baseline write committed before the join")
 
 	ghost := unreachableAddress(t)
-	reply := leader.mgr.answerAnnounce(announce{Node: "b-ghost", Address: ghost, Flows: []string{"alpha"}})
+	reply := leader.mgr.answerAnnounce(announce{Node: "b-ghost", Address: ghost, Flows: []string{"alpha"}, Generation: testGeneration})
 	if len(reply.Staged) != 1 || reply.Staged[0] != "alpha" {
 		t.Fatalf("the unreachable joiner was not staged: staged=%v refused=%v redirects=%v",
 			reply.Staged, reply.Refused, reply.Redirects)

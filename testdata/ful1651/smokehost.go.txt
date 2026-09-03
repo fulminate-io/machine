@@ -155,6 +155,20 @@ func main() {
 		}
 		expect = n
 	}
+	// MACHINE_CLUSTER_GENERATION is the deployment's monotonic epoch, read on
+	// exactly the terms MACHINE_CLUSTER_EXPECT is read: parsed, and refused on a
+	// parse failure rather than defaulted. A generation defaulted to zero is the
+	// state in which every announce from every deployment is admitted, which is
+	// what a rolling update turns into a group of dead voters.
+	generation := uint64(0)
+	if v := os.Getenv("MACHINE_CLUSTER_GENERATION"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "smokehost: MACHINE_CLUSTER_GENERATION:", err)
+			os.Exit(2)
+		}
+		generation = n
+	}
 
 	addr, err := net.ResolveTCPAddr("tcp", advertise)
 	if err != nil {
@@ -174,13 +188,14 @@ func main() {
 	defer mux.Close()
 
 	manager, err := membership.New(membership.Config{
-		Node:      node,
-		Advertise: advertise,
-		Mux:       mux,
-		Logger:    logger.Named("membership"),
-		Flows:     []string{flow},
-		Peers:     peers,
-		Expect:    expect,
+		Node:       node,
+		Advertise:  advertise,
+		Mux:        mux,
+		Logger:     logger.Named("membership"),
+		Flows:      []string{flow},
+		Peers:      peers,
+		Generation: generation,
+		Expect:     expect,
 		Open: func(f string) (*ledger.Ledger, error) {
 			return ledger.Open(ledger.Config{
 				Flow: f, LocalID: ledgerID, Mux: mux, Logger: logger.Named("ledger"),

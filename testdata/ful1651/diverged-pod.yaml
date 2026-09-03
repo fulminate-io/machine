@@ -34,6 +34,12 @@ spec:
           value: "smoke-peers.ful1651-smoke.svc.cluster.local:7946"
         - name: MACHINE_CLUSTER_EXPECT
           value: "3"
+        # REQUIRED WHENEVER MACHINE_CLUSTER_PEERS IS SET, and refused rather than
+        # defaulted. This pod exists to reach ErrIdentityDiverged, which is a
+        # LATER refusal than Config.validate — without this it would exit on the
+        # config refusal instead and prove nothing about identity.
+        - name: MACHINE_CLUSTER_GENERATION
+          value: "1"
         - name: MACHINE_CLUSTER_SECRET
           valueFrom:
             secretKeyRef:

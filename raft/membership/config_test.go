@@ -86,6 +86,7 @@ func TestConfigValidateNamesTheFieldItRefuses(t *testing.T) {
 		{"flows without open", withFlows(base, []string{"alpha"}), "Config.Open", ErrConfigMissing},
 		{"peers without expect", withPeers(base, "peers:1", 0), "Config.Expect", ErrConfigRange},
 		{"peers with expect below one", withPeers(base, "peers:1", -1), "Config.Expect", ErrConfigRange},
+		{"peers without generation", withPeers(base, "peers:1", 3), "Config.Generation", ErrConfigRange},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.cfg.validate()
@@ -101,6 +102,7 @@ func TestConfigValidateNamesTheFieldItRefuses(t *testing.T) {
 	// THE CONTROL: a complete config is accepted, so the refusals above are about
 	// the missing fields rather than about a validate that rejects everything.
 	ok := withPeers(withFlows(base, []string{"alpha"}), "peers:1", 3)
+	ok.Generation = testGeneration
 	ok.Open = func(string) (*ledger.Ledger, error) { return nil, nil }
 	if err := ok.validate(); err != nil {
 		t.Fatalf("CONTROL FAILED: a complete config was refused: %v", err)

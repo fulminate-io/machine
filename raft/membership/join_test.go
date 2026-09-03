@@ -16,6 +16,10 @@ import (
 
 // clusterNode is one worker in a test cluster: its shared listener, its manager,
 // and the address peers reach it at.
+// testGeneration is the one deployment epoch every node in a test shares, so a
+// helper cannot accidentally build two nodes that refuse each other.
+const testGeneration = 7
+
 type clusterNode struct {
 	mgr  *Manager
 	mux  *transport.Mux
@@ -44,6 +48,12 @@ func newClusterNode(t *testing.T, id string, flows []string, expect int) *cluste
 			return ledger.Open(ledger.Config{Flow: flow, LocalID: id, Mux: mux})
 		},
 	}
+	// THE GENERATION IS SET UNCONDITIONALLY, unlike Peers. It is a property of
+	// the deployment rather than of whether this node has a peers address, and a
+	// helper that set it only alongside Peers builds a leader at generation zero
+	// whose followers are at seven — which the acceptor correctly refuses, and
+	// which reads as a join that hangs.
+	cfg.Generation = testGeneration
 	if expect > 0 {
 		cfg.Peers = "peers.invalid:0"
 	}
@@ -466,7 +476,7 @@ func TestARedirectWithNoKnownLeaderIsRefusedByName(t *testing.T) {
 	}
 	node.mgr.addFlow("orphan", l)
 
-	reply := node.mgr.answerAnnounce(announce{Node: "b-joiner", Address: "127.0.0.1:1", Flows: []string{"orphan"}})
+	reply := node.mgr.answerAnnounce(announce{Node: "b-joiner", Address: "127.0.0.1:1", Flows: []string{"orphan"}, Generation: testGeneration})
 	if to, redirected := reply.Redirects["orphan"]; redirected {
 		t.Fatalf("a node that knows no leader redirected to %q: a joiner would be sent nowhere while this "+
 			"read as success", to)

@@ -86,6 +86,34 @@ type announce struct {
 	Node    string
 	Address string
 	Flows   []string
+	// Generation is the announcer's deployment epoch.
+	//
+	// IT IS ON THE WIRE BECAUSE A DYING GROUP MUST NOT ADMIT THE NEXT
+	// DEPLOYMENT'S MEMBER. Measured on a rolling update: a replacement pod
+	// reached a still-leading outgoing pod and was staged into the outgoing
+	// group, which then terminated, leaving three dead voters and one live
+	// nonvoter with no quorum and no path back. An acceptor compares this
+	// against its own and refuses any difference by name.
+	//
+	// VERSION SKEW RUNS IN BOTH DIRECTIONS AND BOTH ARE DISCLOSED, because the
+	// one that matters is the one an operator is not told about. A NEW ANNOUNCER
+	// REACHING AN OLD ACCEPTOR: gob decodes the extra field with no error and the
+	// old binary ignores it, so an acceptor that predates this field has no
+	// refusal path and stages the next generation's joiner exactly as before.
+	// THE PROTECTION IS THEREFORE INERT DURING THE FIRST ROLLOUT THAT INTRODUCES
+	// IT and effective from the next one; that is inherent, since a gate cannot
+	// run in a binary that does not contain it, and what carries that first
+	// rollout is the readmission fix rather than this refusal. AN OLD ANNOUNCER
+	// REACHING A NEW ACCEPTOR: the absent field decodes as zero, which a new
+	// acceptor refuses against any non-zero generation — correct, because an
+	// announcer that predates the field belongs to the outgoing deployment.
+	//
+	// GOB DOES NOT ZERO A FIELD ABSENT FROM THE STREAM — it leaves whatever the
+	// decode target already held, with no error. Nothing is wrong today because
+	// answerJoin decodes into a fresh announce value; a future reader that
+	// REUSED a decode target would silently inherit a stale generation here and
+	// admit a foreign announcer, so the decode target stays fresh.
+	Generation uint64
 }
 
 // announceReply answers an announce.
@@ -101,10 +129,17 @@ type announceReply struct {
 	// flow yet, the node that creates its group is the one holding the lowest id
 	// among those that answered — and an answer that did not say who sent it
 	// could not be compared. Nothing else reads it.
-	Node      string
-	Staged    []string
-	Redirects map[string]string
-	Refused   map[string]string
+	Node string
+	// Generation is the ANSWERING node's deployment epoch.
+	//
+	// THE ANNOUNCER READS IT RATHER THAN PARSING A REFUSAL STRING. Refused is
+	// free text for an operator; a joiner deciding whether an answer counts
+	// toward the count-and-lowest-id rule needs a value it can compare, and a
+	// substring match on a human sentence is not one.
+	Generation uint64
+	Staged     []string
+	Redirects  map[string]string
+	Refused    map[string]string
 }
 
 // statsRequest asks a peer to report its own progress on each flow it names. The

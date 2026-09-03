@@ -59,6 +59,17 @@ var (
 	// signals naming itself, and the placement rule fails later with a message
 	// that points at suffrage rather than at the identity.
 	ErrIdentityDiverged = errors.New("membership: the ledger's raft server id is not this manager's node id")
+	// ErrGenerationMismatch refuses an announce whose deployment generation is
+	// not this node's, NAMING BOTH VALUES AND THE DIRECTION.
+	//
+	// THE DIRECTION IS NAMED BECAUSE THE TWO READ DIFFERENTLY TO AN OPERATOR. An
+	// older node refusing a newer announcer is a group on its way out declining
+	// to admit its successor, which is the case this refusal exists for. A newer
+	// node refusing an older announcer is the live group declining a member that
+	// is being terminated, which is refused for the same reason read backwards:
+	// admitting it puts a doomed identity in the configuration that eviction
+	// then has to remove, at one member per round.
+	ErrGenerationMismatch = errors.New("membership: the announce carries a different deployment generation")
 )
 
 const (
@@ -109,6 +120,21 @@ type Config struct {
 	// the MACHINE_CLUSTER_PEERS value. Unset means the mechanism is absent and a
 	// single-instance run stays zero-config.
 	Peers string
+	// Generation is this deployment's MONOTONIC epoch, carried by
+	// MACHINE_CLUSTER_GENERATION. It is REQUIRED whenever Peers is set, on the
+	// same terms and for the same class of reason as Expect: an announce that
+	// crosses generations is how a dying group admits its successor's member and
+	// loses quorum unrecoverably, and a value defaulted to zero would leave that
+	// protection inert on exactly the deployments that roll.
+	//
+	// THE MODULE DOES NOT DERIVE IT, AND THAT IS DELIBERATE. Nothing in this
+	// package knows what a pod is — the same reason resolvePeers takes one
+	// address rather than a Kubernetes client — so the epoch is supplied by
+	// whoever performs the deployment, as a build number, a deploy timestamp or
+	// any other value that only increases. A single-instance run leaves Peers
+	// unset, and with it this field: the mechanism is absent and the run stays
+	// zero-config.
+	Generation uint64
 	// Expect is how many instances this deployment runs, carried by
 	// MACHINE_CLUSTER_EXPECT. It is REQUIRED whenever Peers is set and refused
 	// when it is below one, so a cluster deployment cannot start in an ambiguous
@@ -143,6 +169,14 @@ func (c Config) validate() error {
 	if c.Peers != "" && c.Expect < 1 {
 		return fmt.Errorf("%w: Config.Expect is %d, and a Peers address requires the instance count",
 			ErrConfigRange, c.Expect)
+	}
+	// A PEERS ADDRESS WITHOUT A GENERATION IS AN ERROR FOR THE REASON ABOVE,
+	// APPLIED TO THE OTHER AMBIGUITY. Defaulting it to zero would admit every
+	// announce from every generation, which is the state a rolling update turns
+	// into a group of dead voters.
+	if c.Peers != "" && c.Generation == 0 {
+		return fmt.Errorf("%w: Config.Generation is 0, and a Peers address requires the deployment generation",
+			ErrConfigRange)
 	}
 	return nil
 }
